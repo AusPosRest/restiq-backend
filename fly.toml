@@ -2,7 +2,7 @@
 # DATABASE_URL and WEB_ORIGIN are set with `fly secrets set`.
 # Reasoning behind these values: restiq-design/setup/03-prod-environment.md
 
-app = "restiq"
+app = "restiq-backend"
 primary_region = "syd"
 
 [build]
