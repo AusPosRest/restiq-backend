@@ -1,0 +1,36 @@
+name: CI
+
+# The gate on merging to main. Job name "check" is what the branch ruleset
+# requires - rename it and protection silently stops matching.
+# See restiq-design/setup/02-repos-and-cicd.md
+
+on:
+  pull_request:
+    branches: [main]
+  push:
+    branches: [main]
+
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version-file: .nvmrc
+          cache: npm
+
+      # ci, not install: exactly what package-lock.json says, nothing newer.
+      - run: npm ci
+
+      - name: Lint
+        run: npm run lint
+
+      - name: Typecheck
+        run: npm run typecheck
+
+      - name: Build
+        run: npm run build
+
+      # No test step yet - tests arrive with the first feature that needs them.
