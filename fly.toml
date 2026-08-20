@@ -1,34 +1,36 @@
-# Fly.io configuration for the restiq API. Committed, so nothing secret here -
-# DATABASE_URL and WEB_ORIGIN are set with `fly secrets set`.
-# Reasoning behind these values: restiq-design/setup/03-prod-environment.md
+# Fly.io configuration for the restiq API.
+#
+# Nothing secret lives here - this file is committed. DATABASE_URL and
+# WEB_ORIGIN are set with `fly secrets set`, which stores them encrypted and
+# injects them as environment variables at boot.
 
+# Must match the app that exists on Fly. Named at launch, and Fly has no easy
+# rename, so the file follows the app rather than the other way round.
 app = "restiq-backend"
 primary_region = "syd"
 
 [build]
 
-[env]
-  # Must equal internal_port below. NODE_ENV is set in the Dockerfile.
-  PORT = "8080"
-
 [http_service]
   internal_port = 8080
   force_https = true
 
-  # Scale to zero: stop when idle, start on the next request.
-  auto_stop_machines = "stop"
+  # Scale to zero. Fly stops the machine when it is idle and starts it again on
+  # the next request, which costs a 2-6 second wait on that first request.
+  # Set min_machines_running to 1 before the first real venue trades.
+  auto_stop_machines = true
   auto_start_machines = true
   min_machines_running = 0
 
   [[http_service.checks]]
-    # Machine liveness. /health, not /health/db - a Neon wobble must not restart the machine.
+    # Deliberately /health and not /health/db. This check decides whether the
+    # machine itself is alive; if Neon hiccups we want the API up and reporting
+    # 503 on one route, not Fly tearing the machine down and restarting it.
     path = "/health"
     interval = "30s"
     timeout = "5s"
     grace_period = "10s"
 
 [[vm]]
-  # Floor for shared-cpu-1x. Revisit if the machine starts restarting under load.
+  size = "shared-cpu-1x"
   memory = "256mb"
-  cpu_kind = "shared"
-  cpus = 1

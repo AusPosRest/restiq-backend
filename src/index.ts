@@ -7,7 +7,9 @@ import pg from 'pg'
 
 const app = express()
 
-const port = Number(process.env.PORT ?? 8180)
+// .env sets 8180 on the dev machine. This fallback matches Fly's internal_port,
+// so fly.toml needs no [env] block.
+const port = Number(process.env.PORT ?? 8080)
 
 // Required, not defaulted: a silent fallback would allow the wrong origin in prod.
 const webOrigin = process.env.WEB_ORIGIN
