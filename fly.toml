@@ -1,9 +1,10 @@
-# Fly.io configuration for the restiq API. Committed, so nothing secret here -
-# DATABASE_URL and WEB_ORIGIN are set with `fly secrets set`.
-# Reasoning behind these values: restiq-design/setup/03-prod-environment.md
+# fly.toml app configuration file generated for restiq-backend on 2026-08-20T15:21:09Z
+#
+# See https://fly.io/docs/reference/configuration/ for information about how to use this file.
+#
 
 app = "restiq-backend"
-primary_region = "syd"
+primary_region = 'syd'
 
 [build]
 
@@ -16,9 +17,10 @@ primary_region = "syd"
   force_https = true
 
   # Scale to zero: stop when idle, start on the next request.
-  auto_stop_machines = "stop"
+  auto_stop_machines = true
   auto_start_machines = true
   min_machines_running = 0
+  checks = [{ grace_period = '10s', interval = '30s', path = '/health', timeout = '5s' }]
 
   [[http_service.checks]]
     # Machine liveness. /health, not /health/db - a Neon wobble must not restart the machine.
@@ -28,7 +30,7 @@ primary_region = "syd"
     grace_period = "10s"
 
 [[vm]]
-  # Floor for shared-cpu-1x. Revisit if the machine starts restarting under load.
-  memory = "256mb"
-  cpu_kind = "shared"
+  memory = '256mb'
+  cpu_kind = 'shared'
   cpus = 1
+  memory_mb = 256
