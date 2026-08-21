@@ -4,6 +4,14 @@ The Restiq API. Express + TypeScript, on Fly.io in Sydney, with Neon Postgres.
 
 Setup and reasoning: the `restiq-design` repo, `setup/` folder.
 
+## Where it runs
+
+    dev    https://api.restiqdev.idelta.com.au    Caddy -> .40:8180
+    prod   https://api.restiq.idelta.com.au       Fly, syd
+
+Both become `api.restiq.com.au` when the real domain arrives. No code change -
+the address lives in an environment variable.
+
 ## Run it
 
     npm install
