@@ -41,3 +41,4 @@ Keys are listed in `.env.example`.
     fly deploy
 
 Use the CLI, not Fly's web launch UI.
+tetsings
