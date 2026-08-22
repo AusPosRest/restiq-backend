@@ -1,0 +1,11 @@
+generator client {
+  provider = "prisma-client"
+  output   = "../src/generated/prisma"
+}
+
+datasource db {
+  provider = "postgresql"
+}
+
+// No models yet - restiq has no design doc for its data model. Add tables
+// here once the domain is designed, not before.
