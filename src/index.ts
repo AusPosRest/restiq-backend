@@ -3,7 +3,7 @@
 import 'dotenv/config'
 import express from 'express'
 import cors from 'cors'
-import pg from 'pg'
+import { getPrisma } from './db/client.js'
 
 const app = express()
 
@@ -17,13 +17,6 @@ if (!webOrigin) {
   throw new Error('WEB_ORIGIN is not set - it must name the site allowed to call this API')
 }
 
-const databaseUrl = process.env.DATABASE_URL
-if (!databaseUrl) {
-  throw new Error('DATABASE_URL is not set')
-}
-
-const pool = new pg.Pool({ connectionString: databaseUrl })
-
 // credentials: the operator's session cookie will ride this same path.
 app.use(cors({ origin: webOrigin, credentials: true }))
 
@@ -33,8 +26,8 @@ app.get('/health', (_req, res) => {
 
 // 503 rather than a 200 carrying bad news - health checks read the status code.
 app.get('/health/db', (_req, res) => {
-  pool
-    .query('select 1')
+  getPrisma()
+    .$queryRaw`select 1`
     .then(() => {
       res.json({ status: 'ok', database: 'reachable' })
     })

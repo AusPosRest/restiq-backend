@@ -24,6 +24,13 @@ jobs:
       # ci, not install: exactly what package-lock.json says, nothing newer.
       - run: npm ci
 
+      # src/generated is gitignored - Prisma's client is build output, not
+      # source - so a fresh checkout has no client and lint/typecheck/build all
+      # fail on "Cannot find module '../generated/prisma/client.js'" without
+      # this. Needs no database: generate only reads prisma/schema.prisma.
+      - name: Generate Prisma client
+        run: npm run db:generate
+
       - name: Lint
         run: npm run lint
 

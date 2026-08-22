@@ -9,6 +9,17 @@
 app = "restiq-backend"
 primary_region = "syd"
 
+[deploy]
+  release_command = "npx prisma migrate deploy"
+
+  # Node + Prisma's CLI + its Rust schema-engine binary + a TLS handshake to
+  # Neon does not fit in the default 256mb - it starves and hangs with no
+  # error. performance-1x's real memory minimum is 2gb (512mb/1gb are both
+  # rejected at deploy time), so go straight there.
+  [deploy.release_command_vm]
+    size = "performance-1x"
+    memory = "2gb"
+
 [build]
 
 [http_service]
