@@ -2,6 +2,8 @@ import { Module } from '@nestjs/common'
 import { PlatformModule } from '../platform'
 import { AdminAuthController } from './auth.controller'
 import { AdminAuthService } from './auth.service'
+import { AdminBrandingController } from './branding/branding.controller'
+import { BrandingService } from './branding/branding.service'
 import { AdminChecklistController } from './checklist/checklist.controller'
 import { ChecklistService } from './checklist/checklist.service'
 import { AdminMenuAllergensController } from './menu/allergens.controller'
@@ -17,6 +19,8 @@ import { ModifierGroupsService } from './menu/modifier-groups.service'
 import { PricesService } from './menu/prices.service'
 import { AdminMenuImportController } from './menu-import/menu-import.controller'
 import { MenuImportService } from './menu-import/menu-import.service'
+import { AdminOutletsController } from './outlets/outlets.controller'
+import { OutletsService } from './outlets/outlets.service'
 
 @Module({
   imports: [PlatformModule],
@@ -29,6 +33,8 @@ import { MenuImportService } from './menu-import/menu-import.service'
     AdminMenuModifierGroupsController,
     AdminMenuAllergensController,
     AdminMenuCombosController,
+    AdminOutletsController,
+    AdminBrandingController,
   ],
   providers: [
     AdminAuthService,
@@ -40,6 +46,8 @@ import { MenuImportService } from './menu-import/menu-import.service'
     ModifierGroupsService,
     AllergensService,
     CombosService,
+    OutletsService,
+    BrandingService,
   ],
 })
 export class AdminModule {}

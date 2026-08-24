@@ -169,12 +169,75 @@ built here, story by story.
     channel; outlet specificity is checked before channel specificity).
     404 `no_current_price` if nothing is eligible yet.
 
-## Integration points for story 4+ (floor plan) and beyond
+## CAP-10 - Branding & capabilities
+
+- **Intent:** an owner sets receipt/UI branding tokens and toggles
+  per-outlet capabilities (QR ordering, kiosk, token queue, etc.) driven by
+  restaurant type - a toggle takes effect without any client redeploy;
+  branding tokens preview live before saving.
+- **Built:**
+  - `GET /admin/v1/outlets` (`src/admin/outlets/`) - lists the signed-in
+    tenant's outlets: `[{ id, name, address, type, timezone }]`, ordered by
+    `createdAt`, soft-deleted (`deletedAt`) outlets excluded. Reads
+    `outlets`, the table Platform Console's onboarding wizard (story 2 of
+    that pipeline) already creates - no new columns, this is the first
+    Tenant Admin read of that table. This is also the outlet-switcher
+    endpoint story 3's web half needs; there is no `city` field on the real
+    table (it has `address`, `type`, `timezone` instead), so the view
+    reflects the actual schema rather than the field names guessed at
+    kickoff.
+  - `GET /admin/v1/branding` / `PUT /admin/v1/branding`
+    (`src/admin/branding/`) - reads/writes the tenant's existing
+    `branding_tokens` JSON column (added when Platform Console's onboarding
+    wizard provisions a tenant, for guest-facing surfaces) rather than a new
+    table - Tenant Admin becomes a second reader/writer of the same flat
+    token map, not a competing store. Shape:
+    `{ primaryColor, secondaryColor, accentColor, surfaceColor, font,
+    cornerRadiusPx, logoUrl, receiptHeader, receiptFooter }`, all nullable
+    until saved. `PUT` **merges** the given fields into the stored JSON -
+    fields the caller omits keep their current value, so the settings form
+    (T10: color tokens, font, corner radius, logo, receipt header/footer)
+    can save one edited field without resending the whole set. Colors are
+    validated as hex (`#RRGGBB`); no logo *upload* endpoint exists yet - the
+    DTO takes a `logoUrl` string, matching every other design-token field;
+    wiring actual file upload (Cloudflare R2 per workspace standards) is
+    left to whichever story needs it.
+  - `GET /admin/v1/outlets/:outletId/capabilities` /
+    `PATCH /admin/v1/outlets/:outletId/capabilities/:key`
+    (`src/admin/outlets/`) - per-outlet feature switches. `GET` returns only
+    the keys with an explicit row (`[{ key, enabled }]`); an absent key means
+    "not yet toggled", left for the caller to render as its platform
+    default. `PATCH` body `{ enabled: boolean }` upserts one
+    `outlet_capabilities` row by `(outletId, key)` and returns it - the
+    write and the read-back are the same request/response, so "takes effect
+    without a redeploy" is trivially true (no cache, no async propagation).
+    `key` is a free-text path segment, not a closed enum - the capability
+    catalogue (QR ordering, kiosk, token queue, ...) is expected to grow and
+    nothing here needs to know its members.
+  - Both endpoint groups scope every query to `owner.tenantId` inside a
+    `SELECT set_config('app.tenant_id', ...)` transaction (AD-5), same
+    pattern as every other admin service - proven directly with a
+    cross-tenant listing test, not just asserted.
+  - Routine content edits (SPEC constraint) - no audit reason required for
+    branding or capability changes, unlike price changes/role changes/PIN
+    revokes.
+
+## Integration points for story 5+ (floor plan) and beyond
 
 - None of CAP-4's tables are read by another CAP yet. A future POS/QR
   price-setting flow must write through `item_prices` the same way (AD-11:
   "this rule is scoped to the entity, not the surface") - never add a second
   price-writing path.
+- CAP-10's `GET /admin/v1/outlets` is the outlet-switcher source for every
+  later outlet-scoped screen (floor plan, devices, staff) - call it instead
+  of re-deriving outlet lists from another table.
+- `TenantCapability` (`tenant_capabilities`, Platform Console) is a
+  tenant-wide switch set by the operator; `OutletCapability`
+  (`outlet_capabilities`, this story) is a distinct, outlet-scoped set owned
+  by Tenant Admin. They are intentionally two tables, not one with an
+  optional `outletId` - the two are set by different actors through
+  different consoles and answer different questions ("is this feature sold
+  to this tenant at all" vs. "is this feature turned on at this outlet").
 
 ## Data model
 
@@ -235,6 +298,15 @@ built here, story by story.
   UPDATE/DELETE under `app.tenant_id`) + `operator_read` (cross-tenant
   SELECT under `app.operator_context`) pair, same posture as every other
   tenant-owned table.
+- `outlets` (existing, Platform Console) - no schema change; CAP-10 is
+  purely a new reader.
+- `tenants.branding_tokens` (existing, Platform Console) - no schema
+  change; CAP-10 is a second reader/writer of the same JSON column.
+- `outlet_capabilities` (new) - `{ id, tenantId, outletId, key, enabled,
+  updatedAt }`, `@@unique([outletId, key])`, RLS `tenant_isolation` +
+  `operator_read`. Distinct from the pre-existing (and, before this story,
+  unused) `tenant_capabilities` table - see "Integration points" above for
+  why they stay two tables.
 
 ## Key decisions
 
@@ -276,3 +348,24 @@ built here, story by story.
   or silently couple the list response to a fixed channel/outlet the caller
   didn't choose. The web client calls the price endpoint per cell it needs
   to render.
+- `GET /admin/v1/outlets` returns `{ id, name, address, type, timezone }`,
+  not the `{ id, name, city }` shape assumed at kickoff - the real `outlets`
+  table (Platform Console's onboarding wizard) has no `city` column. This is
+  the endpoint's actual, load-bearing shape for the web outlet switcher.
+- Branding `PUT` merges rather than replaces, even though PUT conventionally
+  implies full replacement - the T10 form design (independent color/font/
+  corner-radius/logo/receipt fields, each with its own save affordance in
+  spirit) means a client saving one field must not be able to null out every
+  other token by omission. Documented here since it's a deliberate deviation
+  from strict PUT semantics.
+- Outlet capabilities live in a new `outlet_capabilities` table rather than
+  reusing `tenant_capabilities` - the latter has no `outletId` column and is
+  unique on `(tenantId, key)`, which cannot express "this key, this specific
+  outlet." Repurposing it would have meant a breaking shape change to an
+  existing (if currently unused) table; a new table is the smaller diff.
+- No capability-catalogue validation on `key` (no closed enum, no lookup
+  table) - the SPEC lists QR ordering/kiosk/token queue "etc." as examples,
+  not an exhaustive set, and restaurant-type-driven defaults aren't
+  specified. A future story that needs a fixed catalogue (e.g. to drive
+  which toggles the UI renders) can add one without touching this write
+  path.

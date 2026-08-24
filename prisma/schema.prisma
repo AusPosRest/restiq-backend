@@ -144,6 +144,7 @@ model Tenant {
   ownerInvites     OwnerInvite[]
   ownerUsers       OwnerUser[]
   capabilities     TenantCapability[]
+  outletCapabilities OutletCapability[]
   devices          Device[]
   enrolmentCodes   EnrolmentCode[]
   deadLetters      SyncDeadLetter[]
@@ -233,9 +234,30 @@ model Outlet {
   enrolmentCodes EnrolmentCode[]
   itemPrices          ItemPrice[]
   itemOutletOverrides ItemOutletOverride[]
+  capabilities        OutletCapability[]
 
   @@index([tenantId])
   @@map("outlets")
+}
+
+// CAP-10: per-outlet feature switches (QR ordering, kiosk, token queue, ...),
+// driven by restaurant type. Distinct from TenantCapability (tenant-wide,
+// operator-set from Platform Console) - this one is outlet-scoped and owner-
+// set from Tenant Admin. Absent row = disabled by default.
+model OutletCapability {
+  id        String   @id @default(uuid(7)) @db.Uuid
+  tenantId  String   @map("tenant_id") @db.Uuid
+  outletId  String   @map("outlet_id") @db.Uuid
+  key       String
+  enabled   Boolean
+  updatedAt DateTime @updatedAt @map("updated_at") @db.Timestamptz(6)
+
+  tenant Tenant @relation(fields: [tenantId], references: [id])
+  outlet Outlet @relation(fields: [outletId], references: [id])
+
+  @@unique([outletId, key])
+  @@index([tenantId])
+  @@map("outlet_capabilities")
 }
 
 model Role {
