@@ -102,10 +102,13 @@ model Tenant {
   contactPhone      String           @map("contact_phone")
   country           Country
   status            TenantStatus     @default(provisioning)
-  // Subscription business state is region-side per AD-9; story 5 normalizes
-  // it into per-outlet subscriptions.
+  // Subscription business state is region-side per AD-9; a later story
+  // normalizes it into per-outlet subscriptions.
   plan              SubscriptionPlan
   billingPeriod     BillingPeriod    @map("billing_period")
+  // Flat map of design-token overrides (logo URL, accent color, ...) applied
+  // to the tenant's guest-facing surfaces.
+  brandingTokens    Json             @default("{}") @map("branding_tokens")
   createdAt         DateTime         @default(now()) @map("created_at") @db.Timestamptz(6)
   updatedAt         DateTime         @updatedAt @map("updated_at") @db.Timestamptz(6)
   deletedAt         DateTime?        @map("deleted_at") @db.Timestamptz(6)
@@ -117,8 +120,29 @@ model Tenant {
   menuCategories   MenuCategory[]
   menuItems        MenuItem[]
   ownerInvites     OwnerInvite[]
+  capabilities     TenantCapability[]
 
+  // The directory list is served from these: filter columns plus the
+  // created_at ordering the default sort and cursor walk.
+  @@index([createdAt])
+  @@index([status])
+  @@index([country])
   @@map("tenants")
+}
+
+// Tenant-level feature switches operated from the console. Absent row = the
+// platform default for that key; a row records an explicit operator choice.
+model TenantCapability {
+  id        String   @id @default(uuid(7)) @db.Uuid
+  tenantId  String   @map("tenant_id") @db.Uuid
+  key       String
+  enabled   Boolean
+  updatedAt DateTime @updatedAt @map("updated_at") @db.Timestamptz(6)
+
+  tenant Tenant @relation(fields: [tenantId], references: [id])
+
+  @@unique([tenantId, key])
+  @@map("tenant_capabilities")
 }
 
 enum TaxRegistrationType {
@@ -177,6 +201,7 @@ model Outlet {
   tenant Tenant @relation(fields: [tenantId], references: [id])
   brand  Brand  @relation(fields: [brandId], references: [id])
 
+  @@index([tenantId])
   @@map("outlets")
 }
 
