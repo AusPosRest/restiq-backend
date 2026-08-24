@@ -31,12 +31,6 @@ export interface ProvisionResult {
   invite: { email: string; expiresAt: string }
 }
 
-export interface TenantListItem {
-  id: string
-  name: string
-  status: string
-}
-
 @Injectable()
 export class OpsTenantsService {
   constructor(
@@ -78,22 +72,6 @@ export class OpsTenantsService {
 
   async deleteDraft(operatorId: string): Promise<void> {
     await this.prisma.client.onboardingDraft.deleteMany({ where: { operatorId } })
-  }
-
-  // --- Reads: cross-tenant under explicit operator context (AD-5), never by
-  // disabling RLS. v1 reads the single home plane; fan-out arrives with the
-  // directory story.
-
-  async list(): Promise<TenantListItem[]> {
-    const plane = this.registry.planeFor(this.registry.homeRegion())
-    return plane.$transaction(async (tx) => {
-      await tx.$executeRaw`SELECT set_config('app.operator_context', 'operator', true)`
-      return tx.tenant.findMany({
-        where: { deletedAt: null },
-        select: { id: true, name: true, status: true },
-        orderBy: { createdAt: 'desc' },
-      })
-    })
   }
 
   // --- Final submit: ONE transaction creating everything (CAP-2). Any

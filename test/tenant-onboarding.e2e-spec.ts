@@ -47,6 +47,7 @@ async function wipe(prisma: PrismaClient): Promise<void> {
   await prisma.outlet.deleteMany()
   await prisma.brand.deleteMany()
   await prisma.ownerInvite.deleteMany()
+  await prisma.tenantCapability.deleteMany()
   await prisma.tenantTaxRegistration.deleteMany()
   await prisma.auditEvent.deleteMany()
   await prisma.tenant.deleteMany()
@@ -236,15 +237,13 @@ describe('/ops/v1/tenants onboarding (e2e)', () => {
   })
 
   describe('GET /ops/v1/tenants', () => {
-    it('lists provisioned tenants with id, name and status only', async () => {
+    it('lists provisioned tenants', async () => {
       const res = await authed(request(httpServer).get('/ops/v1/tenants'))
       expect(res.status).toBe(200)
       const tenants = (res.body as { tenants: Array<Record<string, unknown>> }).tenants
       expect(tenants.length).toBeGreaterThanOrEqual(2)
-      for (const tenant of tenants) {
-        expect(Object.keys(tenant).sort()).toEqual(['id', 'name', 'status'])
-      }
-      expect(tenants.some((t) => t.name === 'Spice Route Hospitality Pvt Ltd')).toBe(true)
+      const spiceRoute = tenants.find((t) => t.name === 'Spice Route Hospitality Pvt Ltd')
+      expect(spiceRoute).toMatchObject({ status: 'provisioning', country: 'IN', outletCount: 2 })
     })
   })
 })
