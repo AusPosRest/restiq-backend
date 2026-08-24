@@ -35,6 +35,8 @@ async function wipe(prisma: PrismaClient): Promise<void> {
   await prisma.syncDeadLetter.deleteMany()
   await prisma.device.deleteMany()
   await prisma.enrolmentCode.deleteMany()
+  await prisma.menuImportDraft.deleteMany()
+  await prisma.itemPrice.deleteMany()
   await prisma.menuItem.deleteMany()
   await prisma.menuCategory.deleteMany()
   await prisma.role.deleteMany()

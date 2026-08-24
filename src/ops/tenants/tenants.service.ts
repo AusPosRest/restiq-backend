@@ -12,10 +12,31 @@ const DEFAULT_PROVISION_REASON = 'Provisioned via console onboarding wizard'
 // Seeded so the owner lands in a working system (FR-2): the six cloneable
 // system roles (FR-13) and a minimal sample menu.
 const SYSTEM_ROLES = ['Owner', 'Manager', 'Cashier', 'Waiter', 'Kitchen', 'Accountant']
-const SAMPLE_MENU: ReadonlyArray<{ category: string; items: ReadonlyArray<{ name: string; priceMinor: bigint }> }> = [
-  { category: 'Starters', items: [{ name: 'Garden Salad', priceMinor: 19900n }, { name: 'Soup of the Day', priceMinor: 14900n }] },
-  { category: 'Mains', items: [{ name: 'House Curry', priceMinor: 32900n }, { name: 'Grilled Sandwich', priceMinor: 24900n }] },
-  { category: 'Beverages', items: [{ name: 'Fresh Lime Soda', priceMinor: 9900n }, { name: 'Filter Coffee', priceMinor: 7900n }] },
+const SAMPLE_MENU: ReadonlyArray<{
+  category: string
+  items: ReadonlyArray<{ name: string; shortName: string; priceMinor: bigint }>
+}> = [
+  {
+    category: 'Starters',
+    items: [
+      { name: 'Garden Salad', shortName: 'Garden Salad', priceMinor: 19900n },
+      { name: 'Soup of the Day', shortName: 'Soup', priceMinor: 14900n },
+    ],
+  },
+  {
+    category: 'Mains',
+    items: [
+      { name: 'House Curry', shortName: 'House Curry', priceMinor: 32900n },
+      { name: 'Grilled Sandwich', shortName: 'Grilled Sndwch', priceMinor: 24900n },
+    ],
+  },
+  {
+    category: 'Beverages',
+    items: [
+      { name: 'Fresh Lime Soda', shortName: 'Lime Soda', priceMinor: 9900n },
+      { name: 'Filter Coffee', shortName: 'Filter Coffee', priceMinor: 7900n },
+    ],
+  },
 ]
 
 const GSTIN_PATTERN = /^[0-9]{2}[A-Z]{5}[0-9]{4}[A-Z][1-9A-Z]Z[0-9A-Z]$/
@@ -142,10 +163,16 @@ export class OpsTenantsService {
         })
 
         for (const [index, { category, items }] of SAMPLE_MENU.entries()) {
-          const created = await tx.menuCategory.create({ data: { tenantId, name: category, sortOrder: index + 1 } })
-          await tx.menuItem.createMany({
-            data: items.map((item) => ({ tenantId, categoryId: created.id, name: item.name, priceMinor: item.priceMinor, currency })),
-          })
+          const createdCategory = await tx.menuCategory.create({ data: { tenantId, name: category, sortOrder: index + 1 } })
+          for (const item of items) {
+            const createdItem = await tx.menuItem.create({
+              data: { tenantId, categoryId: createdCategory.id, name: item.name, shortName: item.shortName },
+            })
+            // AD-11: price is insert-only from the first row onward, even for seed data.
+            await tx.itemPrice.create({
+              data: { tenantId, itemId: createdItem.id, priceMinor: item.priceMinor, currency },
+            })
+          }
         }
 
         const createdInvite = await tx.ownerInvite.create({
