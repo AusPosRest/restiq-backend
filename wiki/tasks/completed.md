@@ -17,3 +17,16 @@
   gained `short_name` (PRD FR-10) and lost its price columns. See
   [wiki/features/tenant-admin.md](../features/tenant-admin.md). Issue
   AusPosRest/restiq-backend#28.
+- **2026-08-24** - Tenant Admin story 3: menu management with versioned
+  pricing (CAP-4). Full CRUD under `/admin/v1/menu` for categories, items
+  (with variants, modifier groups, allergen tags nested), modifier groups,
+  allergens, and combos; `item_prices` (story 2) extended with
+  `variantId`/`outletId`/`channel`/`effectiveAt` dimensions and a
+  well-tested current-price resolution query (`menu/pricing.ts`); the 86
+  availability toggle and a per-outlet availability override; new tables
+  `item_variants`, `modifier_groups`, `modifiers`, `item_modifier_groups`,
+  `allergens`, `item_allergens`, `combos`, `combo_components`,
+  `item_outlet_overrides`. Price edits are audited (`menu.item.price_changed`,
+  reason required) per the SPEC's security-relevant list; routine content
+  CRUD is not. See [wiki/features/tenant-admin.md](../features/tenant-admin.md).
+  Issue AusPosRest/restiq-backend#30.

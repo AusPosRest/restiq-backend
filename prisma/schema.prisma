@@ -130,7 +130,16 @@ model Tenant {
   roles            Role[]
   menuCategories   MenuCategory[]
   menuItems        MenuItem[]
+  itemVariants     ItemVariant[]
   itemPrices       ItemPrice[]
+  modifierGroups   ModifierGroup[]
+  modifiers        Modifier[]
+  itemModifierGroups ItemModifierGroup[]
+  allergens        Allergen[]
+  itemAllergens    ItemAllergen[]
+  combos           Combo[]
+  comboComponents  ComboComponent[]
+  itemOutletOverrides ItemOutletOverride[]
   menuImportDrafts MenuImportDraft[]
   ownerInvites     OwnerInvite[]
   ownerUsers       OwnerUser[]
@@ -222,6 +231,8 @@ model Outlet {
   brand          Brand           @relation(fields: [brandId], references: [id])
   devices        Device[]
   enrolmentCodes EnrolmentCode[]
+  itemPrices          ItemPrice[]
+  itemOutletOverrides ItemOutletOverride[]
 
   @@index([tenantId])
   @@map("outlets")
@@ -247,6 +258,7 @@ model MenuCategory {
 
   tenant Tenant     @relation(fields: [tenantId], references: [id])
   items  MenuItem[]
+  combos Combo[]
 
   @@map("menu_categories")
 }
@@ -260,11 +272,19 @@ model MenuItem {
   name       String
   // Short label for kitchen order tickets (PRD FR-10).
   shortName  String   @map("short_name")
+  // The 86 toggle (CAP-4): tenant-wide, immediate, not versioned - price
+  // history is the only thing AD-11 requires append-only, not availability.
+  available  Boolean  @default(true)
   createdAt  DateTime @default(now()) @map("created_at") @db.Timestamptz(6)
 
-  tenant   Tenant       @relation(fields: [tenantId], references: [id])
-  category MenuCategory @relation(fields: [categoryId], references: [id])
-  prices   ItemPrice[]
+  tenant         Tenant               @relation(fields: [tenantId], references: [id])
+  category       MenuCategory         @relation(fields: [categoryId], references: [id])
+  variants       ItemVariant[]
+  prices         ItemPrice[]
+  modifierGroups ItemModifierGroup[]
+  allergens      ItemAllergen[]
+  comboComponents ComboComponent[]
+  outletOverrides ItemOutletOverride[]
 
   // No two items in the same category may share a name (also the natural
   // forced-failure anchor for the menu-import commit atomicity test).
@@ -272,22 +292,201 @@ model MenuItem {
   @@map("menu_items")
 }
 
-// AD-11: insert-only. A price change is a new row; nothing ever UPDATEs
-// price_minor. The current price for an item is its latest row by created_at.
+// CAP-4: e.g. Half/Full. A price row with a null variantId prices the item
+// itself; a price row with a variantId prices that specific variant - the two
+// never mix for the same item once variants exist (enforced at write time).
+model ItemVariant {
+  id        String   @id @default(uuid(7)) @db.Uuid
+  tenantId  String   @map("tenant_id") @db.Uuid
+  itemId    String   @map("item_id") @db.Uuid
+  name      String
+  sortOrder Int      @map("sort_order")
+  createdAt DateTime @default(now()) @map("created_at") @db.Timestamptz(6)
+
+  tenant Tenant      @relation(fields: [tenantId], references: [id])
+  item   MenuItem    @relation(fields: [itemId], references: [id])
+  prices ItemPrice[]
+
+  @@unique([itemId, name])
+  @@map("item_variants")
+}
+
+enum PriceChannel {
+  dine_in
+  takeaway
+  delivery
+  qr
+  aggregator
+}
+
+// AD-11: insert-only, extended by this story (story 2 created it) with the
+// dimensions CAP-4 needs. A price change is always a new row - nothing ever
+// UPDATEs price_minor. variantId/channel/outletId are each nullable and each
+// null means "unscoped on this dimension" (variant: prices the base item;
+// channel: applies to every channel; outlet: applies tenant-wide) - the
+// current-price read (menu/pricing.ts) picks the most specific match. See
+// menu/pricing.ts for the resolution query this shape exists to serve.
 model ItemPrice {
+  id          String        @id @default(uuid(7)) @db.Uuid
+  tenantId    String        @map("tenant_id") @db.Uuid
+  itemId      String        @map("item_id") @db.Uuid
+  variantId   String?       @map("variant_id") @db.Uuid
+  outletId    String?       @map("outlet_id") @db.Uuid
+  channel     PriceChannel?
+  // Money as bigint minor units (workspace convention).
+  priceMinor  BigInt        @map("price_minor")
+  currency    String        @db.Char(3)
+  // Null/past = immediate; future = scheduled. Defaults to "now" so an
+  // un-scheduled edit is immediately current without any special-casing in
+  // the resolution query.
+  effectiveAt DateTime      @default(now()) @map("effective_at") @db.Timestamptz(6)
+  createdAt   DateTime      @default(now()) @map("created_at") @db.Timestamptz(6)
+
+  tenant  Tenant       @relation(fields: [tenantId], references: [id])
+  item    MenuItem     @relation(fields: [itemId], references: [id])
+  variant ItemVariant? @relation(fields: [variantId], references: [id])
+  outlet  Outlet?      @relation(fields: [outletId], references: [id])
+
+  @@index([itemId, variantId, effectiveAt])
+  @@map("item_prices")
+}
+
+// CAP-4 modifier groups (e.g. "Spice Level", "Add-ons") - tenant-scoped and
+// reusable across items via item_modifier_groups. min/max are validated at
+// write time (0 <= min <= max) in menu/modifier-groups.service.ts.
+model ModifierGroup {
+  id            String   @id @default(uuid(7)) @db.Uuid
+  tenantId      String   @map("tenant_id") @db.Uuid
+  name          String
+  minSelections Int      @map("min_selections")
+  maxSelections Int      @map("max_selections")
+  createdAt     DateTime @default(now()) @map("created_at") @db.Timestamptz(6)
+
+  tenant    Tenant              @relation(fields: [tenantId], references: [id])
+  modifiers Modifier[]
+  items     ItemModifierGroup[]
+
+  @@unique([tenantId, name])
+  @@map("modifier_groups")
+}
+
+// A modifier's price is a flat add-on, not versioned history (unlike item
+// prices) - CAP-4's AD-11 obligation binds item_prices, not this table.
+model Modifier {
+  id         String @id @default(uuid(7)) @db.Uuid
+  tenantId   String @map("tenant_id") @db.Uuid
+  groupId    String @map("group_id") @db.Uuid
+  name       String
+  priceMinor BigInt @default(0) @map("price_minor")
+  sortOrder  Int    @map("sort_order")
+
+  tenant Tenant        @relation(fields: [tenantId], references: [id])
+  group  ModifierGroup @relation(fields: [groupId], references: [id])
+
+  @@unique([groupId, name])
+  @@map("modifiers")
+}
+
+model ItemModifierGroup {
+  id        String @id @default(uuid(7)) @db.Uuid
+  tenantId  String @map("tenant_id") @db.Uuid
+  itemId    String @map("item_id") @db.Uuid
+  groupId   String @map("group_id") @db.Uuid
+  sortOrder Int    @map("sort_order")
+
+  tenant Tenant        @relation(fields: [tenantId], references: [id])
+  item   MenuItem      @relation(fields: [itemId], references: [id])
+  group  ModifierGroup @relation(fields: [groupId], references: [id])
+
+  @@unique([itemId, groupId])
+  @@map("item_modifier_groups")
+}
+
+// CAP-4 allergen/dietary tags - moved here from CAP-3 menu import per the
+// spec amendment (unreliable from OCR/CSV extraction). Tenant-scoped catalog
+// + a join table so the same tag applies to many items.
+model Allergen {
+  id        String   @id @default(uuid(7)) @db.Uuid
+  tenantId  String   @map("tenant_id") @db.Uuid
+  name      String
+  createdAt DateTime @default(now()) @map("created_at") @db.Timestamptz(6)
+
+  tenant Tenant         @relation(fields: [tenantId], references: [id])
+  items  ItemAllergen[]
+
+  @@unique([tenantId, name])
+  @@map("allergens")
+}
+
+model ItemAllergen {
+  id         String @id @default(uuid(7)) @db.Uuid
+  tenantId   String @map("tenant_id") @db.Uuid
+  itemId     String @map("item_id") @db.Uuid
+  allergenId String @map("allergen_id") @db.Uuid
+
+  tenant   Tenant   @relation(fields: [tenantId], references: [id])
+  item     MenuItem @relation(fields: [itemId], references: [id])
+  allergen Allergen @relation(fields: [allergenId], references: [id])
+
+  @@unique([itemId, allergenId])
+  @@map("item_allergens")
+}
+
+// CAP-4 combos - a lightweight bundle of existing items at a flat bundle
+// price. Not in scope for versioned/scheduled pricing (only item_prices
+// carries that AD-11 obligation); a combo price is edited in place like any
+// other routine content field.
+model Combo {
   id         String   @id @default(uuid(7)) @db.Uuid
   tenantId   String   @map("tenant_id") @db.Uuid
-  itemId     String   @map("item_id") @db.Uuid
-  // Money as bigint minor units (workspace convention).
+  categoryId String?  @map("category_id") @db.Uuid
+  name       String
   priceMinor BigInt   @map("price_minor")
   currency   String   @db.Char(3)
   createdAt  DateTime @default(now()) @map("created_at") @db.Timestamptz(6)
 
+  tenant     Tenant           @relation(fields: [tenantId], references: [id])
+  category   MenuCategory?    @relation(fields: [categoryId], references: [id])
+  components ComboComponent[]
+
+  @@unique([tenantId, name])
+  @@map("combos")
+}
+
+model ComboComponent {
+  id       String @id @default(uuid(7)) @db.Uuid
+  tenantId String @map("tenant_id") @db.Uuid
+  comboId  String @map("combo_id") @db.Uuid
+  itemId   String @map("item_id") @db.Uuid
+  quantity Int    @default(1)
+
   tenant Tenant   @relation(fields: [tenantId], references: [id])
+  combo  Combo    @relation(fields: [comboId], references: [id])
   item   MenuItem @relation(fields: [itemId], references: [id])
 
-  @@index([itemId, createdAt])
-  @@map("item_prices")
+  @@unique([comboId, itemId])
+  @@map("combo_components")
+}
+
+// CAP-4 per-outlet availability override - price's per-outlet dimension
+// already lives on item_prices.outletId (one insert-only price path, AD-11),
+// so this table carries only availability, which is mutable by design (86 is
+// immediate, not versioned). No row = the item's tenant-wide `available`
+// applies at that outlet.
+model ItemOutletOverride {
+  id        String   @id @default(uuid(7)) @db.Uuid
+  tenantId  String   @map("tenant_id") @db.Uuid
+  itemId    String   @map("item_id") @db.Uuid
+  outletId  String   @map("outlet_id") @db.Uuid
+  available Boolean
+  updatedAt DateTime @updatedAt @map("updated_at") @db.Timestamptz(6)
+
+  tenant Tenant   @relation(fields: [tenantId], references: [id])
+  item   MenuItem @relation(fields: [itemId], references: [id])
+  outlet Outlet   @relation(fields: [outletId], references: [id])
+
+  @@unique([itemId, outletId])
+  @@map("item_outlet_overrides")
 }
 
 enum MenuImportStatus {
