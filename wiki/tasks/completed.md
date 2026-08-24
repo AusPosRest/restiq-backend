@@ -66,3 +66,17 @@
   [wiki/features/tenant-admin.md](../features/tenant-admin.md) and
   [wiki/features/platform-console.md](../features/platform-console.md).
   Issue AusPosRest/restiq-backend#36.
+- **2026-08-24** - Tenant Admin story 7: staff & roles (CAP-7). New
+  `src/admin/staff/` module: `GET /admin/v1/roles` (the six seeded system
+  roles), `GET`/`POST /admin/v1/staff`, `PATCH /admin/v1/staff/:id`,
+  `POST /admin/v1/staff/:id/pin` (issues a random 4-digit PIN, argon2-hashed,
+  returned once), `POST /admin/v1/staff/:id/revoke-pin` (`{ reason }`
+  required, 400 without one, audited per AD-6, 409 if there's no active PIN
+  to revoke). New `staff_users` table, FK'd to the existing `roles` table -
+  `roleId` is checked against the tenant's own seeded `isSystem` roles
+  before every create/update (400 otherwise), so no free-text role is ever
+  assignable. Staff creation/editing is a routine content edit, not audited;
+  only PIN revoke carries a reason and an `audit_events` row. The go-live
+  checklist's `staff` step flips on the tenant's first staff member. See
+  [wiki/features/tenant-admin.md](../features/tenant-admin.md). Issue
+  AusPosRest/restiq-backend#38.

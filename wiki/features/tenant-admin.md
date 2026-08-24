@@ -56,7 +56,9 @@ built here, story by story.
   - `devices` - **done (CAP-6)** - the shared `DevicesService.enroll()`
     (`src/ops/devices/devices.service.ts`) flips it directly, in the same
     transaction as the device row, on the tenant's first device.
-  - `staff` - CAP-7, once at least one non-owner user is invited.
+  - `staff` - **done (CAP-7)** - `StaffService.create` flips it directly, in
+    the same transaction as the staff row, on the tenant's first staff
+    member.
 
 ## CAP-3 - AI-assisted menu import
 
@@ -344,6 +346,54 @@ built here, story by story.
   `/admin` has. Flagged for a follow-up if a future story wants to close
   that gap.
 
+## CAP-7 - Staff & roles
+
+- **Intent:** an owner manages POS-facing staff, assigns each one of the six
+  seeded system roles, and issues or revokes POS PINs - PIN revocation takes
+  effect for new sign-ins immediately, and no free-text role is ever
+  assignable.
+- **Built** (`src/admin/staff/`):
+  - `GET /admin/v1/roles` -> `[{ id, name, isSystem }]` for the six roles
+    Platform Console's onboarding wizard seeds per tenant on provisioning
+    (`SYSTEM_ROLES` in `src/ops/tenants/tenants.service.ts`: Owner, Manager,
+    Cashier, Waiter, Kitchen, Accountant). Read-only - v1 has no role-write
+    route, per the SPEC's non-goal on free-text/custom roles.
+  - `GET /admin/v1/staff` -> `{ staff: StaffView[] }`, scoped to the caller's
+    own tenant.
+  - `POST /admin/v1/staff` -> `{ name, email?, roleId }` (201). `roleId` is
+    checked against `roles` for `{ tenantId: owner.tenantId, isSystem: true
+    }` before the row is created - anything else (a random uuid, another
+    tenant's role id) is 400 `validation_failed`. The FK on `staff_users.role_id`
+    is defense in depth under that same-transaction check, not the
+    enforcement itself.
+  - `PATCH /admin/v1/staff/:id` -> `{ name?, roleId? }`, same seeded-role
+    check when `roleId` is supplied. 404 if the id doesn't belong to the
+    caller's tenant.
+  - `POST /admin/v1/staff/:id/pin` -> `{ pin }` (201). Generates a random
+    4-digit PIN (`node:crypto` `randomInt`), stores only its argon2 hash
+    (`pin_hash`), sets `pin_issued_at`, clears `pin_revoked_at` - re-issuing
+    always supersedes any prior PIN, revoked or not. The raw PIN is returned
+    exactly once, never persisted or logged, same posture as an enrolment
+    code.
+  - `POST /admin/v1/staff/:id/revoke-pin` -> `{ reason }` -> updated
+    `StaffView` (200). `reason` is required (400 without one); revocation
+    sets `pin_revoked_at` and writes an `audit_events` row
+    (`staff.pin_revoked`, actor + reason) in the same transaction, per AD-6
+    - PIN revoke is destructive and security-relevant. 409 if the staff
+    member has no PIN, or the PIN is already revoked (same pattern as device
+    revoke: revocation never deletes, and re-revoking is a conflict, not a
+    silent no-op).
+  - **Checklist integration:** see CAP-2 above.
+  - **Cross-tenant isolation:** every staff lookup filters by `id` then
+    checks `tenantId === owner.tenantId` before touching the row (404
+    otherwise) - proven directly in `test/staff-roles.e2e-spec.ts`, not just
+    the RLS layer.
+- **PIN authentication is out of scope for this story** - no POS PIN-login
+  surface exists yet to test against. `pin_revoked_at` is the field any
+  future PIN-login path must check (not just `pin_hash` equality) for a
+  revoked PIN to actually stop authenticating; the e2e suite asserts the DB
+  state and the argon2 hash directly instead.
+
 ## Integration points for story 6+ and beyond
 
 - None of CAP-4's tables are read by another CAP yet. A future POS/QR
@@ -446,6 +496,14 @@ built here, story by story.
 - `devices` / `enrolment_codes` (existing, Platform Console CAP-4, unchanged
   schema) - CAP-6 adds no columns; it's a second reader/writer of the same
   tables through the same service (AD-12).
+- `staff_users` (new, CAP-7) - `{ id, tenantId, roleId, name, email?,
+  pinHash?, pinIssuedAt?, pinRevokedAt?, createdAt, updatedAt }`, RLS
+  `tenant_isolation` + `operator_read`. Distinct from `owner_users` (the
+  admin console principal) the same way `OperatorUser`/`OwnerUser` are
+  already kept apart - staff sign into the POS with a PIN, never the admin
+  console. `roleId` is a required FK to `roles`, never a string column - the
+  FK plus the service-level seeded-role check are what make "no free-text
+  roles" a hard invariant, not just a UI restriction.
 
 ## Key decisions
 
@@ -525,3 +583,26 @@ built here, story by story.
 - CAP-5 has no `DELETE /floors` and `PATCH /tables/:tableId` cannot move a
   table across floors - neither is in the designed screen or the SPEC text;
   added only if a later story needs them.
+- CAP-7's `PATCH /staff/:id` (including a role reassignment) is treated as a
+  routine content edit, not audited - only `revoke-pin` requires a reason
+  and writes an `audit_events` row. This is a judgment call: the SPEC's
+  Constraints section lists "role change" in the same parenthetical as PIN
+  revoke and price change as security-relevant examples, which could be
+  read to mean role *reassignment* itself needs an audited reason too. The
+  codebase's actual precedent (CAP-4's price-change-only audit, CAP-5/CAP-10
+  writing no audit rows at all) reads that parenthetical as illustrative
+  examples across three capabilities rather than a literal per-field list,
+  and staff creation/editing has no closer analogue than "adding a menu
+  category" (explicitly named routine in the same sentence) - but flagged
+  here for product review if the stricter reading was intended.
+- CAP-7 does not model outlet-scoped staff access (no `outletId` on
+  `staff_users`, no per-outlet role assignment) despite the SPEC's CAP-7
+  intent line mentioning "outlet-scoped roles" - `roles` itself is
+  tenant-wide, not outlet-scoped, and no outlet-access data model exists
+  anywhere in this codebase to extend. The agreed backend contract for this
+  story (`POST/PATCH /staff` with a single `roleId`, no outlet list) doesn't
+  carry one either. Flagged as a likely follow-up story, not built here.
+- A staff PIN is a random 4-digit numeric code (matches the 4-dot indicator
+  in the T7 design render), hashed with argon2 - the same hashing library
+  `owner_users.password_hash` already uses, since no PIN-specific hashing
+  convention exists yet anywhere in the codebase.
