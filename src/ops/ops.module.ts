@@ -5,6 +5,8 @@ import { OpsAuthService } from './auth.service'
 import { OpsDashboardController } from './dashboard.controller'
 import { OpsDevicesController } from './devices/devices.controller'
 import { DevicesService } from './devices/devices.service'
+import { OpsDlqController } from './dlq/dlq.controller'
+import { DlqService } from './dlq/dlq.service'
 import { OpsSubscriptionsController } from './subscriptions/subscriptions.controller'
 import { SubscriptionsService } from './subscriptions/subscriptions.service'
 import { ALERT_CHANNEL, LogAlertChannel } from './sync-health/alert-channel'
@@ -23,6 +25,7 @@ import { OpsTenantsService } from './tenants/tenants.service'
     OpsDevicesController,
     OpsSubscriptionsController,
     OpsSyncHealthController,
+    OpsDlqController,
   ],
   providers: [
     OpsAuthService,
@@ -31,6 +34,7 @@ import { OpsTenantsService } from './tenants/tenants.service'
     DevicesService,
     SubscriptionsService,
     SyncHealthService,
+    DlqService,
     { provide: ALERT_CHANNEL, useClass: LogAlertChannel },
   ],
 })
