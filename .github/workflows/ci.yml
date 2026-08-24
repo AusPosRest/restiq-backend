@@ -1,43 +1,71 @@
 name: CI
 
-# The gate on merging to main. Job name "check" is what the branch ruleset
+# The gate on merging. Job name "check" is what the branch ruleset
 # requires - rename it and protection silently stops matching.
 # See restiq-design/setup/02-repos-and-cicd.md
 
 on:
   pull_request:
-    branches: [main]
+    branches: [main, dev]
   push:
-    branches: [main]
+    branches: [main, dev]
 
 jobs:
   check:
     runs-on: ubuntu-latest
+
+    services:
+      postgres:
+        image: postgres:18
+        env:
+          POSTGRES_USER: restiq
+          POSTGRES_PASSWORD: restiq
+          POSTGRES_DB: restiq_test
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U restiq"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 10
+
+    env:
+      TEST_DATABASE_URL: postgresql://restiq:restiq@localhost:5432/restiq_test
+      OPS_JWT_SECRET: ci-only-ops-secret
+
     steps:
       - uses: actions/checkout@v4
+
+      - uses: pnpm/action-setup@v4
+        with:
+          version: 10
 
       - uses: actions/setup-node@v4
         with:
           node-version-file: .nvmrc
-          cache: npm
+          cache: pnpm
 
-      # ci, not install: exactly what package-lock.json says, nothing newer.
-      - run: npm ci
+      # --frozen-lockfile: exactly what pnpm-lock.yaml says, nothing newer.
+      - run: pnpm install --frozen-lockfile
 
       # src/generated is gitignored - Prisma's client is build output, not
       # source - so a fresh checkout has no client and lint/typecheck/build all
-      # fail on "Cannot find module '../generated/prisma/client.js'" without
+      # fail on "Cannot find module '../generated/prisma/client'" without
       # this. Needs no database: generate only reads prisma/schema.prisma.
       - name: Generate Prisma client
-        run: npm run db:generate
+        run: pnpm run db:generate
 
       - name: Lint
-        run: npm run lint
+        run: pnpm run lint
 
       - name: Typecheck
-        run: npm run typecheck
+        run: pnpm run typecheck
+
+      - name: Unit tests
+        run: pnpm run test
+
+      - name: e2e tests
+        run: pnpm run test:e2e
 
       - name: Build
-        run: npm run build
-
-      # No test step yet - tests arrive with the first feature that needs them.
+        run: pnpm run build
