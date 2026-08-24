@@ -155,6 +155,7 @@ model Tenant {
   diningTables     DiningTable[]
   stations         Station[]
   printers         Printer[]
+  staffUsers       StaffUser[]
 
   // The directory list is served from these: filter columns plus the
   // created_at ordering the default sort and cursor walk.
@@ -273,7 +274,8 @@ model Role {
   name     String
   isSystem Boolean @default(false) @map("is_system")
 
-  tenant Tenant @relation(fields: [tenantId], references: [id])
+  tenant     Tenant      @relation(fields: [tenantId], references: [id])
+  staffUsers StaffUser[]
 
   @@unique([tenantId, name])
   @@map("roles")
@@ -603,6 +605,35 @@ model ChecklistProgress {
   tenant Tenant @relation(fields: [tenantId], references: [id])
 
   @@map("checklist_progress")
+}
+
+// CAP-7 staff & roles: a POS-facing user, distinct from OwnerUser (the admin
+// console principal) the same way OperatorUser/OwnerUser are already kept
+// apart - staff sign into the POS with a PIN, never the admin console. Role
+// is always one of the six system roles Platform Console seeds per tenant
+// (tenants.service.ts SYSTEM_ROLES) - no free-text roles in v1, so roleId is
+// a required FK rather than a string column, and the FK itself is the
+// enforcement that a staff member can only ever hold a role that exists.
+// Only the PIN's argon2 hash is stored (never the raw PIN, same posture as
+// owner_users.password_hash); pinRevokedAt marks a PIN inactive without
+// erasing the issuance history.
+model StaffUser {
+  id           String    @id @default(uuid(7)) @db.Uuid
+  tenantId     String    @map("tenant_id") @db.Uuid
+  roleId       String    @map("role_id") @db.Uuid
+  name         String
+  email        String?
+  pinHash      String?   @map("pin_hash")
+  pinIssuedAt  DateTime? @map("pin_issued_at") @db.Timestamptz(6)
+  pinRevokedAt DateTime? @map("pin_revoked_at") @db.Timestamptz(6)
+  createdAt    DateTime  @default(now()) @map("created_at") @db.Timestamptz(6)
+  updatedAt    DateTime  @updatedAt @map("updated_at") @db.Timestamptz(6)
+
+  tenant Tenant @relation(fields: [tenantId], references: [id])
+  role   Role   @relation(fields: [roleId], references: [id])
+
+  @@index([tenantId])
+  @@map("staff_users")
 }
 
 // ---------------------------------------------------------------------------

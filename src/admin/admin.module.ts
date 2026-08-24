@@ -26,6 +26,9 @@ import { AdminMenuImportController } from './menu-import/menu-import.controller'
 import { MenuImportService } from './menu-import/menu-import.service'
 import { AdminOutletsController } from './outlets/outlets.controller'
 import { OutletsService } from './outlets/outlets.service'
+import { AdminRolesController } from './staff/roles.controller'
+import { AdminStaffController } from './staff/staff.controller'
+import { StaffService } from './staff/staff.service'
 
 @Module({
   imports: [PlatformModule, OpsModule],
@@ -42,6 +45,8 @@ import { OutletsService } from './outlets/outlets.service'
     AdminBrandingController,
     AdminFloorPlanController,
     AdminDevicesController,
+    AdminStaffController,
+    AdminRolesController,
   ],
   providers: [
     AdminAuthService,
@@ -57,6 +62,7 @@ import { OutletsService } from './outlets/outlets.service'
     BrandingService,
     FloorPlanService,
     AdminDevicesService,
+    StaffService,
   ],
 })
 export class AdminModule {}
