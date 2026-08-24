@@ -67,6 +67,17 @@ model OnboardingDraft {
   @@map("onboarding_drafts")
 }
 
+// AD-7: the idempotent replay ledger. Lives in the control plane (no
+// tenant_id) - a client op_id lands here once, and a replay of an applied op
+// is a ledger hit, never a second effect. Story 7 (DLQ replay) is its main
+// consumer; created now because AD-7 binds CAP-4 too.
+model AppliedOp {
+  opId      String   @id @map("op_id") @db.Uuid
+  appliedAt DateTime @default(now()) @map("applied_at") @db.Timestamptz(6)
+
+  @@map("applied_ops")
+}
+
 // ---------------------------------------------------------------------------
 // Region-plane tables (v1: the single Mumbai plane shares this database).
 // Every tenant-owned table carries tenant_id with forced RLS (AD-5) - the
@@ -121,6 +132,11 @@ model Tenant {
   menuItems        MenuItem[]
   ownerInvites     OwnerInvite[]
   capabilities     TenantCapability[]
+  devices          Device[]
+  enrolmentCodes   EnrolmentCode[]
+  deadLetters      SyncDeadLetter[]
+  subscription     Subscription?
+  invoices         Invoice[]
 
   // The directory list is served from these: filter columns plus the
   // created_at ordering the default sort and cursor walk.
@@ -200,6 +216,8 @@ model Outlet {
 
   tenant Tenant @relation(fields: [tenantId], references: [id])
   brand  Brand  @relation(fields: [brandId], references: [id])
+  devices        Device[]
+  enrolmentCodes EnrolmentCode[]
 
   @@index([tenantId])
   @@map("outlets")
@@ -275,4 +293,137 @@ model AuditEvent {
   recordedAt DateTime @default(now()) @map("recorded_at") @db.Timestamptz(6)
 
   @@map("audit_events")
+}
+
+// ---------------------------------------------------------------------------
+// CAP-4 device fleet and enrolment (AD-6, AD-7).
+// ---------------------------------------------------------------------------
+
+enum DeviceType {
+  pos
+  kds
+  kiosk
+  cds
+}
+
+enum DeviceRole {
+  terminal
+  hub
+}
+
+enum DeviceStatus {
+  active
+  revoked
+}
+
+model Device {
+  id                     String       @id @default(uuid(7)) @db.Uuid
+  tenantId               String       @map("tenant_id") @db.Uuid
+  outletId               String?      @map("outlet_id") @db.Uuid
+  label                  String
+  type                   DeviceType
+  role                   DeviceRole   @default(terminal)
+  status                 DeviceStatus @default(active)
+  hardwareKeyFingerprint String       @map("hardware_key_fingerprint")
+  enrolledAt             DateTime     @map("enrolled_at") @db.Timestamptz(6)
+  revokedAt              DateTime?    @map("revoked_at") @db.Timestamptz(6)
+
+  tenant Tenant  @relation(fields: [tenantId], references: [id])
+  outlet Outlet? @relation(fields: [outletId], references: [id])
+  deadLetters SyncDeadLetter[]
+
+  @@index([tenantId])
+  @@index([outletId])
+  @@map("devices")
+}
+
+// A one-time enrolment ticket (CAP-4): 15-minute TTL, consumed exactly once.
+// Only the hash is stored - the raw code is returned once, at generation.
+model EnrolmentCode {
+  id         String     @id @default(uuid(7)) @db.Uuid
+  tenantId   String     @map("tenant_id") @db.Uuid
+  outletId   String     @map("outlet_id") @db.Uuid
+  codeHash   String     @unique @map("code_hash")
+  deviceType DeviceType @map("device_type")
+  expiresAt  DateTime   @map("expires_at") @db.Timestamptz(6)
+  usedAt     DateTime?  @map("used_at") @db.Timestamptz(6)
+  createdAt  DateTime   @default(now()) @map("created_at") @db.Timestamptz(6)
+
+  tenant Tenant @relation(fields: [tenantId], references: [id])
+  outlet Outlet @relation(fields: [outletId], references: [id])
+
+  @@index([tenantId])
+  @@map("enrolment_codes")
+}
+
+// AD-7's never-drop rejection sink - the single table CAP-4 and (later) CAP-7
+// both consume. No payload bodies (NFR-15): payloadMeta is metadata only.
+model SyncDeadLetter {
+  id           String    @id @default(uuid(7)) @db.Uuid
+  tenantId     String    @map("tenant_id") @db.Uuid
+  deviceId     String    @map("device_id") @db.Uuid
+  opId         String    @map("op_id") @db.Uuid
+  reasonCode   String    @map("reason_code")
+  reasonText   String    @map("reason_text")
+  payloadMeta  Json      @default("{}") @map("payload_meta")
+  createdAt    DateTime  @default(now()) @map("created_at") @db.Timestamptz(6)
+  resolvedAt   DateTime? @map("resolved_at") @db.Timestamptz(6)
+
+  tenant Tenant @relation(fields: [tenantId], references: [id])
+  device Device @relation(fields: [deviceId], references: [id])
+
+  @@index([tenantId])
+  @@index([deviceId])
+  @@map("sync_dead_letters")
+}
+
+// ---------------------------------------------------------------------------
+// CAP-5 subscription operations (AD-6, AD-9). Plan and billing period stay on
+// Tenant (already there); this table adds the state a subscription actually
+// transitions through. AD-9: suspension lives here, in the region plane -
+// never duplicated into the control-plane registry.
+// ---------------------------------------------------------------------------
+
+enum SubscriptionStatus {
+  active
+  arrears
+  suspended
+}
+
+model Subscription {
+  id                 String             @id @default(uuid(7)) @db.Uuid
+  tenantId           String             @unique @map("tenant_id") @db.Uuid
+  status             SubscriptionStatus @default(active)
+  currentPeriodStart DateTime           @map("current_period_start") @db.Timestamptz(6)
+  currentPeriodEnd   DateTime           @map("current_period_end") @db.Timestamptz(6)
+  suspendedAt        DateTime?          @map("suspended_at") @db.Timestamptz(6)
+  createdAt          DateTime           @default(now()) @map("created_at") @db.Timestamptz(6)
+  updatedAt          DateTime           @updatedAt @map("updated_at") @db.Timestamptz(6)
+
+  tenant   Tenant    @relation(fields: [tenantId], references: [id])
+  invoices Invoice[]
+
+  @@map("subscriptions")
+}
+
+enum InvoiceStatus {
+  paid
+  pending
+  overdue
+}
+
+model Invoice {
+  id             String        @id @default(uuid(7)) @db.Uuid
+  tenantId       String        @map("tenant_id") @db.Uuid
+  subscriptionId String        @map("subscription_id") @db.Uuid
+  period         String
+  amountMinor    BigInt        @map("amount_minor_units")
+  status         InvoiceStatus @default(pending)
+  createdAt      DateTime      @default(now()) @map("created_at") @db.Timestamptz(6)
+
+  tenant       Tenant       @relation(fields: [tenantId], references: [id])
+  subscription Subscription @relation(fields: [subscriptionId], references: [id])
+
+  @@index([tenantId])
+  @@map("invoices")
 }
