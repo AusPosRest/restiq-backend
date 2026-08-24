@@ -36,3 +36,218 @@ model ControlPlaneAuditEvent {
 
   @@map("control_plane_audit_events")
 }
+
+// The registry owns existence, not state (AD-9): tenant id, region pointer,
+// lifecycle - nothing else. Business state lives in the region tenant row.
+model TenantRegistryEntry {
+  tenantId  String          @id @map("tenant_id") @db.Uuid
+  region    String
+  lifecycle TenantLifecycle
+  createdAt DateTime        @default(now()) @map("created_at") @db.Timestamptz(6)
+  updatedAt DateTime        @updatedAt @map("updated_at") @db.Timestamptz(6)
+
+  @@map("tenant_registry")
+}
+
+enum TenantLifecycle {
+  provisioning
+  active
+  deleted
+}
+
+// An operator's in-flight onboarding wizard. A draft is not a tenant: it is
+// control-plane working state, one per operator, deleted on successful submit.
+model OnboardingDraft {
+  id         String   @id @default(uuid(7)) @db.Uuid
+  operatorId String   @unique @map("operator_id") @db.Uuid
+  steps      Json
+  createdAt  DateTime @default(now()) @map("created_at") @db.Timestamptz(6)
+  updatedAt  DateTime @updatedAt @map("updated_at") @db.Timestamptz(6)
+
+  @@map("onboarding_drafts")
+}
+
+// ---------------------------------------------------------------------------
+// Region-plane tables (v1: the single Mumbai plane shares this database).
+// Every tenant-owned table carries tenant_id with forced RLS (AD-5) - the
+// policies live in the migration SQL. `tenants.id` IS the tenant_id.
+// ---------------------------------------------------------------------------
+
+enum TenantStatus {
+  provisioning
+  active
+}
+
+enum Country {
+  IN
+  AU
+}
+
+enum SubscriptionPlan {
+  standard
+  enterprise
+}
+
+enum BillingPeriod {
+  monthly
+  annual
+}
+
+model Tenant {
+  id                String           @id @db.Uuid
+  name              String
+  registeredAddress String           @map("registered_address")
+  contactName       String           @map("contact_name")
+  contactEmail      String           @map("contact_email")
+  contactPhone      String           @map("contact_phone")
+  country           Country
+  status            TenantStatus     @default(provisioning)
+  // Subscription business state is region-side per AD-9; story 5 normalizes
+  // it into per-outlet subscriptions.
+  plan              SubscriptionPlan
+  billingPeriod     BillingPeriod    @map("billing_period")
+  createdAt         DateTime         @default(now()) @map("created_at") @db.Timestamptz(6)
+  updatedAt         DateTime         @updatedAt @map("updated_at") @db.Timestamptz(6)
+  deletedAt         DateTime?        @map("deleted_at") @db.Timestamptz(6)
+
+  taxRegistrations TenantTaxRegistration[]
+  brands           Brand[]
+  outlets          Outlet[]
+  roles            Role[]
+  menuCategories   MenuCategory[]
+  menuItems        MenuItem[]
+  ownerInvites     OwnerInvite[]
+
+  @@map("tenants")
+}
+
+enum TaxRegistrationType {
+  gstin
+  abn
+}
+
+model TenantTaxRegistration {
+  id                 String              @id @default(uuid(7)) @db.Uuid
+  tenantId           String              @map("tenant_id") @db.Uuid
+  registrationType   TaxRegistrationType @map("registration_type")
+  // One legal entity, one tenant per region - also the forced-failure anchor
+  // for the atomicity tests.
+  registrationNumber String              @unique @map("registration_number")
+  legalEntityName    String              @map("legal_entity_name")
+  taxProfile         String              @map("tax_profile")
+  fssaiLicense       String?             @map("fssai_license")
+  compositionScheme  Boolean             @default(false) @map("composition_scheme")
+  createdAt          DateTime            @default(now()) @map("created_at") @db.Timestamptz(6)
+
+  tenant Tenant @relation(fields: [tenantId], references: [id])
+
+  @@map("tenant_tax_registrations")
+}
+
+model Brand {
+  id        String   @id @default(uuid(7)) @db.Uuid
+  tenantId  String   @map("tenant_id") @db.Uuid
+  name      String
+  createdAt DateTime @default(now()) @map("created_at") @db.Timestamptz(6)
+
+  tenant  Tenant   @relation(fields: [tenantId], references: [id])
+  outlets Outlet[]
+
+  @@map("brands")
+}
+
+enum OutletType {
+  dine_in
+  qsr
+  cloud_kitchen
+  food_court
+}
+
+model Outlet {
+  id        String     @id @default(uuid(7)) @db.Uuid
+  tenantId  String     @map("tenant_id") @db.Uuid
+  brandId   String     @map("brand_id") @db.Uuid
+  name      String
+  address   String
+  type      OutletType
+  timezone  String
+  createdAt DateTime   @default(now()) @map("created_at") @db.Timestamptz(6)
+  deletedAt DateTime?  @map("deleted_at") @db.Timestamptz(6)
+
+  tenant Tenant @relation(fields: [tenantId], references: [id])
+  brand  Brand  @relation(fields: [brandId], references: [id])
+
+  @@map("outlets")
+}
+
+model Role {
+  id       String  @id @default(uuid(7)) @db.Uuid
+  tenantId String  @map("tenant_id") @db.Uuid
+  name     String
+  isSystem Boolean @default(false) @map("is_system")
+
+  tenant Tenant @relation(fields: [tenantId], references: [id])
+
+  @@unique([tenantId, name])
+  @@map("roles")
+}
+
+model MenuCategory {
+  id        String @id @default(uuid(7)) @db.Uuid
+  tenantId  String @map("tenant_id") @db.Uuid
+  name      String
+  sortOrder Int    @map("sort_order")
+
+  tenant Tenant     @relation(fields: [tenantId], references: [id])
+  items  MenuItem[]
+
+  @@map("menu_categories")
+}
+
+model MenuItem {
+  id         String @id @default(uuid(7)) @db.Uuid
+  tenantId   String @map("tenant_id") @db.Uuid
+  categoryId String @map("category_id") @db.Uuid
+  name       String
+  // Money as bigint minor units (workspace convention).
+  priceMinor BigInt @map("price_minor")
+  currency   String @db.Char(3)
+
+  tenant   Tenant       @relation(fields: [tenantId], references: [id])
+  category MenuCategory @relation(fields: [categoryId], references: [id])
+
+  @@map("menu_items")
+}
+
+model OwnerInvite {
+  id        String   @id @default(uuid(7)) @db.Uuid
+  tenantId  String   @map("tenant_id") @db.Uuid
+  email     String
+  firstName String   @map("first_name")
+  lastName  String   @map("last_name")
+  // Only the hash is stored; the raw token is delivered out of band when the
+  // invite email ships (Tenant Admin story).
+  tokenHash String   @unique @map("token_hash")
+  expiresAt DateTime @map("expires_at") @db.Timestamptz(6)
+  createdAt DateTime @default(now()) @map("created_at") @db.Timestamptz(6)
+
+  tenant Tenant @relation(fields: [tenantId], references: [id])
+
+  @@map("owner_invites")
+}
+
+// Region-plane audit trail (AD-8): tenant-affecting mutations audit here, in
+// the same transaction as the mutation (AD-6). Append-only - the RLS policies
+// in the migration grant INSERT and SELECT only.
+model AuditEvent {
+  id         String   @id @default(uuid(7)) @db.Uuid
+  tenantId   String   @map("tenant_id") @db.Uuid
+  actorId    String?  @map("actor_id") @db.Uuid
+  actorEmail String   @map("actor_email")
+  action     String
+  reason     String
+  occurredAt DateTime @map("occurred_at") @db.Timestamptz(6)
+  recordedAt DateTime @default(now()) @map("recorded_at") @db.Timestamptz(6)
+
+  @@map("audit_events")
+}
