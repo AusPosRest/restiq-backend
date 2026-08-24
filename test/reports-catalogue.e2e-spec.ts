@@ -210,7 +210,7 @@ describe('/admin/v1/reports (e2e)', () => {
       expect(res.status).toBe(200)
       expect(res.headers['content-type']).toContain('text/csv')
 
-      const rows = parseCsv(res.text as string)
+      const rows = parseCsv(res.text)
       expect(rows[0]).toEqual(['category', 'item', 'short_name', 'variant', 'price', 'currency', 'available'])
       const dataRows = rows.slice(1)
       expect(dataRows).toHaveLength(2)
@@ -224,7 +224,7 @@ describe('/admin/v1/reports (e2e)', () => {
       await prisma.menuItem.create({ data: { tenantId, categoryId: category.id, name: 'Unpriced Dish', shortName: 'Unpriced', available: true } })
 
       const res = await authed(request(httpServer).get('/admin/v1/reports/menu-catalogue/export?format=csv'), token)
-      const rows = parseCsv(res.text as string)
+      const rows = parseCsv(res.text)
       expect(rows[1]).toEqual(['Mains', 'Unpriced Dish', 'Unpriced', '', '', '', 'yes'])
     })
 
@@ -235,7 +235,7 @@ describe('/admin/v1/reports (e2e)', () => {
       await createPricedItem(prisma, ownerB.tenantId, 'Mains', 'B Dish', 20000)
 
       const res = await authed(request(httpServer).get('/admin/v1/reports/menu-catalogue/export?format=csv'), ownerA.token)
-      const rows = parseCsv(res.text as string)
+      const rows = parseCsv(res.text)
       const dataRows = rows.slice(1)
       expect(dataRows).toHaveLength(1)
       expect(dataRows[0]?.[1]).toBe('A Dish')
@@ -263,7 +263,7 @@ describe('/admin/v1/reports (e2e)', () => {
       expect(res.status).toBe(200)
       expect(res.headers['content-type']).toContain('text/csv')
 
-      const rows = parseCsv(res.text as string)
+      const rows = parseCsv(res.text)
       expect(rows[0]).toEqual(['name', 'email', 'role', 'pin_status'])
       const dataRows = rows.slice(1)
       expect(dataRows).toContainEqual(['Asha', 'asha@spiceroute.example', 'Manager', 'none'])
@@ -277,7 +277,7 @@ describe('/admin/v1/reports (e2e)', () => {
       await createStaffMember(prisma, ownerB.tenantId, 'Priya', 'Manager')
 
       const res = await authed(request(httpServer).get('/admin/v1/reports/staff-roster/export?format=csv'), ownerA.token)
-      const rows = parseCsv(res.text as string)
+      const rows = parseCsv(res.text)
       const dataRows = rows.slice(1)
       expect(dataRows).toHaveLength(1)
       expect(dataRows[0]?.[0]).toBe('Asha')
