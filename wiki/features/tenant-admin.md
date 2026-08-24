@@ -112,6 +112,70 @@ built here, story by story.
   is the only contract downstream code depends on - nothing else in this
   module or its callers needs to change.
 
+## CAP-4 - Menu management
+
+- **Intent:** an owner manages categories, items, variants, modifier groups
+  (with min/max rules), combos, allergen/dietary tags, per-outlet overrides,
+  per-channel prices, scheduled price changes, and item availability (86).
+  Editing a price creates a new version, never mutates the old one; 86 is
+  reflected in the same request.
+- **Built** (`src/admin/menu/`), all under `/admin/v1/menu`:
+  - **Categories** (`categories.controller.ts`/`.service.ts`): `GET /categories`
+    (with `itemCount`), `POST /categories`, `PATCH /categories/:id`,
+    `DELETE /categories/:id` (409 `category_not_empty` if it still has
+    items). Routine content edits - no audit reason (SPEC constraint).
+  - **Items** (`items.controller.ts`/`.service.ts`): `GET /items?categoryId=`,
+    `GET /items/:id`, `POST /items`, `PATCH /items/:id`. An item's response
+    always nests its full `variants`, `modifierGroups` (with their
+    `modifiers`), and `allergens` - one shape for list and detail, no
+    separate "summary" projection.
+    - Variants: `POST /items/:id/variants`, `DELETE /items/:id/variants/:variantId`.
+    - Modifier-group / allergen attachment is replace-the-set, not
+      add/remove: `PUT /items/:id/modifier-groups { modifierGroupIds: [] }`,
+      `PUT /items/:id/allergens { allergenIds: [] }`.
+    - 86 toggle: `PATCH /items/:id/availability { available }` - immediate,
+      tenant-wide, not versioned, not audited (not in the SPEC's named
+      security-relevant list).
+    - Per-outlet availability override: `PUT /items/:id/outlets/:outletId/availability
+      { available }` (upsert), `DELETE` (clear override, reverts to the
+      item's tenant-wide `available`). No override row = tenant-wide applies.
+  - **Modifier groups** (`modifier-groups.controller.ts`/`.service.ts`):
+    tenant-scoped, reusable catalog. `GET/POST /modifier-groups`,
+    `PATCH /modifier-groups/:id`, `POST /modifier-groups/:id/modifiers`.
+    `minSelections`/`maxSelections` are validated at write time (0 <= min <=
+    max) on the *resolved* final values, so a partial PATCH can't leave the
+    row invalid even transiently.
+  - **Allergens** (`allergens.controller.ts`/`.service.ts`): tenant-scoped
+    tag catalog, moved here from CAP-3 per the spec amendment (unreliable
+    from OCR/CSV). `GET/POST /allergens`; attach to an item via the item's
+    `PUT /items/:id/allergens` above.
+  - **Combos** (`combos.controller.ts`/`.service.ts`): a flat-priced bundle
+    of existing items. `GET/POST /combos`. Not versioned (AD-11 binds
+    `item_prices`, not combos) - a routine content edit like the rest of
+    this module's CRUD.
+  - **Prices** (`prices.service.ts`, routed from `items.controller.ts`):
+    `POST /items/:id/prices` - the ONE place `item_prices` is ever written
+    from this module (AD-11): always an INSERT, the targeted row (by
+    `variantId`/`channel`/`outletId`) is never UPDATEd. Price change is one
+    of the SPEC's named security-relevant actions, so `reason` is required
+    and an `audit_events` row (`menu.item.price_changed`) is written in the
+    same transaction. `effectiveAt` is optional - omitted or past means
+    immediate, future schedules it.
+    `GET /items/:id/price?channel=&variantId=&outletId=` - the load-bearing
+    current-price read (`menu/pricing.ts`'s `resolveCurrentPrice`/
+    `pickCurrentPrice`, unit-tested in `pricing.spec.ts`): the most recent
+    `item_prices` row with `effectiveAt <= now`, most-specific match first
+    (exact outlet beats unscoped outlet; exact channel beats unscoped
+    channel; outlet specificity is checked before channel specificity).
+    404 `no_current_price` if nothing is eligible yet.
+
+## Integration points for story 4+ (floor plan) and beyond
+
+- None of CAP-4's tables are read by another CAP yet. A future POS/QR
+  price-setting flow must write through `item_prices` the same way (AD-11:
+  "this rule is scoped to the entity, not the surface") - never add a second
+  price-writing path.
+
 ## Data model
 
 - `owner_invites` (existing, Platform Console) - gained a nullable `used_at`
@@ -143,6 +207,34 @@ built here, story by story.
   every writer of `item_prices`, not only this story (AD-11) - the
   onboarding sample-menu seed above writes through it too.
 - `menu_import_drafts` (new) - see CAP-3 above.
+- `item_prices` (extended, this story) - gained `variantId`, `outletId`
+  (both nullable FKs), `channel` (nullable `PriceChannel` enum: `dine_in`,
+  `takeaway`, `delivery`, `qr`, `aggregator`), and `effectiveAt` (defaults to
+  `now()`). Each of the three new dimensions is independently nullable and
+  null means "unscoped on this dimension" (prices the base item / applies to
+  every channel / applies tenant-wide) - `menu/pricing.ts` picks the most
+  specific eligible row. Story 2's append-only RLS policies are unchanged;
+  the new columns don't need new policies (RLS is row-scoped by `tenant_id`
+  only). The old `itemId, createdAt` index was replaced by
+  `itemId, variantId, effectiveAt` - the shape the new read actually queries.
+- `item_variants` (new) - e.g. Half/Full. `@@unique([itemId, name])`.
+- `modifier_groups` / `modifiers` / `item_modifier_groups` (new) - tenant-
+  scoped, reusable modifier-group catalog (e.g. "Spice Level") with a
+  many-to-many join to items. `min_selections`/`max_selections` validated
+  0 <= min <= max at write time.
+- `allergens` / `item_allergens` (new) - tenant-scoped tag catalog + item
+  join. Moved here from CAP-3 menu import per the spec amendment.
+- `combos` / `combo_components` (new) - a flat-priced bundle of existing
+  items. Not versioned - AD-11 binds `item_prices`, not combos.
+- `item_outlet_overrides` (new) - per-outlet **availability** override only
+  (`{ itemId, outletId, available }`, `@@unique([itemId, outletId])`,
+  mutable/upsertable). Per-outlet **price** override does *not* get a
+  separate table - it's just an `item_prices` row with `outletId` set, so
+  there is exactly one price-writing path (AD-11), not two.
+- RLS: every new table gets the standard `tenant_isolation` (SELECT/INSERT/
+  UPDATE/DELETE under `app.tenant_id`) + `operator_read` (cross-tenant
+  SELECT under `app.operator_context`) pair, same posture as every other
+  tenant-owned table.
 
 ## Key decisions
 
@@ -159,3 +251,28 @@ built here, story by story.
   (AD-6, action `menu.imported`) but with a system-generated reason string,
   not an owner prompt - matching CAP-2's `go-live` audit row, which follows
   the same pattern.
+- CAP-4's only audited, reason-required mutation is a price change
+  (`POST /items/:id/prices`) - the SPEC Constraints section names price
+  change explicitly alongside role change and PIN revoke as
+  security-relevant. Category/item/variant/modifier-group/allergen/combo
+  CRUD and the 86 toggle are all routine content edits, no reason prompt -
+  including item/category *deletion*, which the SPEC text doesn't add to
+  the named security-relevant list (a judgment call - flagged for product
+  review if that reading is wrong).
+- The 86 toggle is a plain `MenuItem.available` boolean, not versioned. AD-11
+  binds price history, not availability - re-versioning it would be
+  unrequested complexity for a field the SPEC describes as immediate.
+- Per-outlet price override reuses `item_prices.outletId` rather than a
+  second price field on `item_outlet_overrides`, so AD-11's "insert-only"
+  guarantee has exactly one writer to reason about, not two that could
+  drift out of sync.
+- List and detail item responses share one shape (full nested `variants`/
+  `modifierGroups`/`allergens`) rather than a lighter list projection -
+  console item counts are small enough that the simpler, single shape beat
+  maintaining two.
+- Resolved prices are deliberately NOT embedded in the item list/detail
+  response. `GET /items/:id/price` is the one well-tested current-price
+  read; embedding it into every list row would either duplicate that logic
+  or silently couple the list response to a fixed channel/outlet the caller
+  didn't choose. The web client calls the price endpoint per cell it needs
+  to render.

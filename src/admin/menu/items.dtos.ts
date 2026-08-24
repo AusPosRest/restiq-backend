@@ -1,0 +1,144 @@
+import { Type } from 'class-transformer'
+import { ArrayUnique, IsArray, IsBoolean, IsDateString, IsInt, IsOptional, IsString, IsUUID, Length, Min, MinLength, ValidateNested } from 'class-validator'
+import { IsEnum } from 'class-validator'
+import type { PriceChannel } from '../../generated/prisma/client'
+import { AllergenView } from './allergens.dtos'
+import { ModifierGroupView } from './modifier-groups.dtos'
+
+const PRICE_CHANNELS = ['dine_in', 'takeaway', 'delivery', 'qr', 'aggregator'] as const
+
+export class CreateVariantDto {
+  @IsString() @MinLength(1)
+  name!: string
+
+  @IsOptional() @IsInt() @Min(0)
+  sortOrder?: number
+}
+
+export class CreateItemDto {
+  @IsUUID()
+  categoryId!: string
+
+  @IsString() @MinLength(1)
+  name!: string
+
+  @IsString() @MinLength(1)
+  shortName!: string
+
+  @IsOptional() @IsArray() @ValidateNested({ each: true }) @Type(() => CreateVariantDto)
+  variants?: CreateVariantDto[]
+
+  @IsOptional() @IsArray() @ArrayUnique() @IsUUID('all', { each: true })
+  modifierGroupIds?: string[]
+
+  @IsOptional() @IsArray() @ArrayUnique() @IsUUID('all', { each: true })
+  allergenIds?: string[]
+}
+
+export class UpdateItemDto {
+  @IsOptional() @IsString() @MinLength(1)
+  name?: string
+
+  @IsOptional() @IsString() @MinLength(1)
+  shortName?: string
+
+  @IsOptional() @IsUUID()
+  categoryId?: string
+}
+
+export class SetAvailabilityDto {
+  @IsBoolean()
+  available!: boolean
+}
+
+export class ReplaceModifierGroupsDto {
+  @IsArray() @ArrayUnique() @IsUUID('all', { each: true })
+  modifierGroupIds!: string[]
+}
+
+export class ReplaceAllergensDto {
+  @IsArray() @ArrayUnique() @IsUUID('all', { each: true })
+  allergenIds!: string[]
+}
+
+// AD-6: price change is one of the SPEC's named security-relevant actions
+// (role change, PIN revoke, price change) - unlike routine content edits
+// (category/item/modifier-group CRUD), it requires a reason.
+export class CreatePriceDto {
+  @IsOptional() @IsUUID()
+  variantId?: string
+
+  @IsEnum(PRICE_CHANNELS)
+  channel!: PriceChannel
+
+  @IsOptional() @IsUUID()
+  outletId?: string
+
+  @IsInt() @Min(0)
+  priceMinor!: number
+
+  @Length(3, 3)
+  currency!: string
+
+  // Null/omitted = immediate. A future ISO timestamp schedules the change.
+  @IsOptional() @IsDateString()
+  effectiveAt?: string
+
+  @IsString() @MinLength(1)
+  reason!: string
+}
+
+export class CurrentPriceQueryDto {
+  @IsEnum(PRICE_CHANNELS)
+  channel!: PriceChannel
+
+  @IsOptional() @IsUUID()
+  variantId?: string
+
+  @IsOptional() @IsUUID()
+  outletId?: string
+}
+
+export class SetOutletAvailabilityDto {
+  @IsBoolean()
+  available!: boolean
+}
+
+export interface VariantView {
+  id: string
+  name: string
+  sortOrder: number
+}
+
+export interface ItemView {
+  id: string
+  categoryId: string
+  name: string
+  shortName: string
+  available: boolean
+  variants: VariantView[]
+  modifierGroups: ModifierGroupView[]
+  allergens: AllergenView[]
+}
+
+export interface ItemPriceView {
+  id: string
+  itemId: string
+  variantId: string | null
+  channel: PriceChannel | null
+  outletId: string | null
+  priceMinor: number
+  currency: string
+  effectiveAt: string
+  createdAt: string
+}
+
+export interface CurrentPriceView {
+  itemId: string
+  variantId: string | null
+  channel: PriceChannel
+  outletId: string | null
+  priceMinor: number
+  currency: string
+  effectiveAt: string
+}
