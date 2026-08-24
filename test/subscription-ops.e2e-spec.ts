@@ -26,6 +26,7 @@ interface SubscriptionView {
 async function wipe(prisma: PrismaClient): Promise<void> {
   await prisma.invoice.deleteMany()
   await prisma.subscription.deleteMany()
+  await prisma.appliedOp.deleteMany()
   await prisma.syncDeadLetter.deleteMany()
   await prisma.device.deleteMany()
   await prisma.enrolmentCode.deleteMany()

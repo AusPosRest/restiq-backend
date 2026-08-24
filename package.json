@@ -14,7 +14,8 @@
     "db:generate": "prisma generate",
     "db:migrate": "prisma migrate deploy",
     "seed:operator": "tsx scripts/seed-operator.ts",
-    "seed:sync-health": "tsx scripts/seed-sync-health.ts"
+    "seed:sync-health": "tsx scripts/seed-sync-health.ts",
+    "seed:dlq": "tsx scripts/seed-dlq.ts"
   },
   "repository": {
     "type": "git",
