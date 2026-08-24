@@ -105,6 +105,36 @@ describe('row-level security on region-plane tables (e2e)', () => {
     expect(rows).toBeGreaterThanOrEqual(1)
   })
 
+  it('owner_invites: fails closed under tenant context, reads cross-tenant under the invite-accept context (AD-10/CAP-1)', async () => {
+    await admin.ownerInvite.create({
+      data: {
+        tenantId,
+        email: 'probe-owner@test.example',
+        firstName: 'Probe',
+        lastName: 'Owner',
+        tokenHash: 'rls-probe-token-hash',
+        expiresAt: new Date(Date.now() + 3_600_000),
+      },
+    })
+
+    const underWrongTenant = await probe.$transaction(async (tx) => {
+      await tx.$executeRaw`SELECT set_config('app.tenant_id', ${randomUUID()}, true)`
+      return tx.ownerInvite.count()
+    })
+    expect(underWrongTenant).toBe(0)
+
+    // The accept-invite flow authenticates by possession of the raw token,
+    // before any tenant_id is known - this context is what makes that lookup
+    // possible without disabling RLS.
+    const underInviteContext = await probe.$transaction(async (tx) => {
+      await tx.$executeRaw`SELECT set_config('app.invite_accept_context', 'invite', true)`
+      return tx.ownerInvite.count({ where: { tenantId } })
+    })
+    expect(underInviteContext).toBe(1)
+
+    await admin.ownerInvite.deleteMany({ where: { tenantId } })
+  })
+
   it('keeps audit_events append-only: UPDATE and DELETE touch zero rows even in-context', async () => {
     const updated = await probe.$transaction(async (tx) => {
       await tx.$executeRaw`SELECT set_config('app.tenant_id', ${tenantId}, true)`
