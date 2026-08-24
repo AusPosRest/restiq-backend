@@ -151,6 +151,10 @@ model Tenant {
   subscription     Subscription?
   invoices         Invoice[]
   checklistProgress ChecklistProgress?
+  floors           Floor[]
+  diningTables     DiningTable[]
+  stations         Station[]
+  printers         Printer[]
 
   // The directory list is served from these: filter columns plus the
   // created_at ordering the default sort and cursor walk.
@@ -235,6 +239,9 @@ model Outlet {
   itemPrices          ItemPrice[]
   itemOutletOverrides ItemOutletOverride[]
   capabilities        OutletCapability[]
+  floors              Floor[]
+  stations            Station[]
+  printers            Printer[]
 
   @@index([tenantId])
   @@map("outlets")
@@ -596,6 +603,116 @@ model ChecklistProgress {
   tenant Tenant @relation(fields: [tenantId], references: [id])
 
   @@map("checklist_progress")
+}
+
+// ---------------------------------------------------------------------------
+// CAP-5 floor plan & stations (AD-5). A floor belongs to an outlet; tables
+// belong to a floor with an absolute pixel/grid position the editor owns.
+// Stations and printers are outlet-scoped siblings of floors, not nested
+// under them - a station routes tickets regardless of which floor a table
+// sits on. Kept as a direct primaryPrinterId/fallbackPrinterId pair on
+// Station rather than a station_printers join table: the design only ever
+// needs one primary + one optional fallback per station (see the Kitchen
+// Routing panel in the floor-plan-editor screen), so a join table would add
+// multiplicity the product doesn't use (ponytail: minimum that works).
+// ---------------------------------------------------------------------------
+
+model Floor {
+  id        String    @id @default(uuid(7)) @db.Uuid
+  tenantId  String    @map("tenant_id") @db.Uuid
+  outletId  String    @map("outlet_id") @db.Uuid
+  name      String
+  sortOrder Int       @default(0) @map("sort_order")
+  createdAt DateTime  @default(now()) @map("created_at") @db.Timestamptz(6)
+  deletedAt DateTime? @map("deleted_at") @db.Timestamptz(6)
+
+  tenant Tenant        @relation(fields: [tenantId], references: [id])
+  outlet Outlet        @relation(fields: [outletId], references: [id])
+  tables DiningTable[]
+
+  @@index([tenantId])
+  @@index([outletId])
+  @@map("floors")
+}
+
+enum TableShape {
+  circle
+  square
+  rectangle
+}
+
+// Bounds (x, y, width, height) are grid units the editor defines - overlap
+// checks compare these directly, no unit conversion in this service.
+model DiningTable {
+  id           String     @id @default(uuid(7)) @db.Uuid
+  tenantId     String     @map("tenant_id") @db.Uuid
+  floorId      String     @map("floor_id") @db.Uuid
+  label        String
+  x            Int
+  y            Int
+  width        Int
+  height       Int
+  shape        TableShape
+  seatCapacity Int        @map("seat_capacity")
+  createdAt    DateTime   @default(now()) @map("created_at") @db.Timestamptz(6)
+  updatedAt    DateTime   @updatedAt @map("updated_at") @db.Timestamptz(6)
+
+  tenant Tenant @relation(fields: [tenantId], references: [id])
+  floor  Floor  @relation(fields: [floorId], references: [id])
+
+  @@index([tenantId])
+  @@index([floorId])
+  @@map("dining_tables")
+}
+
+enum PrinterRenderMode {
+  text
+  bitmap
+}
+
+model Printer {
+  id         String            @id @default(uuid(7)) @db.Uuid
+  tenantId   String            @map("tenant_id") @db.Uuid
+  outletId   String            @map("outlet_id") @db.Uuid
+  name       String
+  renderMode PrinterRenderMode @map("render_mode")
+  createdAt  DateTime          @default(now()) @map("created_at") @db.Timestamptz(6)
+  deletedAt  DateTime?         @map("deleted_at") @db.Timestamptz(6)
+
+  tenant             Tenant    @relation(fields: [tenantId], references: [id])
+  outlet             Outlet    @relation(fields: [outletId], references: [id])
+  stationsAsPrimary  Station[] @relation("StationPrimaryPrinter")
+  stationsAsFallback Station[] @relation("StationFallbackPrinter")
+
+  @@unique([outletId, name])
+  @@index([tenantId])
+  @@map("printers")
+}
+
+// noPrinterAcknowledged is not persisted - it is a one-time confirmation the
+// request must carry when primaryPrinterId is omitted (SPEC CAP-5 success
+// criterion: never silently save an unset printer). A station's actual
+// "has no printer" state is simply primaryPrinterId = null.
+model Station {
+  id                      String   @id @default(uuid(7)) @db.Uuid
+  tenantId                String   @map("tenant_id") @db.Uuid
+  outletId                String   @map("outlet_id") @db.Uuid
+  name                    String
+  ageingThresholdMinutes  Int      @map("ageing_threshold_minutes")
+  primaryPrinterId        String?  @map("primary_printer_id") @db.Uuid
+  fallbackPrinterId       String?  @map("fallback_printer_id") @db.Uuid
+  createdAt               DateTime @default(now()) @map("created_at") @db.Timestamptz(6)
+  updatedAt               DateTime @updatedAt @map("updated_at") @db.Timestamptz(6)
+  deletedAt               DateTime? @map("deleted_at") @db.Timestamptz(6)
+
+  tenant          Tenant   @relation(fields: [tenantId], references: [id])
+  outlet          Outlet   @relation(fields: [outletId], references: [id])
+  primaryPrinter  Printer? @relation("StationPrimaryPrinter", fields: [primaryPrinterId], references: [id])
+  fallbackPrinter Printer? @relation("StationFallbackPrinter", fields: [fallbackPrinterId], references: [id])
+
+  @@unique([outletId, name])
+  @@index([tenantId])
+  @@map("stations")
 }
 
 // Region-plane audit trail (AD-8): tenant-affecting mutations audit here, in

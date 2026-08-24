@@ -41,3 +41,14 @@
   All three are routine content edits per the SPEC - no audit reason
   required. See [wiki/features/tenant-admin.md](../features/tenant-admin.md).
   Issue AusPosRest/restiq-backend#32.
+- **2026-08-24** - Tenant Admin story 5: floor plan & stations (CAP-5).
+  Full CRUD under `/admin/v1/outlets/:outletId/floor-plan` for floors,
+  tables (with 409 `table_overlap` on overlapping bounds - reject, not
+  auto-adjust, this story's call on the SPEC's open question), printers,
+  and stations (400 `printer_required` unless a printer is set or
+  `noPrinterAcknowledged: true` is sent). New tables `floors`,
+  `dining_tables`, `printers`, `stations` (stations carry
+  `primaryPrinterId`/`fallbackPrinterId` directly, no join table). The
+  first table created for an outlet flips the `floor_plan` checklist step.
+  See [wiki/features/tenant-admin.md](../features/tenant-admin.md). Issue
+  AusPosRest/restiq-backend#34.

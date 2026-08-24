@@ -49,7 +49,8 @@ built here, story by story.
   `checklist_progress` from its own write path instead of leaving the owner
   to tick it manually:
   - `outlet_details` - the outlet-details editing story.
-  - `floor_plan` - CAP-5, once a floor/table exists.
+  - `floor_plan` - **done (CAP-5)** - `FloorPlanService.createTable` calls
+    `ChecklistService.updateStep` when it creates an outlet's first table.
   - `menu_import` - **done (CAP-3, this story)** - `MenuImportService.commit`
     calls `ChecklistService.updateStep` directly on a successful commit.
   - `devices` - CAP-6, once a device is enrolled for the tenant (reuses the
@@ -222,7 +223,72 @@ built here, story by story.
     branding or capability changes, unlike price changes/role changes/PIN
     revokes.
 
-## Integration points for story 5+ (floor plan) and beyond
+## CAP-5 - Floor plan & stations
+
+- **Intent:** an owner lays out floors and tables, defines kitchen stations
+  with ageing thresholds, and maps printers to stations with a fallback
+  printer. A floor plan with overlapping tables is rejected or auto-adjusted
+  (SPEC left this as an open question); every station has a printer or an
+  explicit "no printer" acknowledgement.
+- **Built** (`src/admin/floor-plan/`), all under
+  `/admin/v1/outlets/:outletId/floor-plan`:
+  - `GET /` - `{ floors: [{ id, outletId, name, sortOrder, tables: [{ id,
+    floorId, label, x, y, width, height, shape, seatCapacity }] }], stations:
+    [{ id, outletId, name, ageingThresholdMinutes, primaryPrinterId,
+    fallbackPrinterId }], printers: [{ id, outletId, name, renderMode }] }` -
+    the one read the floor-plan editor screen needs, no separate calls per
+    floor/station.
+  - `POST /floors { name, sortOrder? }`, `PATCH /floors/:floorId { name?,
+    sortOrder? }`. No `DELETE /floors` - not called for by the SPEC or the
+    designed screen (floors accumulate; a discard-floor flow can be added
+    when a story actually needs it).
+  - `POST /tables { floorId, label, x, y, width, height, shape,
+    seatCapacity }` (201, or 409 `table_overlap`), `PATCH /tables/:tableId`
+    (any subset of the same fields, still overlap-checked against the
+    resolved bounds), `DELETE /tables/:tableId` (204). A table's `floorId`
+    is fixed at creation - `PATCH` cannot move a table to a different floor
+    (not in the designed screen; the tool palette drags within one floor's
+    canvas).
+  - `POST /printers { name, renderMode }` - `renderMode` is `text` or
+    `bitmap`. Minimal by design: this story only needs printers to exist so
+    a station can reference one; full printer management (status, enrolment)
+    is CAP-6's job per the SPEC, reusing the device fleet backend.
+  - `POST /stations { name, ageingThresholdMinutes, primaryPrinterId?,
+    fallbackPrinterId?, noPrinterAcknowledged? }` (201, or 400
+    `printer_required`), `PATCH /stations/:stationId` (same fields, all
+    optional). `primaryPrinterId`/`fallbackPrinterId` are tri-state on
+    `PATCH`: omitted leaves the existing value untouched, `null` clears it,
+    a uuid sets it - the DTO relies on the field being *present* in the
+    JSON body (not just non-undefined) to tell "leave alone" apart from
+    "clear."
+  - **Overlap policy (SPEC open question, builder's call): reject with 409,
+    not auto-adjust.** Auto-adjust needs a placement algorithm (where does
+    the server move the table, how far) the design doesn't specify; a
+    table silently relocated by the server is a worse mid-edit surprise for
+    an owner than an immediate "that spot's taken" the UI can show right
+    where they dropped it. Overlap is bounding-box intersection (uniform
+    across circle/square/rectangle - the editor is grid-based, not a
+    physics simulation) with strict inequality, so two tables may share an
+    edge without colliding.
+  - **Printer-required gate:** fires whenever a request would leave a
+    station's `primaryPrinterId` null - at creation (the default, absent
+    value) or at update (an explicit `primaryPrinterId: null`). A `PATCH`
+    that never mentions `primaryPrinterId` can't silently arrive at a
+    printerless station - it either already had one acknowledged, or the
+    check already fired when it didn't.
+  - **Checklist integration:** the first table ever created for an outlet
+    (which requires a floor to already exist, since `POST /tables` needs a
+    `floorId`) calls `ChecklistService.updateStep(tenantId, 'floor_plan',
+    true)` - same pattern as CAP-3's commit: outside the write transaction,
+    since interactive transactions don't compose and this story's atomicity
+    guarantee covers the table write, not the checklist flag.
+  - Every endpoint scopes through the owner's `tenantId` inside a
+    `SELECT set_config('app.tenant_id', ...)` transaction (AD-5); a floor,
+    table, station, or printer belonging to another tenant - or a table/
+    printer that exists but belongs to a different outlet than the one in
+    the URL - 404s or 400s rather than leaking existence.
+
+## Integration points for story 6+ and beyond
 
 - None of CAP-4's tables are read by another CAP yet. A future POS/QR
   price-setting flow must write through `item_prices` the same way (AD-11:
@@ -307,6 +373,20 @@ built here, story by story.
   `operator_read`. Distinct from the pre-existing (and, before this story,
   unused) `tenant_capabilities` table - see "Integration points" above for
   why they stay two tables.
+- `floors` (new, CAP-5) - `{ id, tenantId, outletId, name, sortOrder,
+  createdAt, deletedAt }`.
+- `dining_tables` (new, CAP-5) - `{ id, tenantId, floorId, label, x, y,
+  width, height, shape (circle/square/rectangle), seatCapacity, createdAt,
+  updatedAt }`. Bounds are plain integers in the editor's own grid units -
+  no unit conversion happens in this service.
+- `printers` (new, CAP-5) - `{ id, tenantId, outletId, name, renderMode
+  (text/bitmap), createdAt, deletedAt }`, `@@unique([outletId, name])`.
+- `stations` (new, CAP-5) - `{ id, tenantId, outletId, name,
+  ageingThresholdMinutes, primaryPrinterId?, fallbackPrinterId?, createdAt,
+  updatedAt, deletedAt }`, `@@unique([outletId, name])`. No
+  `station_printers` join table - a station only ever needs one primary +
+  one optional fallback printer (see the design's Kitchen Routing panel), so
+  a direct nullable FK pair covers it without unused multiplicity.
 
 ## Key decisions
 
@@ -369,3 +449,20 @@ built here, story by story.
   specified. A future story that needs a fixed catalogue (e.g. to drive
   which toggles the UI renders) can add one without touching this write
   path.
+- CAP-5 overlap policy: reject (409), not auto-adjust - see the CAP-5
+  section above for the reasoning. Both are legitimate readings of the
+  SPEC's "rejected or auto-adjusted (owner's choice)" line; reject was
+  simpler to specify precisely and easier for the owner to reason about.
+- CAP-5 stations reference printers via two direct nullable FKs
+  (`primaryPrinterId`/`fallbackPrinterId`) rather than a `station_printers`
+  join table - the product only ever needs one primary + one fallback per
+  station, so a join table would model multiplicity nothing uses.
+- CAP-5's `noPrinterAcknowledged` is a request-only flag, never persisted -
+  the station's actual no-printer state is just `primaryPrinterId = null`.
+  Re-clearing an already-printerless station's name via `PATCH` doesn't
+  re-trigger the gate; only a request that would *change* the station to
+  printerless does (creation with no printer, or an explicit
+  `primaryPrinterId: null` on update).
+- CAP-5 has no `DELETE /floors` and `PATCH /tables/:tableId` cannot move a
+  table across floors - neither is in the designed screen or the SPEC text;
+  added only if a later story needs them.
