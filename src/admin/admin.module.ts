@@ -6,6 +6,8 @@ import { AdminBrandingController } from './branding/branding.controller'
 import { BrandingService } from './branding/branding.service'
 import { AdminChecklistController } from './checklist/checklist.controller'
 import { ChecklistService } from './checklist/checklist.service'
+import { AdminFloorPlanController } from './floor-plan/floor-plan.controller'
+import { FloorPlanService } from './floor-plan/floor-plan.service'
 import { AdminMenuAllergensController } from './menu/allergens.controller'
 import { AllergensService } from './menu/allergens.service'
 import { AdminMenuCategoriesController } from './menu/categories.controller'
@@ -35,6 +37,7 @@ import { OutletsService } from './outlets/outlets.service'
     AdminMenuCombosController,
     AdminOutletsController,
     AdminBrandingController,
+    AdminFloorPlanController,
   ],
   providers: [
     AdminAuthService,
@@ -48,6 +51,7 @@ import { OutletsService } from './outlets/outlets.service'
     CombosService,
     OutletsService,
     BrandingService,
+    FloorPlanService,
   ],
 })
 export class AdminModule {}
