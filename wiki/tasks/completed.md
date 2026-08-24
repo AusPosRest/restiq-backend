@@ -80,3 +80,19 @@
   checklist's `staff` step flips on the tenant's first staff member. See
   [wiki/features/tenant-admin.md](../features/tenant-admin.md). Issue
   AusPosRest/restiq-backend#38.
+- **2026-08-24** - Tenant Admin story 8: owner dashboard (CAP-8). New
+  `src/admin/dashboard/` module: `GET /admin/v1/dashboard` -> per-outlet
+  `deviceCount` plus `sales`/`margin`/`labourCost`/`waste`, a tenant rollup
+  (`outletCount`, `staffCount`, `menuItemCount`, `deviceCount`, `status`,
+  `goLiveAt`), and a real `asOf` timestamp. **Deliberately ships no live
+  sales/margin/labour/waste data** - grepping the schema confirmed RESTIQ's
+  POS Core Loop (the Order/Bill/Payment surface) hasn't been built yet, so
+  there is no transactional source to aggregate from. Every financial
+  metric is an honest `{ amountMinor: 0, currency, hasData: false, message
+  }` rather than a fabricated number or an omitted field. `staffCount`/
+  `menuItemCount` are tenant-rollup-only, not per-outlet - `staff_users`
+  has no outlet linkage and `menu_items` is one shared tenant catalog, so a
+  per-outlet split would be fabricated; only `deviceCount` genuinely has
+  outlet granularity. See
+  [wiki/features/tenant-admin.md](../features/tenant-admin.md). Issue
+  AusPosRest/restiq-backend#40.

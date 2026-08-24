@@ -173,6 +173,66 @@ built here, story by story.
     channel; outlet specificity is checked before channel specificity).
     404 `no_current_price` if nothing is eligible yet.
 
+## CAP-8 - Owner dashboard
+
+- **Intent:** an owner sees live sales, margin, labour, and waste per
+  outlet, with cross-outlet comparison - every figure carrying an honest
+  freshness indicator, never a silently outdated number presented as
+  current.
+- **No real sales data yet - this is a deliberate decision, not an
+  oversight.** RESTIQ's POS Core Loop (the surface that actually takes
+  orders and would generate `Order`/`Bill`/`Payment` rows) has not been
+  built anywhere in this codebase yet - only Platform Console and Tenant
+  Admin exist so far. There is nothing to aggregate live sales, margin,
+  labour cost, or waste from. Rather than fabricate numbers or add a
+  shadow orders table to make the screen look populated (which would show
+  a real owner figures that correspond to nothing), or silently omit the
+  fields, `GET /admin/v1/dashboard` returns each of `sales`/`margin`/
+  `labourCost`/`waste` as an explicit `{ amountMinor: 0, currency,
+  hasData: false, message }` - a stronger form of the SPEC's honesty
+  requirement than a "stale" badge, since no number is presented as
+  current at all. Wire real aggregation in when the POS Core Loop ships an
+  Order/Bill/Payment model; the shape (`hasData`, `message`) is designed
+  to flip to real values without a breaking change.
+- **Built** (`src/admin/dashboard/`): `GET /admin/v1/dashboard` ->
+  `{ asOf, tenant: { outletCount, staffCount, menuItemCount, deviceCount,
+  status, goLiveAt }, outlets: [{ outletId, outletName, deviceCount,
+  sales, margin, labourCost, waste }] }`.
+  - `asOf` is `new Date().toISOString()` at request time - a real
+    timestamp reflecting when the aggregate was actually computed (the
+    SPEC's freshness success criterion), not a cached or stale value.
+  - **Per-outlet `deviceCount`** is real: `devices` grouped by `outletId`,
+    `status: 'active'` only (a revoked device is no longer in service).
+  - **`staffCount` and `menuItemCount` are reported only in the tenant
+    rollup, never split per outlet** - deliberate, not an omission.
+    `staff_users` has no `outletId` column at all (see CAP-7 above: no
+    outlet-scoped staff/access model exists in this codebase), so there is
+    no real per-outlet split to report; `menu_items` belong to the
+    tenant's one shared catalog (CAP-4: only per-item *availability* is
+    outlet-overridable, not the item's existence), so its count is
+    likewise a tenant-wide fact, not an outlet one. Repeating the same
+    tenant total on every outlet row would look like real per-outlet data
+    when it isn't - the honest choice was to put both counts where they're
+    actually true: the rollup. This deviates from a per-outlet
+    `staffCount`/`menuItemCount` shape that might otherwise be assumed;
+    flagged here so it isn't mistaken for a bug later.
+  - `menuItemCount` counts `MenuItem` rows with `available: true` (the 86
+    toggle) - an item turned off tenant-wide is excluded, same as it would
+    be from the live menu.
+  - `tenant.status` / `tenant.goLiveAt` reuse CAP-2's data: `status` is the
+    region-plane `tenants.status` (`provisioning`/`active`); `goLiveAt` is
+    the `occurredAt` of that tenant's `tenant.went_live` audit event (the
+    row CAP-2's `goLive()` writes on the provisioning -> active
+    transition) - `null` before go-live. There is no dedicated
+    `goLiveAt` column; deriving it from the existing audit trail avoids
+    adding one for a value that's already recorded elsewhere.
+  - Currency per metric is derived from `tenant.country` the same way
+    `menu-import.service.ts` and `tenants.service.ts` already do (`IN` ->
+    `INR`, else `AUD`) - no new currency-resolution logic.
+  - Every query scoped through `owner.tenantId` inside a
+    `SELECT set_config('app.tenant_id', ...)` transaction (AD-5), same
+    pattern as every other admin service.
+
 ## CAP-10 - Branding & capabilities
 
 - **Intent:** an owner sets receipt/UI branding tokens and toggles
@@ -410,6 +470,14 @@ built here, story by story.
   optional `outletId` - the two are set by different actors through
   different consoles and answer different questions ("is this feature sold
   to this tenant at all" vs. "is this feature turned on at this outlet").
+- **CAP-8's dashboard has no new tables** - it reads `outlets`, `devices`,
+  `staff_users`, `menu_items`, and `audit_events`, all written by earlier
+  capabilities. When the POS Core Loop adds an Order/Bill/Payment model,
+  `DashboardService.get()` (`src/admin/dashboard/dashboard.service.ts`) is
+  the one place to wire real sales/margin/labour/waste aggregation in -
+  swap `noDataMetric()` for a real query per metric, keep the
+  `{ amountMinor, currency, hasData, message }` shape so `hasData: true`
+  is the only breaking-looking change a client sees.
 
 ## Data model
 
@@ -606,3 +674,23 @@ built here, story by story.
   in the T7 design render), hashed with argon2 - the same hashing library
   `owner_users.password_hash` already uses, since no PIN-specific hashing
   convention exists yet anywhere in the codebase.
+- CAP-8 deliberately ships no sales/margin/labour/waste aggregation, ever
+  returning `hasData: false` zeros with an explanatory message instead of
+  fabricated figures - there is no Order/Bill/Payment model anywhere in
+  this codebase for the POS Core Loop to have written, so there is nothing
+  honest to aggregate yet. This was verified by grepping the schema before
+  writing any code, not assumed.
+- CAP-8's `staffCount`/`menuItemCount` are tenant-rollup-only, not
+  per-outlet, even though the task brief for this story sketched them as
+  per-outlet fields - `staff_users` has no outlet linkage at all (see the
+  CAP-7 note above) and `menu_items` is one shared tenant-wide catalog
+  (CAP-4: only per-item availability is outlet-overridable). Reporting the
+  same tenant total on every outlet row would look like real per-outlet
+  data it isn't; putting both counts only where they're actually true was
+  judged more honest than matching the originally-sketched shape. `device`
+  is the one of the three that genuinely has an `outletId`, so it alone is
+  reported both per outlet and summed in the rollup.
+- `tenant.goLiveAt` is derived from the `tenant.went_live` audit event
+  (CAP-2) rather than a new column - the value already exists in the audit
+  trail; adding a dedicated `Tenant.goLiveAt` column would duplicate it
+  with no independent source of truth.

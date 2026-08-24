@@ -7,6 +7,8 @@ import { AdminBrandingController } from './branding/branding.controller'
 import { BrandingService } from './branding/branding.service'
 import { AdminChecklistController } from './checklist/checklist.controller'
 import { ChecklistService } from './checklist/checklist.service'
+import { AdminDashboardController } from './dashboard/dashboard.controller'
+import { DashboardService } from './dashboard/dashboard.service'
 import { AdminDevicesController } from './devices/devices.controller'
 import { AdminDevicesService } from './devices/devices.service'
 import { AdminFloorPlanController } from './floor-plan/floor-plan.controller'
@@ -35,6 +37,7 @@ import { StaffService } from './staff/staff.service'
   controllers: [
     AdminAuthController,
     AdminChecklistController,
+    AdminDashboardController,
     AdminMenuImportController,
     AdminMenuCategoriesController,
     AdminMenuItemsController,
@@ -51,6 +54,7 @@ import { StaffService } from './staff/staff.service'
   providers: [
     AdminAuthService,
     ChecklistService,
+    DashboardService,
     MenuImportService,
     CategoriesService,
     ItemsService,
