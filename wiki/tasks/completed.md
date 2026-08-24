@@ -30,3 +30,14 @@
   reason required) per the SPEC's security-relevant list; routine content
   CRUD is not. See [wiki/features/tenant-admin.md](../features/tenant-admin.md).
   Issue AusPosRest/restiq-backend#30.
+- **2026-08-24** - Tenant Admin story 4: branding & capability toggles, outlet
+  listing (CAP-10). `GET /admin/v1/outlets` (the outlet-switcher endpoint
+  story 3's web half needs - `{ id, name, address, type, timezone }`, no
+  schema change, reads the existing `outlets` table), `GET`/`PUT
+  /admin/v1/branding` (reads/merges into the existing
+  `tenants.branding_tokens` JSON column), `GET /admin/v1/outlets/:id/capabilities`
+  / `PATCH /admin/v1/outlets/:id/capabilities/:key` (new `outlet_capabilities`
+  table, distinct from Platform Console's tenant-wide `tenant_capabilities`).
+  All three are routine content edits per the SPEC - no audit reason
+  required. See [wiki/features/tenant-admin.md](../features/tenant-admin.md).
+  Issue AusPosRest/restiq-backend#32.
