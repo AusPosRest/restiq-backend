@@ -13,7 +13,8 @@
     "test:e2e": "tsx scripts/migrate-test-db.ts && vitest run --config vitest.e2e.config.ts",
     "db:generate": "prisma generate",
     "db:migrate": "prisma migrate deploy",
-    "seed:operator": "tsx scripts/seed-operator.ts"
+    "seed:operator": "tsx scripts/seed-operator.ts",
+    "seed:sync-health": "tsx scripts/seed-sync-health.ts"
   },
   "repository": {
     "type": "git",

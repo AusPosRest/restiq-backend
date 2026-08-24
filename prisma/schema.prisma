@@ -214,8 +214,8 @@ model Outlet {
   createdAt DateTime   @default(now()) @map("created_at") @db.Timestamptz(6)
   deletedAt DateTime?  @map("deleted_at") @db.Timestamptz(6)
 
-  tenant Tenant @relation(fields: [tenantId], references: [id])
-  brand  Brand  @relation(fields: [brandId], references: [id])
+  tenant         Tenant          @relation(fields: [tenantId], references: [id])
+  brand          Brand           @relation(fields: [brandId], references: [id])
   devices        Device[]
   enrolmentCodes EnrolmentCode[]
 
@@ -328,8 +328,18 @@ model Device {
   enrolledAt             DateTime     @map("enrolled_at") @db.Timestamptz(6)
   revokedAt              DateTime?    @map("revoked_at") @db.Timestamptz(6)
 
-  tenant Tenant  @relation(fields: [tenantId], references: [id])
-  outlet Outlet? @relation(fields: [outletId], references: [id])
+  // CAP-6 sync health: latest-heartbeat snapshot, not an event log (NFR-15 -
+  // metadata only, there is no payload field to begin with). A device that
+  // has never sent a heartbeat has lastContactAt = null; the read side falls
+  // back to enrolledAt so a device silent since enrolment still classifies.
+  lastContactAt        DateTime? @map("last_contact_at") @db.Timestamptz(6)
+  outboxDepth          Int?      @map("outbox_depth")
+  appVersion           String?   @map("app_version")
+  clockSkewSeconds     Int?      @map("clock_skew_seconds")
+  recentRejectionCount Int?      @map("recent_rejection_count")
+
+  tenant      Tenant           @relation(fields: [tenantId], references: [id])
+  outlet      Outlet?          @relation(fields: [outletId], references: [id])
   deadLetters SyncDeadLetter[]
 
   @@index([tenantId])
@@ -359,15 +369,15 @@ model EnrolmentCode {
 // AD-7's never-drop rejection sink - the single table CAP-4 and (later) CAP-7
 // both consume. No payload bodies (NFR-15): payloadMeta is metadata only.
 model SyncDeadLetter {
-  id           String    @id @default(uuid(7)) @db.Uuid
-  tenantId     String    @map("tenant_id") @db.Uuid
-  deviceId     String    @map("device_id") @db.Uuid
-  opId         String    @map("op_id") @db.Uuid
-  reasonCode   String    @map("reason_code")
-  reasonText   String    @map("reason_text")
-  payloadMeta  Json      @default("{}") @map("payload_meta")
-  createdAt    DateTime  @default(now()) @map("created_at") @db.Timestamptz(6)
-  resolvedAt   DateTime? @map("resolved_at") @db.Timestamptz(6)
+  id          String    @id @default(uuid(7)) @db.Uuid
+  tenantId    String    @map("tenant_id") @db.Uuid
+  deviceId    String    @map("device_id") @db.Uuid
+  opId        String    @map("op_id") @db.Uuid
+  reasonCode  String    @map("reason_code")
+  reasonText  String    @map("reason_text")
+  payloadMeta Json      @default("{}") @map("payload_meta")
+  createdAt   DateTime  @default(now()) @map("created_at") @db.Timestamptz(6)
+  resolvedAt  DateTime? @map("resolved_at") @db.Timestamptz(6)
 
   tenant Tenant @relation(fields: [tenantId], references: [id])
   device Device @relation(fields: [deviceId], references: [id])
