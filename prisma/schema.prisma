@@ -130,6 +130,8 @@ model Tenant {
   roles            Role[]
   menuCategories   MenuCategory[]
   menuItems        MenuItem[]
+  itemPrices       ItemPrice[]
+  menuImportDrafts MenuImportDraft[]
   ownerInvites     OwnerInvite[]
   ownerUsers       OwnerUser[]
   capabilities     TenantCapability[]
@@ -249,19 +251,71 @@ model MenuCategory {
   @@map("menu_categories")
 }
 
+// AD-11: price lives in item_prices, not here - this table never carries a
+// price column so no future writer is tempted to UPDATE one in place.
 model MenuItem {
-  id         String @id @default(uuid(7)) @db.Uuid
-  tenantId   String @map("tenant_id") @db.Uuid
-  categoryId String @map("category_id") @db.Uuid
+  id         String   @id @default(uuid(7)) @db.Uuid
+  tenantId   String   @map("tenant_id") @db.Uuid
+  categoryId String   @map("category_id") @db.Uuid
   name       String
-  // Money as bigint minor units (workspace convention).
-  priceMinor BigInt @map("price_minor")
-  currency   String @db.Char(3)
+  // Short label for kitchen order tickets (PRD FR-10).
+  shortName  String   @map("short_name")
+  createdAt  DateTime @default(now()) @map("created_at") @db.Timestamptz(6)
 
   tenant   Tenant       @relation(fields: [tenantId], references: [id])
   category MenuCategory @relation(fields: [categoryId], references: [id])
+  prices   ItemPrice[]
 
+  // No two items in the same category may share a name (also the natural
+  // forced-failure anchor for the menu-import commit atomicity test).
+  @@unique([tenantId, categoryId, name])
   @@map("menu_items")
+}
+
+// AD-11: insert-only. A price change is a new row; nothing ever UPDATEs
+// price_minor. The current price for an item is its latest row by created_at.
+model ItemPrice {
+  id         String   @id @default(uuid(7)) @db.Uuid
+  tenantId   String   @map("tenant_id") @db.Uuid
+  itemId     String   @map("item_id") @db.Uuid
+  // Money as bigint minor units (workspace convention).
+  priceMinor BigInt   @map("price_minor")
+  currency   String   @db.Char(3)
+  createdAt  DateTime @default(now()) @map("created_at") @db.Timestamptz(6)
+
+  tenant Tenant   @relation(fields: [tenantId], references: [id])
+  item   MenuItem @relation(fields: [itemId], references: [id])
+
+  @@index([itemId, createdAt])
+  @@map("item_prices")
+}
+
+enum MenuImportStatus {
+  draft
+  committed
+}
+
+// CAP-3: server-held draft between upload and commit (AD-6) - a real row, not
+// per-instance memory, so it survives a reload and works across instances.
+// `payload` holds the extracted items (name, shortName, category, price,
+// per-field confidence); PATCH edits payload in place; commit copies the
+// (possibly edited) payload into real catalogue rows, then marks this row
+// resolved rather than deleting it, leaving a record of what was imported.
+model MenuImportDraft {
+  id          String           @id @default(uuid(7)) @db.Uuid
+  tenantId    String           @map("tenant_id") @db.Uuid
+  status      MenuImportStatus @default(draft)
+  sourceType  String           @map("source_type")
+  fileName    String           @map("file_name")
+  payload     Json
+  createdAt   DateTime         @default(now()) @map("created_at") @db.Timestamptz(6)
+  updatedAt   DateTime         @updatedAt @map("updated_at") @db.Timestamptz(6)
+  committedAt DateTime?        @map("committed_at") @db.Timestamptz(6)
+
+  tenant Tenant @relation(fields: [tenantId], references: [id])
+
+  @@index([tenantId])
+  @@map("menu_import_drafts")
 }
 
 model OwnerInvite {
