@@ -7,13 +7,31 @@ import { OpsDevicesController } from './devices/devices.controller'
 import { DevicesService } from './devices/devices.service'
 import { OpsSubscriptionsController } from './subscriptions/subscriptions.controller'
 import { SubscriptionsService } from './subscriptions/subscriptions.service'
+import { ALERT_CHANNEL, LogAlertChannel } from './sync-health/alert-channel'
+import { OpsSyncHealthController } from './sync-health/sync-health.controller'
+import { SyncHealthService } from './sync-health/sync-health.service'
 import { TenantDirectoryService } from './tenants/directory.service'
 import { OpsTenantsController } from './tenants/tenants.controller'
 import { OpsTenantsService } from './tenants/tenants.service'
 
 @Module({
   imports: [PlatformModule],
-  controllers: [OpsAuthController, OpsDashboardController, OpsTenantsController, OpsDevicesController, OpsSubscriptionsController],
-  providers: [OpsAuthService, OpsTenantsService, TenantDirectoryService, DevicesService, SubscriptionsService],
+  controllers: [
+    OpsAuthController,
+    OpsDashboardController,
+    OpsTenantsController,
+    OpsDevicesController,
+    OpsSubscriptionsController,
+    OpsSyncHealthController,
+  ],
+  providers: [
+    OpsAuthService,
+    OpsTenantsService,
+    TenantDirectoryService,
+    DevicesService,
+    SubscriptionsService,
+    SyncHealthService,
+    { provide: ALERT_CHANNEL, useClass: LogAlertChannel },
+  ],
 })
 export class OpsModule {}

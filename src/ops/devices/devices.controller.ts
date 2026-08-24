@@ -1,7 +1,7 @@
 import { Body, Controller, Get, HttpCode, Param, ParseUUIDPipe, Post, Put, Query } from '@nestjs/common'
 import { CurrentOperator, OpsPrincipal } from '../../platform'
 import { DeviceListResult, DevicesService, DeviceView } from './devices.service'
-import { EnrollDeviceDto, GenerateCodeDto, HubDto, RevokeDto } from './devices.dtos'
+import { EnrollDeviceDto, GenerateCodeDto, HeartbeatDto, HubDto, RevokeDto } from './devices.dtos'
 
 @Controller('ops/v1/devices')
 export class OpsDevicesController {
@@ -46,5 +46,14 @@ export class OpsDevicesController {
     @Body() dto: RevokeDto,
   ): Promise<{ device: DeviceView }> {
     return this.devices.revoke(operator, id, dto.reason)
+  }
+
+  // CAP-6: a device's heartbeat. No device client exists yet (see
+  // devices.service.ts) - reachable with an ops token as a testable stub
+  // until a device-key auth scheme lands with the real sync protocol.
+  @Post(':id/heartbeat')
+  @HttpCode(200)
+  heartbeat(@Param('id', ParseUUIDPipe) id: string, @Body() dto: HeartbeatDto): Promise<{ device: DeviceView }> {
+    return this.devices.heartbeat(id, dto)
   }
 }

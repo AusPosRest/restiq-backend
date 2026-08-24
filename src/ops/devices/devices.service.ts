@@ -6,7 +6,7 @@ import { BadRequestException, ConflictException, Injectable, NotFoundException }
 import { createHash, randomBytes } from 'node:crypto'
 import type { Prisma } from '../../generated/prisma/client'
 import { OpsPrincipal, RegionRegistryService, uuidv7 } from '../../platform'
-import { DEVICE_STATUSES, DEVICE_TYPES, DeviceTypeValue, EnrollDeviceDto, GenerateCodeDto } from './devices.dtos'
+import { DEVICE_STATUSES, DEVICE_TYPES, DeviceTypeValue, EnrollDeviceDto, GenerateCodeDto, HeartbeatDto } from './devices.dtos'
 
 export const CODE_TTL_MS = 15 * 60 * 1000
 const CODE_ALPHABET = 'ABCDEFGHJKLMNPQRSTUVWXYZ23456789' // no I/O/0/1 (unambiguous)
@@ -338,6 +338,41 @@ export class DevicesService {
           },
         })
 
+        return { device: toDeviceView(updated) }
+      })
+    } catch (error) {
+      if (isRecordNotFound(error)) throw new NotFoundException({ code: 'not_found', message: 'No such device' })
+      throw error
+    }
+  }
+
+  // --- CAP-6 heartbeat ingestion. No real device client exists yet (the
+  // POS/KDS sync protocol is explicitly deferred - architecture spine
+  // "Deferred"), so this is called by an operator-held token for now rather
+  // than a device-key scheme: it updates a metadata snapshot only (NFR-15),
+  // it is not an operator decision with a consequence, so unlike revoke/hub
+  // it carries no reason and writes no audit_events row (AD-6 binds mutating
+  // *ops actions*; this is telemetry ingestion, not one).
+  async heartbeat(deviceId: string, dto: HeartbeatDto): Promise<{ device: DeviceView }> {
+    const plane = this.registry.planeFor(this.registry.homeRegion())
+    try {
+      return await plane.$transaction(async (tx) => {
+        await setOperatorContext(tx)
+        const device = await tx.device.findUnique({ where: { id: deviceId } })
+        if (!device) throw new NotFoundException({ code: 'not_found', message: 'No such device' })
+        if (device.status === 'revoked') throw new ConflictException({ code: 'conflict', message: 'A revoked device cannot heartbeat' })
+
+        await tx.$executeRaw`SELECT set_config('app.tenant_id', ${device.tenantId}, true)`
+        const updated = await tx.device.update({
+          where: { id: deviceId },
+          data: {
+            lastContactAt: new Date(),
+            outboxDepth: dto.outboxDepth,
+            appVersion: dto.appVersion,
+            clockSkewSeconds: dto.clockSkewSeconds,
+            recentRejectionCount: dto.recentRejectionCount,
+          },
+        })
         return { device: toDeviceView(updated) }
       })
     } catch (error) {

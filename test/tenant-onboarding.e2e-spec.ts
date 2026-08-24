@@ -41,6 +41,11 @@ function submitPayload(overrides?: { registrationNumber?: string; companyName?: 
 }
 
 async function wipe(prisma: PrismaClient): Promise<void> {
+  // invoice/subscription (CAP-5) restrict-delete tenants; wiped first so this
+  // helper is safe regardless of what another e2e file left behind (the test
+  // suite shares one database and file execution order is not guaranteed).
+  await prisma.invoice.deleteMany()
+  await prisma.subscription.deleteMany()
   await prisma.syncDeadLetter.deleteMany()
   await prisma.device.deleteMany()
   await prisma.enrolmentCode.deleteMany()
