@@ -233,6 +233,65 @@ built here, story by story.
     `SELECT set_config('app.tenant_id', ...)` transaction (AD-5), same
     pattern as every other admin service.
 
+## CAP-9 - Reports catalogue
+
+- **Intent:** an owner browses and exports Sales, Financial (GST/BAS-ready),
+  Menu Engineering, Operations, Inventory, and Labour reports, and can pick
+  an accounting tool to export summarised journals to.
+- **No real transactional reports yet - this is a deliberate decision, not
+  an oversight.** Same reality as CAP-8's dashboard: RESTIQ's POS Core Loop
+  (the surface that would generate `Order`/`Bill`/`Payment` rows) hasn't
+  been built, and no `Document`/`Z-report` immutable model exists either,
+  despite the SPEC's success criterion referencing one. Sales, Financial
+  (GST/BAS), Menu Engineering (by volume), Operations, Inventory, and
+  Labour-cost reports all ultimately depend on that transactional data.
+  Rather than fabricate report content or invent a shadow transactional
+  model to populate the screen, every one of those report types is listed
+  in the catalogue honestly, with `hasData: false`, the message "Available
+  once POS Core Loop is live", and `exportFormats: []` - nothing to export
+  yet. Wire real generation in when the POS Core Loop ships an
+  Order/Bill/Payment/Document model; the catalogue shape (`hasData`,
+  `message`, `exportFormats`) is designed to flip to real values without a
+  breaking change.
+- **Two report types ARE real today**, backed by tables that already exist
+  and are already live-written by other capabilities:
+  - **Menu Catalogue** (`hasData: true`) - CAP-4's `menu_categories` /
+    `menu_items` / `item_prices`.
+  - **Staff Roster** (`hasData: true`) - CAP-7's `staff_users` / `roles`.
+- **Built** (`src/admin/reports/`):
+  - `GET /admin/v1/reports` -> `ReportCatalogueEntry[]`, each
+    `{ key, name, category: "sales"|"financial"|"menu"|"operations"|
+    "inventory"|"labour", hasData, message, exportFormats }`. Static
+    per-request list (no DB read) - the auth guard already requires a valid
+    owner session to reach it, and there's nothing tenant-specific about
+    which report *types* exist.
+  - `GET /admin/v1/reports/menu-catalogue/export?format=csv` -> a real CSV
+    (`category,item,short_name,variant,price,currency,available`) of the
+    tenant's live menu. One row per item with no variants, one row per
+    variant otherwise. "Current price" reuses CAP-4's own resolution rule
+    (`menu/pricing.ts`'s `resolveCurrentPrice`), taken for the `dine_in`
+    channel with no outlet override - a report needs one representative
+    price per row, not a full channel/outlet matrix. An item/variant with
+    no priced row yet exports an empty `price`/`currency` rather than a
+    fabricated figure.
+  - `GET /admin/v1/reports/staff-roster/export?format=csv` -> a real CSV
+    (`name,email,role,pin_status`) of the tenant's current staff, reusing
+    `staff.service.ts`'s own `pinStatus()` derivation rather than a second
+    copy of the PIN-state logic.
+  - Both export endpoints 400 on any `format` other than `csv` (the only
+    format either catalogue entry advertises) - a bad or missing format is
+    a rejection, not a silent fallback.
+  - `GET /admin/v1/reports/export-destinations` -> a static
+    `ExportDestinationView[]`, `{ key, name, status: "not_connected" }` for
+    Tally, Xero, MYOB, Zoho Books, and QuickBooks. Every destination is
+    honestly `"not_connected"` - there is no OAuth/API integration to any
+    accounting tool anywhere in this codebase. This endpoint exists so the
+    console can render the destination *picker* the SPEC describes without
+    pretending a connection exists.
+  - Every export scoped through `owner.tenantId` inside a
+    `SELECT set_config('app.tenant_id', ...)` transaction (AD-5), same
+    pattern as every other admin service.
+
 ## CAP-10 - Branding & capabilities
 
 - **Intent:** an owner sets receipt/UI branding tokens and toggles
