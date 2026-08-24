@@ -8,7 +8,10 @@ export class ReplayDto {
 }
 
 // Bulk replay takes either an explicit id list or a filter (same shape as the
-// list query) - never both, never neither; the service enforces that.
+// list query, "current filters" from the UI's point of view). An explicit
+// `ids: []` is rejected as ambiguous (ArrayNotEmpty); omitting both ids and
+// every filter field is not ambiguous - it means "every unresolved op" -
+// which is what the console's "Replay all" (no filter selected) sends.
 export class BulkReplayDto {
   @IsString() @IsNotEmpty() @MaxLength(500)
   reason!: string

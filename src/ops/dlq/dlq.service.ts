@@ -157,9 +157,6 @@ export class DlqService {
 
   async replayBulk(operator: OpsPrincipal, dto: BulkReplayDto): Promise<{ results: ReplayResult[] }> {
     const hasIds = !!dto.ids && dto.ids.length > 0
-    const hasFilter = !!(dto.tenantId ?? dto.deviceId ?? dto.reasonCode)
-    if (!hasIds && !hasFilter) badRequest('Provide either an id list or a filter (tenantId, deviceId, reasonCode)')
-
     const plane = this.registry.planeFor(this.registry.homeRegion())
     const rows = await plane.$transaction(async (tx) => {
       await setOperatorContext(tx)

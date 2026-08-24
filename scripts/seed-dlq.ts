@@ -9,6 +9,7 @@
 //   pnpm run seed:dlq
 import 'dotenv/config'
 import { createPrismaClient } from '../src/db/client'
+import type { Prisma } from '../src/generated/prisma/client'
 import { uuidv7 } from '../src/platform'
 
 const TENANT_NAME = 'DLQ Demo Hospitality'
@@ -19,7 +20,7 @@ interface DeadLetterFixture {
   deviceType: 'pos' | 'kds' | 'kiosk' | 'cds'
   reasonCode: string
   reasonText: string
-  payloadMeta: Record<string, unknown>
+  payloadMeta: Prisma.InputJsonValue
 }
 
 // A believable spread across the reason-code shape story 4 established

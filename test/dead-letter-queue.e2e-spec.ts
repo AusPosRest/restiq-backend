@@ -301,9 +301,22 @@ describe('/ops/v1/dead-letters (e2e)', () => {
       expect(remaining.total).toBe(1)
     })
 
-    it('rejects a bulk replay without a reason, ids, or a filter', async () => {
-      expect((await authed(request(httpServer).post('/ops/v1/dead-letters/replay-bulk')).send({ reason: 'x' })).status).toBe(400)
-      expect((await authed(request(httpServer).post('/ops/v1/dead-letters/replay-bulk')).send({ ids: [] })).status).toBe(400)
+    it('replays every unresolved op fleet-wide when neither ids nor a filter is given - the "Replay all" case', async () => {
+      const a = await deadLetter({ reasonCode: 'clock_skew' })
+      const b = await deadLetter({ reasonCode: 'stale_price_version' })
+
+      const res = await authed(request(httpServer).post('/ops/v1/dead-letters/replay-bulk')).send({ reason: 'Replay everything' })
+      expect(res.status).toBe(200)
+      const body = res.body as { results: Array<{ id: string; status: string }> }
+      expect(body.results.map((r) => r.id).sort()).toEqual([a.id, b.id].sort())
+    })
+
+    it('rejects an explicit empty id list as ambiguous', async () => {
+      expect((await authed(request(httpServer).post('/ops/v1/dead-letters/replay-bulk')).send({ reason: 'x', ids: [] })).status).toBe(400)
+    })
+
+    it('rejects a bulk replay without a reason', async () => {
+      expect((await authed(request(httpServer).post('/ops/v1/dead-letters/replay-bulk')).send({})).status).toBe(400)
     })
 
     it('rejects without an ops token', async () => {
