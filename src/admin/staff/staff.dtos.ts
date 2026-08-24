@@ -21,6 +21,12 @@ export class UpdateStaffDto {
 
   @IsOptional() @IsUUID()
   roleId?: string
+
+  // Required only when roleId is present (checked in the service, not here -
+  // a plain rename carries no reason). Per SPEC's Constraints: role change is
+  // named alongside PIN revoke and price change as security-relevant.
+  @IsOptional() @IsString() @IsNotEmpty() @MaxLength(500)
+  reason?: string
 }
 
 export class RevokePinDto {

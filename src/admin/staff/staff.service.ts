@@ -6,11 +6,11 @@
 // checked against this tenant's own Role rows before it's used (400 if it
 // doesn't belong here or isn't a seeded system role).
 //
-// Creating or editing a staff record is a routine content edit (SPEC
+// Creating a staff record or renaming one is a routine content edit (SPEC
 // constraint - same posture as adding a menu category) and isn't audited.
-// Issuing/revoking a PIN is credential-bearing: revoke is destructive and
-// security-relevant per AD-6, so it requires a reason and writes an
-// audit_events row in the same transaction as the mutation.
+// Changing a staff member's role IS security-relevant per SPEC's Constraints
+// (named alongside PIN revoke and price change) - it requires a reason and
+// writes an audit_events row, same as issuing/revoking a PIN.
 import { BadRequestException, ConflictException, Injectable, NotFoundException } from '@nestjs/common'
 import * as argon2 from 'argon2'
 import { randomInt } from 'node:crypto'
@@ -161,14 +161,31 @@ export class StaffService {
     const plane = this.plane()
     return plane.$transaction(async (tx) => {
       await setTenantContext(tx, owner.tenantId)
-      await this.findOwnedStaff(tx, owner.tenantId, staffId)
-      if (dto.roleId) await this.assertSeededRole(tx, owner.tenantId, dto.roleId)
+      const existing = await this.findOwnedStaff(tx, owner.tenantId, staffId)
+      const roleChanging = dto.roleId !== undefined && dto.roleId !== existing.roleId
+      if (roleChanging) {
+        await this.assertSeededRole(tx, owner.tenantId, dto.roleId as string)
+        if (!dto.reason) {
+          throw new BadRequestException({ code: 'validation_failed', message: 'reason is required when changing a role' })
+        }
+      }
 
+      const now = new Date()
       const updated = await tx.staffUser.update({
         where: { id: staffId },
         data: { name: dto.name?.trim(), roleId: dto.roleId },
         include: STAFF_INCLUDE,
       })
+
+      // AD-6: role change is named alongside PIN revoke and price change in
+      // SPEC's Constraints as security-relevant - audited the same way,
+      // unlike the routine rename-only path.
+      if (roleChanging) {
+        await tx.auditEvent.create({
+          data: { tenantId: owner.tenantId, actorId: owner.id, actorEmail: owner.email, action: 'staff.role_changed', reason: dto.reason as string, occurredAt: now },
+        })
+      }
+
       return toStaffView(updated)
     })
   }

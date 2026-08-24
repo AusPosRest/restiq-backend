@@ -230,15 +230,55 @@ describe('/admin/v1/staff and /admin/v1/roles (e2e)', () => {
   })
 
   describe('PATCH /admin/v1/staff/:id', () => {
-    it('updates name and role', async () => {
+    it('updates name without a reason (routine, not audited)', async () => {
       const { tenantId, token } = await createOwner(prisma)
       const roles = await seedRoles(prisma, tenantId)
       const created = await authed(request(httpServer).post('/admin/v1/staff'), token).send({ name: 'Priya Nair', roleId: roles.Waiter })
       const staffId = (created.body as StaffView).id
 
-      const res = await authed(request(httpServer).patch(`/admin/v1/staff/${staffId}`), token).send({ name: 'Priya N.', roleId: roles.Cashier })
+      const res = await authed(request(httpServer).patch(`/admin/v1/staff/${staffId}`), token).send({ name: 'Priya N.' })
       expect(res.status).toBe(200)
-      expect(res.body as StaffView).toMatchObject({ name: 'Priya N.', roleId: roles.Cashier, roleName: 'Cashier' })
+      expect(res.body as StaffView).toMatchObject({ name: 'Priya N.', roleId: roles.Waiter })
+    })
+
+    it('changes role with a reason, and audits it (AD-6: role change is security-relevant)', async () => {
+      const { tenantId, token } = await createOwner(prisma)
+      const roles = await seedRoles(prisma, tenantId)
+      const created = await authed(request(httpServer).post('/admin/v1/staff'), token).send({ name: 'Priya Nair', roleId: roles.Waiter })
+      const staffId = (created.body as StaffView).id
+
+      const res = await authed(request(httpServer).patch(`/admin/v1/staff/${staffId}`), token).send({
+        roleId: roles.Cashier,
+        reason: 'Promoted to front-of-house lead',
+      })
+      expect(res.status).toBe(200)
+      expect(res.body as StaffView).toMatchObject({ roleId: roles.Cashier, roleName: 'Cashier' })
+
+      const audit = await prisma.auditEvent.findFirst({ where: { tenantId, action: 'staff.role_changed' } })
+      expect(audit).toMatchObject({ reason: 'Promoted to front-of-house lead' })
+    })
+
+    it('rejects a role change with no reason (400)', async () => {
+      const { tenantId, token } = await createOwner(prisma)
+      const roles = await seedRoles(prisma, tenantId)
+      const created = await authed(request(httpServer).post('/admin/v1/staff'), token).send({ name: 'Priya Nair', roleId: roles.Waiter })
+      const staffId = (created.body as StaffView).id
+
+      const res = await authed(request(httpServer).patch(`/admin/v1/staff/${staffId}`), token).send({ roleId: roles.Cashier })
+      expect(res.status).toBe(400)
+
+      const audit = await prisma.auditEvent.findFirst({ where: { tenantId, action: 'staff.role_changed' } })
+      expect(audit).toBeNull()
+    })
+
+    it('re-sending the same roleId is not a role change - no reason required', async () => {
+      const { tenantId, token } = await createOwner(prisma)
+      const roles = await seedRoles(prisma, tenantId)
+      const created = await authed(request(httpServer).post('/admin/v1/staff'), token).send({ name: 'Priya Nair', roleId: roles.Waiter })
+      const staffId = (created.body as StaffView).id
+
+      const res = await authed(request(httpServer).patch(`/admin/v1/staff/${staffId}`), token).send({ roleId: roles.Waiter })
+      expect(res.status).toBe(200)
     })
 
     it('rejects a roleId outside the seeded set (400)', async () => {
@@ -247,7 +287,7 @@ describe('/admin/v1/staff and /admin/v1/roles (e2e)', () => {
       const created = await authed(request(httpServer).post('/admin/v1/staff'), token).send({ name: 'Priya Nair', roleId: roles.Waiter })
       const staffId = (created.body as StaffView).id
 
-      const res = await authed(request(httpServer).patch(`/admin/v1/staff/${staffId}`), token).send({ roleId: uuidv7() })
+      const res = await authed(request(httpServer).patch(`/admin/v1/staff/${staffId}`), token).send({ roleId: uuidv7(), reason: 'x' })
       expect(res.status).toBe(400)
     })
 
