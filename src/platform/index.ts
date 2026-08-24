@@ -1,0 +1,8 @@
+// Public surface of the platform module - cross-module imports go through here.
+export { PlatformModule } from './platform.module'
+export { PrismaService } from './prisma.service'
+export { ControlPlaneAuditService } from './audit.service'
+export type { ControlPlaneAuditEntry } from './audit.service'
+export { CurrentOperator, Public } from './ops-auth.guard'
+export { OPS_SESSION_TTL_SECONDS, signOpsToken } from './ops-jwt'
+export type { OpsPrincipal } from './ops-jwt'

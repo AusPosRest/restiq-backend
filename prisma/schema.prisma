@@ -1,11 +1,38 @@
 generator client {
-  provider = "prisma-client"
-  output   = "../src/generated/prisma"
+  provider     = "prisma-client"
+  output       = "../src/generated/prisma"
+  // Prisma 7 emits ESM by default; Nest 11 is CJS. Revisit at Nest 12's ESM release.
+  moduleFormat = "cjs"
 }
 
 datasource db {
   provider = "postgresql"
 }
 
-// No models yet - restiq has no design doc for its data model. Add tables
-// here once the domain is designed, not before.
+// Control-plane tables only (AD-1): operator identity and the control-plane
+// audit trail. Tenant-owned tables (all carrying tenant_id + RLS, AD-5) arrive
+// with the stories that need them.
+
+model OperatorUser {
+  id           String   @id @default(uuid(7)) @db.Uuid
+  email        String   @unique
+  passwordHash String   @map("password_hash")
+  createdAt    DateTime @default(now()) @map("created_at") @db.Timestamptz(6)
+  updatedAt    DateTime @updatedAt @map("updated_at") @db.Timestamptz(6)
+
+  @@map("operator_users")
+}
+
+// Append-only (AD-6, AD-8): rows are inserted, never updated or deleted.
+model ControlPlaneAuditEvent {
+  id         String   @id @default(uuid(7)) @db.Uuid
+  actorId    String?  @map("actor_id") @db.Uuid
+  actorEmail String   @map("actor_email")
+  action     String
+  reason     String?
+  // Dual timestamps: when it happened per the app, when the row landed.
+  occurredAt DateTime @map("occurred_at") @db.Timestamptz(6)
+  recordedAt DateTime @default(now()) @map("recorded_at") @db.Timestamptz(6)
+
+  @@map("control_plane_audit_events")
+}
