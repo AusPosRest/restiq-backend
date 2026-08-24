@@ -8,3 +8,4 @@ if (!testUrl) {
 }
 process.env.DATABASE_URL = testUrl
 process.env.OPS_JWT_SECRET ??= 'e2e-ops-secret'
+process.env.ADMIN_JWT_SECRET ??= 'e2e-admin-secret'

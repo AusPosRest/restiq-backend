@@ -131,12 +131,14 @@ model Tenant {
   menuCategories   MenuCategory[]
   menuItems        MenuItem[]
   ownerInvites     OwnerInvite[]
+  ownerUsers       OwnerUser[]
   capabilities     TenantCapability[]
   devices          Device[]
   enrolmentCodes   EnrolmentCode[]
   deadLetters      SyncDeadLetter[]
   subscription     Subscription?
   invoices         Invoice[]
+  checklistProgress ChecklistProgress?
 
   // The directory list is served from these: filter columns plus the
   // created_at ordering the default sort and cursor walk.
@@ -272,11 +274,53 @@ model OwnerInvite {
   // invite email ships (Tenant Admin story).
   tokenHash String   @unique @map("token_hash")
   expiresAt DateTime @map("expires_at") @db.Timestamptz(6)
+  // Distinct from expiry (CAP-1: expired vs. already-used are different
+  // rejections) - set once, on the accept that consumes the token.
+  usedAt    DateTime? @map("used_at") @db.Timestamptz(6)
   createdAt DateTime @default(now()) @map("created_at") @db.Timestamptz(6)
 
   tenant Tenant @relation(fields: [tenantId], references: [id])
 
   @@map("owner_invites")
+}
+
+// The admin realm's principal (AD-10): one tenant owner account, created on
+// invite acceptance. A separate model from OperatorUser by design (AD-3's
+// disjoint-realm rule extends to AD-10) - no shared identity table.
+model OwnerUser {
+  id           String   @id @default(uuid(7)) @db.Uuid
+  tenantId     String   @map("tenant_id") @db.Uuid
+  email        String
+  firstName    String   @map("first_name")
+  lastName     String   @map("last_name")
+  passwordHash String   @map("password_hash")
+  createdAt    DateTime @default(now()) @map("created_at") @db.Timestamptz(6)
+  updatedAt    DateTime @updatedAt @map("updated_at") @db.Timestamptz(6)
+
+  tenant Tenant @relation(fields: [tenantId], references: [id])
+
+  @@unique([tenantId, email])
+  @@map("owner_users")
+}
+
+// CAP-2 go-live checklist: one row per tenant, a completion timestamp per
+// step or null for not-yet-done. Stories 2, 5, 6, 7 each own one column and
+// call PATCH /admin/v1/checklist/:step when their feature completes it -
+// this table does not derive any step from other tables today.
+model ChecklistProgress {
+  id              String    @id @default(uuid(7)) @db.Uuid
+  tenantId        String    @unique @map("tenant_id") @db.Uuid
+  outletDetailsAt DateTime? @map("outlet_details_at") @db.Timestamptz(6)
+  floorPlanAt     DateTime? @map("floor_plan_at") @db.Timestamptz(6)
+  menuImportAt    DateTime? @map("menu_import_at") @db.Timestamptz(6)
+  devicesAt       DateTime? @map("devices_at") @db.Timestamptz(6)
+  staffAt         DateTime? @map("staff_at") @db.Timestamptz(6)
+  createdAt       DateTime  @default(now()) @map("created_at") @db.Timestamptz(6)
+  updatedAt       DateTime  @updatedAt @map("updated_at") @db.Timestamptz(6)
+
+  tenant Tenant @relation(fields: [tenantId], references: [id])
+
+  @@map("checklist_progress")
 }
 
 // Region-plane audit trail (AD-8): tenant-affecting mutations audit here, in

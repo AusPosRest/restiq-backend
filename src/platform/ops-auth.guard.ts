@@ -7,7 +7,9 @@ import { Reflector } from '@nestjs/core'
 import type { Request } from 'express'
 import { OpsPrincipal, verifyOpsToken } from './ops-jwt'
 
-const IS_PUBLIC = 'isPublic'
+// Exported so the admin guard (AD-10) can share the same @Public() marker -
+// one realm-agnostic "no session required" flag, not two.
+export const IS_PUBLIC = 'isPublic'
 
 /** Marks a route reachable without a session (login, health). */
 export const Public = () => SetMetadata(IS_PUBLIC, true)
