@@ -52,3 +52,17 @@
   first table created for an outlet flips the `floor_plan` checklist step.
   See [wiki/features/tenant-admin.md](../features/tenant-admin.md). Issue
   AusPosRest/restiq-backend#34.
+- **2026-08-24** - Tenant Admin story 6: devices & printers (CAP-6).
+  `GET /admin/v1/outlets/:outletId/devices`,
+  `POST /admin/v1/outlets/:outletId/devices/enrolment-codes` - a thin
+  tenant-scoped wrapper (`src/admin/devices/`) around Platform Console's
+  `DevicesService` (AD-12: one enrolment implementation, two callers, now
+  exported from `src/ops` for this reuse); no new device/enrolment-code
+  logic. `GET`/`PATCH /admin/v1/outlets/:outletId/floor-plan/printers(/:id)`
+  added to story 5's floor-plan module for printer render-mode (fallback was
+  already covered by `Station.fallbackPrinterId`). The go-live checklist's
+  `devices` step now flips inside the shared `enroll()` method itself, on
+  the tenant's first device. See
+  [wiki/features/tenant-admin.md](../features/tenant-admin.md) and
+  [wiki/features/platform-console.md](../features/platform-console.md).
+  Issue AusPosRest/restiq-backend#36.

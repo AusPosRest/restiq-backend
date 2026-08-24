@@ -11,6 +11,7 @@ import {
   StationView,
   TableView,
   UpdateFloorDto,
+  UpdatePrinterDto,
   UpdateStationDto,
   UpdateTableDto,
 } from './floor-plan.dtos'
@@ -63,10 +64,25 @@ export class AdminFloorPlanController {
     return this.floorPlan.deleteTable(owner, outletId, tableId)
   }
 
+  @Get('printers')
+  listPrinters(@CurrentOwner() owner: AdminPrincipal, @Param('outletId') outletId: string): Promise<PrinterView[]> {
+    return this.floorPlan.listPrinters(owner, outletId)
+  }
+
   @Post('printers')
   @HttpCode(201)
   createPrinter(@CurrentOwner() owner: AdminPrincipal, @Param('outletId') outletId: string, @Body() dto: CreatePrinterDto): Promise<PrinterView> {
     return this.floorPlan.createPrinter(owner, outletId, dto)
+  }
+
+  @Patch('printers/:printerId')
+  updatePrinter(
+    @CurrentOwner() owner: AdminPrincipal,
+    @Param('outletId') outletId: string,
+    @Param('printerId') printerId: string,
+    @Body() dto: UpdatePrinterDto,
+  ): Promise<PrinterView> {
+    return this.floorPlan.updatePrinter(owner, outletId, printerId, dto)
   }
 
   @Post('stations')

@@ -77,6 +77,15 @@ export class CreatePrinterDto {
   renderMode!: PrinterRenderMode
 }
 
+// tenant-admin/CAP-6: a printer's own render-mode is the only field it owns
+// that this story mutates - fallback routing is a Station field
+// (fallbackPrinterId, already PATCH-able via UpdateStationDto) and is not
+// duplicated here.
+export class UpdatePrinterDto {
+  @IsEnum(PRINTER_RENDER_MODES)
+  renderMode!: PrinterRenderMode
+}
+
 // noPrinterAcknowledged is a one-time confirmation carried on the request,
 // never persisted (SPEC CAP-5: every station needs a printer or an explicit
 // "no printer" acknowledgement - the acknowledgement gate fires whenever a

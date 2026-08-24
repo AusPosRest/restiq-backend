@@ -26,6 +26,7 @@ import {
   StationView,
   TableView,
   UpdateFloorDto,
+  UpdatePrinterDto,
   UpdateStationDto,
   UpdateTableDto,
 } from './floor-plan.dtos'
@@ -77,6 +78,14 @@ async function loadTable(tx: Tx, tenantId: string, outletId: string, tableId: st
   }
   await loadFloor(tx, tenantId, outletId, table.floorId)
   return table
+}
+
+async function loadPrinter(tx: Tx, tenantId: string, outletId: string, printerId: string) {
+  const printer = await tx.printer.findUnique({ where: { id: printerId } })
+  if (!printer || printer.tenantId !== tenantId || printer.outletId !== outletId) {
+    throw new NotFoundException({ code: 'not_found', message: 'No such printer' })
+  }
+  return printer
 }
 
 async function loadStation(tx: Tx, tenantId: string, outletId: string, stationId: string) {
@@ -242,6 +251,30 @@ export class FloorPlanService {
       await setTenantContext(tx, owner.tenantId)
       await loadOutlet(tx, owner.tenantId, outletId)
       const printer = await tx.printer.create({ data: { tenantId: owner.tenantId, outletId, name: dto.name, renderMode: dto.renderMode } })
+      return toPrinterView(printer)
+    })
+  }
+
+  // tenant-admin/CAP-6: printers scoped to one outlet, without the rest of
+  // the floor plan (floors/tables/stations) getFloorPlan() also returns.
+  async listPrinters(owner: AdminPrincipal, outletId: string): Promise<PrinterView[]> {
+    const plane = this.registry.planeFor(this.registry.homeRegion())
+    return plane.$transaction(async (tx) => {
+      await setTenantContext(tx, owner.tenantId)
+      await loadOutlet(tx, owner.tenantId, outletId)
+      const printers = await tx.printer.findMany({ where: { outletId, deletedAt: null }, orderBy: { createdAt: 'asc' } })
+      return printers.map(toPrinterView)
+    })
+  }
+
+  // Render-mode only - a printer's fallback is Station.fallbackPrinterId,
+  // already mutable via updateStation.
+  async updatePrinter(owner: AdminPrincipal, outletId: string, printerId: string, dto: UpdatePrinterDto): Promise<PrinterView> {
+    const plane = this.registry.planeFor(this.registry.homeRegion())
+    return plane.$transaction(async (tx) => {
+      await setTenantContext(tx, owner.tenantId)
+      await loadPrinter(tx, owner.tenantId, outletId, printerId)
+      const printer = await tx.printer.update({ where: { id: printerId }, data: { renderMode: dto.renderMode } })
       return toPrinterView(printer)
     })
   }

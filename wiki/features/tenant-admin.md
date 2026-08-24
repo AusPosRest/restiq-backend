@@ -53,8 +53,9 @@ built here, story by story.
     `ChecklistService.updateStep` when it creates an outlet's first table.
   - `menu_import` - **done (CAP-3, this story)** - `MenuImportService.commit`
     calls `ChecklistService.updateStep` directly on a successful commit.
-  - `devices` - CAP-6, once a device is enrolled for the tenant (reuses the
-    Platform Console device/enrolment-code service per AD-12).
+  - `devices` - **done (CAP-6)** - the shared `DevicesService.enroll()`
+    (`src/ops/devices/devices.service.ts`) flips it directly, in the same
+    transaction as the device row, on the tenant's first device.
   - `staff` - CAP-7, once at least one non-owner user is invited.
 
 ## CAP-3 - AI-assisted menu import
@@ -288,6 +289,61 @@ built here, story by story.
     printer that exists but belongs to a different outlet than the one in
     the URL - 404s or 400s rather than leaking existence.
 
+## CAP-6 - Devices & printers
+
+- **Intent:** an owner views enrolled devices per outlet, generates
+  enrolment codes, and sees printer render-mode/fallback configuration -
+  reusing the device/enrolment-code backend built for Platform Console
+  (AD-12: one implementation, two callers), scoped down to the owner's own
+  tenant. An owner can never see or enrol a device for a tenant they don't
+  own.
+- **Built** (`src/admin/devices/`), a thin wrapper - it adds no
+  enrolment-code or device-fleet logic of its own:
+  - `GET /admin/v1/outlets/:outletId/devices` -> `{ devices: [{ id,
+    tenantId, outletId, label, type, role, status, enrolledAt, revokedAt,
+    tenantName, outletName }], nextCursor, total }`. Calls
+    `DevicesService.list()` (`src/ops/devices/devices.service.ts`) with
+    `{ tenantId: owner.tenantId, outletId }` - the exact same Prisma query
+    Platform Console's fleet/tenant-detail views run, scoped one level
+    further. `list()` gained an `outletId` filter for this caller; ops
+    callers never pass one, so their behaviour is unchanged.
+  - `POST /admin/v1/outlets/:outletId/devices/enrolment-codes` -> `{ code,
+    deviceType, expiresAt }` (201). Calls
+    `DevicesService.generateCode()` - same 15-minute TTL, same
+    `sha256(normalized-code)` hash, same code alphabet as
+    `ops/v1/devices/enrolment-codes`
+    (`test/admin-devices.e2e-spec.ts` asserts the hash format directly, not
+    just the response shape). `tenantId` is always `owner.tenantId` from
+    the session - `AdminGenerateCodeDto` has no `tenantId`/`outletId`
+    field, unlike the ops-realm DTO which trusts an operator to name any
+    tenant.
+  - `GET /admin/v1/outlets/:outletId/floor-plan/printers` /
+    `PATCH /admin/v1/outlets/:outletId/floor-plan/printers/:printerId`
+    (`src/admin/floor-plan/`, story 5's module - not duplicated here).
+    `PATCH` body `{ renderMode: "text" | "bitmap" }`: a printer's render
+    mode is the only field it owns that this story mutates. Fallback
+    routing is `Station.fallbackPrinterId`, already `PATCH`-able via
+    `updateStation` since story 5 - no second fallback field was added.
+  - **Cross-tenant isolation:** `list()` first checks the outlet belongs to
+    `owner.tenantId` (404 otherwise, same pattern as every other admin
+    outlet-scoped endpoint); `generateCode()` relies on the shared
+    service's own tenant/outlet check (`outlet.findFirst({ id: outletId,
+    tenantId })` -> 404) - this is the test that proves AD-12 reuse didn't
+    leak scoping, not a second check bolted on top.
+  - **Checklist integration:** see CAP-2 above - the flip lives inside the
+    shared `enroll()` method itself, not in this module, so it fires
+    regardless of which realm's token redeemed the code.
+- **Deviation:** `DevicesService.list()` runs under operator RLS context
+  (`setOperatorContext`, a cross-tenant read bypass) even when called from
+  `/admin` - unchanged from Platform Console's original behaviour, since
+  splitting the RLS context by caller would touch the shared service beyond
+  a thin wrapper. Safe in practice: the `tenantId` filter is derived from
+  the verified JWT, never from client input, so the WHERE clause alone
+  prevents cross-tenant leakage even without RLS backing it - but it means
+  this one read doesn't get AD-5's RLS defense-in-depth layer the rest of
+  `/admin` has. Flagged for a follow-up if a future story wants to close
+  that gap.
+
 ## Integration points for story 6+ and beyond
 
 - None of CAP-4's tables are read by another CAP yet. A future POS/QR
@@ -387,6 +443,9 @@ built here, story by story.
   `station_printers` join table - a station only ever needs one primary +
   one optional fallback printer (see the design's Kitchen Routing panel), so
   a direct nullable FK pair covers it without unused multiplicity.
+- `devices` / `enrolment_codes` (existing, Platform Console CAP-4, unchanged
+  schema) - CAP-6 adds no columns; it's a second reader/writer of the same
+  tables through the same service (AD-12).
 
 ## Key decisions
 

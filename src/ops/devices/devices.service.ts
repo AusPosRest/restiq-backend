@@ -132,6 +132,10 @@ export class DevicesService {
   async list(query: Record<string, string | undefined>): Promise<DeviceListResult> {
     const tenantId = query.tenantId
     if (tenantId !== undefined && !/^[0-9a-f-]{36}$/i.test(tenantId)) badRequest('tenantId is not a valid id')
+    // outletId: Tenant Admin's per-outlet Devices screen (CAP-6) scopes down
+    // one level further than the fleet/tenant views above (AD-12 reuse).
+    const outletId = query.outletId
+    if (outletId !== undefined && !/^[0-9a-f-]{36}$/i.test(outletId)) badRequest('outletId is not a valid id')
     const type = parseChoice(query.type, DEVICE_TYPES, 'type')
     const status = parseChoice(query.status, DEVICE_STATUSES, 'status')
     const limit = query.limit === undefined ? LIMIT_DEFAULT : Number(query.limit)
@@ -140,6 +144,7 @@ export class DevicesService {
 
     const where: Prisma.DeviceWhereInput = {
       ...(tenantId && { tenantId }),
+      ...(outletId && { outletId }),
       ...(type && { type }),
       ...(status && { status }),
     }
@@ -237,6 +242,8 @@ export class DevicesService {
         throw new ConflictException({ code: 'code_already_used', message: 'This enrolment code has already been used' })
       }
 
+      const isFirstDeviceForTenant = (await tx.device.count({ where: { tenantId: record.tenantId } })) === 0
+
       const id = uuidv7()
       const now = new Date()
       const device = await tx.device.create({
@@ -260,6 +267,23 @@ export class DevicesService {
           occurredAt: now,
         },
       })
+
+      // tenant-admin/CAP-6: the go-live checklist's 'devices' step is owned by
+      // the admin/checklist module, but enrolment has one implementation
+      // (AD-12) reachable from both consoles - importing ChecklistService
+      // here would import admin's barrel from ops, and admin already imports
+      // ops's barrel to reuse this same service, so that would be a circular
+      // module dependency. checklist_progress is a plain table on this same
+      // plane, so the flip is written directly, in the same transaction as
+      // the device it reports on, same non-reimplementation spirit as the
+      // audit_events write two lines up.
+      if (isFirstDeviceForTenant) {
+        await tx.checklistProgress.upsert({
+          where: { tenantId: record.tenantId },
+          create: { tenantId: record.tenantId, devicesAt: now },
+          update: { devicesAt: now },
+        })
+      }
 
       return { device: toDeviceView(device) }
     })
