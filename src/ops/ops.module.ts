@@ -37,5 +37,9 @@ import { OpsTenantsService } from './tenants/tenants.service'
     DlqService,
     { provide: ALERT_CHANNEL, useClass: LogAlertChannel },
   ],
+  // DevicesService is exported for tenant-admin/CAP-6 (AD-12: one enrolment
+  // implementation, two callers) - admin/devices calls it directly rather
+  // than reimplementing enrolment-code generation or fleet queries.
+  exports: [DevicesService],
 })
 export class OpsModule {}

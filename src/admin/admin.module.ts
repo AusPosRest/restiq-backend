@@ -1,4 +1,5 @@
 import { Module } from '@nestjs/common'
+import { OpsModule } from '../ops'
 import { PlatformModule } from '../platform'
 import { AdminAuthController } from './auth.controller'
 import { AdminAuthService } from './auth.service'
@@ -6,6 +7,8 @@ import { AdminBrandingController } from './branding/branding.controller'
 import { BrandingService } from './branding/branding.service'
 import { AdminChecklistController } from './checklist/checklist.controller'
 import { ChecklistService } from './checklist/checklist.service'
+import { AdminDevicesController } from './devices/devices.controller'
+import { AdminDevicesService } from './devices/devices.service'
 import { AdminFloorPlanController } from './floor-plan/floor-plan.controller'
 import { FloorPlanService } from './floor-plan/floor-plan.service'
 import { AdminMenuAllergensController } from './menu/allergens.controller'
@@ -25,7 +28,7 @@ import { AdminOutletsController } from './outlets/outlets.controller'
 import { OutletsService } from './outlets/outlets.service'
 
 @Module({
-  imports: [PlatformModule],
+  imports: [PlatformModule, OpsModule],
   controllers: [
     AdminAuthController,
     AdminChecklistController,
@@ -38,6 +41,7 @@ import { OutletsService } from './outlets/outlets.service'
     AdminOutletsController,
     AdminBrandingController,
     AdminFloorPlanController,
+    AdminDevicesController,
   ],
   providers: [
     AdminAuthService,
@@ -52,6 +56,7 @@ import { OutletsService } from './outlets/outlets.service'
     OutletsService,
     BrandingService,
     FloorPlanService,
+    AdminDevicesService,
   ],
 })
 export class AdminModule {}
