@@ -28,6 +28,8 @@ import { AdminMenuImportController } from './menu-import/menu-import.controller'
 import { MenuImportService } from './menu-import/menu-import.service'
 import { AdminOutletsController } from './outlets/outlets.controller'
 import { OutletsService } from './outlets/outlets.service'
+import { AdminReportsController } from './reports/reports.controller'
+import { ReportsService } from './reports/reports.service'
 import { AdminRolesController } from './staff/roles.controller'
 import { AdminStaffController } from './staff/staff.controller'
 import { StaffService } from './staff/staff.service'
@@ -50,6 +52,7 @@ import { StaffService } from './staff/staff.service'
     AdminDevicesController,
     AdminStaffController,
     AdminRolesController,
+    AdminReportsController,
   ],
   providers: [
     AdminAuthService,
@@ -67,6 +70,7 @@ import { StaffService } from './staff/staff.service'
     FloorPlanService,
     AdminDevicesService,
     StaffService,
+    ReportsService,
   ],
 })
 export class AdminModule {}

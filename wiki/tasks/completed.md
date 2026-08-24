@@ -96,3 +96,21 @@
   outlet granularity. See
   [wiki/features/tenant-admin.md](../features/tenant-admin.md). Issue
   AusPosRest/restiq-backend#40.
+- **2026-08-24** - Tenant Admin story 9: reports catalogue (CAP-9). New
+  `src/admin/reports/` module: `GET /admin/v1/reports` (the report
+  catalogue), `GET /admin/v1/reports/menu-catalogue/export?format=csv`,
+  `GET /admin/v1/reports/staff-roster/export?format=csv`, and
+  `GET /admin/v1/reports/export-destinations`. **Explicitly honest, not an
+  oversight:** Sales, Financial (GST/BAS), Menu Engineering, Operations,
+  Inventory, and Labour-cost reports all depend on transactional
+  Order/Bill/Payment/Document data that doesn't exist yet (POS Core Loop
+  unbuilt) - each is listed with `hasData: false`, "Available once POS Core
+  Loop is live", and `exportFormats: []`, never fabricated content or a
+  shadow transactional model. Two report types ARE real and export a real
+  CSV: **Menu Catalogue** (CAP-4's live menu/prices) and **Staff Roster**
+  (CAP-7's live staff/roles). The accounting export-destination picker
+  (Tally/Xero/MYOB/Zoho/QuickBooks) is a static list, every destination
+  honestly `"not_connected"` - no OAuth/API integration to any of them
+  exists in this codebase. See
+  [wiki/features/tenant-admin.md](../features/tenant-admin.md). Issue
+  AusPosRest/restiq-backend#42.

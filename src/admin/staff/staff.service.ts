@@ -58,7 +58,9 @@ interface StaffWithRole {
   role: { name: string }
 }
 
-function pinStatus(row: Pick<StaffWithRole, 'pinHash' | 'pinRevokedAt'>): PinStatus {
+// Exported for reuse by CAP-9's staff-roster export (reports.service.ts) -
+// the same derivation, not a second copy of the pin/revoked logic.
+export function pinStatus(row: Pick<StaffWithRole, 'pinHash' | 'pinRevokedAt'>): PinStatus {
   if (!row.pinHash) return 'none'
   return row.pinRevokedAt ? 'revoked' : 'active'
 }
