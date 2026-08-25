@@ -124,7 +124,7 @@ export class PosAuthService {
       await recordClockInIfNeeded(tx, { tenantId: staff.tenantId, staffId: staff.id, outletId: outlet.id, timezone: outlet.timezone })
     })
 
-    const principal: PosPrincipal = { id: staff.id, tenantId: staff.tenantId, outletId: outlet.id }
+    const principal: PosPrincipal = { id: staff.id, tenantId: staff.tenantId, outletId: outlet.id, name: staff.name }
     return {
       status: 'authenticated',
       token: signPosToken(principal),

@@ -130,6 +130,22 @@
   `POST /pos/v1/clock/out` ends it (`409 not_clocked_in` otherwise). See
   [wiki/features/pos-cashier-waiter.md](../features/pos-cashier-waiter.md).
   Issue AusPosRest/restiq-backend#44.
+- **2026-08-25** - POS Cashier & Waiter story 3: table map and order
+  ownership/transfer (CAP-2). New `src/pos/` module (first `/pos` HTTP
+  surface): `GET /pos/v1/outlets/:outletId/table-map` (reuses tenant-admin/
+  CAP-5's `Floor`/`DiningTable` models, no second table model),
+  `POST /pos/v1/outlets/:outletId/tables/:tableId/order` (open/claim, never
+  a takeover), `GET /pos/v1/orders/:orderId` (view, any staff),
+  `PATCH /pos/v1/orders/:orderId/status` (owner-only, `open -> sent ->
+  closed`), `POST /pos/v1/orders/:orderId/transfer` (explicit handoff,
+  callable by anyone, audited). New greenfield `orders` table (base fields
+  only - no `OrderLine` yet) with a partial unique index enforcing at most
+  one live order per table. Stubbed the `/pos` auth realm
+  (`src/platform/pos-jwt.ts`, `pos-auth.guard.ts`, `aud:"pos"`) ahead of
+  pos/CAP-1's real PIN login (issue #44, not yet merged) - flagged for
+  reconciliation once that story lands. See
+  [wiki/features/pos-cashier-waiter.md](../features/pos-cashier-waiter.md).
+  Issue AusPosRest/restiq-backend#46.
 - **2026-08-25** - POS Cashier & Waiter story 9: manager authorisation gate
   (CAP-8, AD-15). New `src/platform/manager-auth.service.ts`
   (`ManagerAuthService`, barrel-exported from `src/platform`) - one shared

@@ -38,6 +38,7 @@ async function wipe(prisma: PrismaClient): Promise<void> {
   await prisma.itemVariant.deleteMany()
   await prisma.menuItem.deleteMany()
   await prisma.menuCategory.deleteMany()
+  await prisma.order.deleteMany()
   await prisma.clockEvent.deleteMany()
   await prisma.staffUser.deleteMany()
   await prisma.role.deleteMany()
@@ -114,7 +115,7 @@ describe('/pos realm separation (e2e)', () => {
     // the guard accepted the token (200), not just "didn't 401".
     await prisma.clockEvent.create({ data: { tenantId, staffId, outletId, type: 'clock_in', occurredAt: new Date() } })
 
-    posToken = signPosToken({ id: staffId, tenantId, outletId })
+    posToken = signPosToken({ id: staffId, tenantId, outletId, name: 'Realm Staff' })
 
     const moduleRef = await Test.createTestingModule({ imports: [AppModule] }).compile()
     app = moduleRef.createNestApplication()

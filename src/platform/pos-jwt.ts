@@ -2,7 +2,10 @@
 // audience (AD-13) - the fourth disjoint realm, same pattern as ops/admin
 // (AD-3/AD-10). Login is PIN-based and, per AD-13, a pos session is not
 // bound to an enrolled Device row - any authenticated browser can act as a
-// terminal for this prototype.
+// terminal for this prototype. Carries staffId/tenantId/outletId/name so
+// every downstream query - and audit rows that need a human-readable actor,
+// e.g. pos/orders' ownership-transfer log - can use it without a second
+// StaffUser lookup.
 //
 // A tenant with more than one outlet needs a second step (pick the outlet)
 // between "PIN verified" and "pos session issued". That intermediate state
@@ -22,6 +25,7 @@ export interface PosPrincipal {
   id: string
   tenantId: string
   outletId: string
+  name: string
 }
 
 export interface PosPendingPrincipal {
@@ -38,7 +42,7 @@ function posJwtSecret(): string {
 }
 
 export function signPosToken(principal: PosPrincipal): string {
-  return jwt.sign({ tenantId: principal.tenantId, outletId: principal.outletId }, posJwtSecret(), {
+  return jwt.sign({ tenantId: principal.tenantId, outletId: principal.outletId, name: principal.name }, posJwtSecret(), {
     subject: principal.id,
     audience: POS_JWT_AUDIENCE,
     expiresIn: POS_SESSION_TTL_SECONDS,
@@ -52,8 +56,9 @@ export function verifyPosToken(token: string): PosPrincipal | null {
     if (typeof payload === 'string' || typeof payload.sub !== 'string') return null
     const tenantId: unknown = payload.tenantId
     const outletId: unknown = payload.outletId
-    if (typeof tenantId !== 'string' || typeof outletId !== 'string') return null
-    return { id: payload.sub, tenantId, outletId }
+    const name: unknown = payload.name
+    if (typeof tenantId !== 'string' || typeof outletId !== 'string' || typeof name !== 'string') return null
+    return { id: payload.sub, tenantId, outletId, name }
   } catch {
     return null
   }
