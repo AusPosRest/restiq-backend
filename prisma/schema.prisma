@@ -156,6 +156,7 @@ model Tenant {
   stations         Station[]
   printers         Printer[]
   staffUsers       StaffUser[]
+  orders           Order[]
 
   // The directory list is served from these: filter columns plus the
   // created_at ordering the default sort and cursor walk.
@@ -243,6 +244,7 @@ model Outlet {
   floors              Floor[]
   stations            Station[]
   printers            Printer[]
+  orders              Order[]
 
   @@index([tenantId])
   @@map("outlets")
@@ -629,8 +631,9 @@ model StaffUser {
   createdAt    DateTime  @default(now()) @map("created_at") @db.Timestamptz(6)
   updatedAt    DateTime  @updatedAt @map("updated_at") @db.Timestamptz(6)
 
-  tenant Tenant @relation(fields: [tenantId], references: [id])
-  role   Role   @relation(fields: [roleId], references: [id])
+  tenant Tenant  @relation(fields: [tenantId], references: [id])
+  role   Role    @relation(fields: [roleId], references: [id])
+  orders Order[]
 
   @@index([tenantId])
   @@map("staff_users")
@@ -688,8 +691,9 @@ model DiningTable {
   createdAt    DateTime   @default(now()) @map("created_at") @db.Timestamptz(6)
   updatedAt    DateTime   @updatedAt @map("updated_at") @db.Timestamptz(6)
 
-  tenant Tenant @relation(fields: [tenantId], references: [id])
-  floor  Floor  @relation(fields: [floorId], references: [id])
+  tenant Tenant  @relation(fields: [tenantId], references: [id])
+  floor  Floor   @relation(fields: [floorId], references: [id])
+  orders Order[]
 
   @@index([tenantId])
   @@index([floorId])
@@ -903,4 +907,46 @@ model Invoice {
 
   @@index([tenantId])
   @@map("invoices")
+}
+
+// ---------------------------------------------------------------------------
+// pos/CAP-2 table map & order ownership (AD-5, AD-6). Reuses the existing
+// Floor/DiningTable models from tenant-admin/CAP-5 rather than a second table
+// model - this section only adds Order. Order is the first money-path table
+// in the ARCHITECTURE-SPINE sense (AD-14 lists it among the greenfield
+// pos tables) but AD-14's insert-only-past-finalisation rule binds pos/CAP-6,
+// 7, 9, 10 only - not this story. At this base-fields stage (no OrderLine,
+// no Bill yet) an Order is an ordinary mutable draft row: status moves
+// open -> sent -> closed by plain UPDATE, gated by ownership below, not by
+// an insert-only/finalise discipline. tableId is nullable already for a
+// later counter-order (CAP-6) story that never sets it.
+// ---------------------------------------------------------------------------
+
+enum OrderStatus {
+  open
+  sent
+  closed
+}
+
+model Order {
+  id        String      @id @default(uuid(7)) @db.Uuid
+  tenantId  String      @map("tenant_id") @db.Uuid
+  outletId  String      @map("outlet_id") @db.Uuid
+  tableId   String?     @map("table_id") @db.Uuid
+  // Exactly one owning staff member at a time (this story's core mechanic) -
+  // reassigned only through the explicit transfer action, never implicitly.
+  ownerId   String      @map("owner_id") @db.Uuid
+  status    OrderStatus @default(open)
+  createdAt DateTime    @default(now()) @map("created_at") @db.Timestamptz(6)
+  updatedAt DateTime    @updatedAt @map("updated_at") @db.Timestamptz(6)
+
+  tenant Tenant       @relation(fields: [tenantId], references: [id])
+  outlet Outlet       @relation(fields: [outletId], references: [id])
+  table  DiningTable? @relation(fields: [tableId], references: [id])
+  owner  StaffUser    @relation(fields: [ownerId], references: [id])
+
+  @@index([tenantId])
+  @@index([outletId])
+  @@index([tableId])
+  @@map("orders")
 }
