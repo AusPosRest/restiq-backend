@@ -114,6 +114,22 @@
   exists in this codebase. See
   [wiki/features/tenant-admin.md](../features/tenant-admin.md). Issue
   AusPosRest/restiq-backend#42.
+- **2026-08-25** - POS Cashier & Waiter story 1: PIN login and shift clock
+  (CAP-1). New fourth disjoint auth realm `pos` (AD-13, `aud:"pos"`, own
+  secret `POS_JWT_SECRET`, principal `{ id: staffId, tenantId, outletId }`),
+  `PosAuthGuard` registered globally alongside the ops/admin guards.
+  `POST /pos/v1/auth/login` verifies a 4-digit PIN against active
+  `StaffUser` rows for the tenant (reusing `pinStatus()`/argon2 verbatim);
+  single-outlet tenants finalise immediately, multi-outlet tenants get a
+  short-lived `pos-pending`-audience token plus an outlet list, finalised by
+  `POST /pos/v1/auth/select-outlet`. 5 wrong attempts for the exact
+  `(tenantId, pin)` pair locks it for 30s (`429 locked_out`, in-memory,
+  documented single-instance tradeoff). New `ClockEvent` model
+  (RLS-protected); a successful login records a clock-in unless one is
+  already open for today in the outlet's own timezone;
+  `POST /pos/v1/clock/out` ends it (`409 not_clocked_in` otherwise). See
+  [wiki/features/pos-cashier-waiter.md](../features/pos-cashier-waiter.md).
+  Issue AusPosRest/restiq-backend#44.
 - **2026-08-25** - POS Cashier & Waiter story 3: table map and order
   ownership/transfer (CAP-2). New `src/pos/` module (first `/pos` HTTP
   surface): `GET /pos/v1/outlets/:outletId/table-map` (reuses tenant-admin/

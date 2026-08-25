@@ -6,6 +6,64 @@ in for the native Android POS/KDS build. See
 capability set (CAP-1..11); this doc tracks what's actually built here,
 story by story.
 
+## CAP-1 - PIN login and shift clock
+
+- **Intent:** staff authenticate at a shared device with a 4-digit PIN and
+  clock in/out; 5 wrong attempts locks that PIN for 30 seconds, and a
+  successful PIN starts a `pos`-realm session and records a clock-in if none
+  is open for that staff member today.
+- **Built:** new fourth disjoint auth realm `pos` (AD-13), same pattern as
+  ops/admin (AD-3/AD-10): `aud:"pos"`, own secret `POS_JWT_SECRET`,
+  principal `{ id: staffId, tenantId, outletId }`. `src/platform/pos-jwt.ts`
+  (sign/verify, never throws - `verifyPosToken` returns `null`),
+  `src/platform/pos-auth.guard.ts` (`PosAuthGuard`, `CurrentStaff`
+  decorator), registered as a third global `APP_GUARD` in
+  `platform.module.ts` alongside `OpsAuthGuard`/`AdminAuthGuard`, gating
+  `/pos(/|$)`. This is the story that actually stands up the `/pos` HTTP
+  surface (`src/pos/`), which CAP-8 below still has no caller for.
+- `POST /pos/v1/auth/login` `{ tenantId, pin }` - verifies the PIN against
+  this tenant's active `StaffUser` rows (reusing `pinStatus()` from
+  `admin/staff/staff.service.ts` verbatim, exported through the admin
+  barrel for this). A single-outlet tenant finalises immediately (signs a
+  pos token, records the clock-in). A tenant with more than one outlet
+  instead gets `{ status: "select_outlet", pendingToken, outlets }` -
+  `pendingToken` is a short-lived (5 min), *different-audience*
+  (`aud:"pos-pending"`) token signed with the same `POS_JWT_SECRET`, so it
+  can never satisfy the real `/pos` guard.
+- `POST /pos/v1/auth/select-outlet` `{ pendingToken, outletId }` - verifies
+  the pending token, checks the outlet belongs to that tenant, and
+  finalises the same way (`src/pos/auth/auth.service.ts`).
+- Lockout: 5 wrong attempts for the exact `(tenantId, pin)` pair locks that
+  pair for 30 seconds (`src/pos/auth/lockout.ts`, in-memory `Map` -
+  documented single-instance-only tradeoff, acceptable for this prototype,
+  no schema churn). Scoped to the guessed PIN, not the tenant or a staff
+  row, since a failed brute-force guess can't be attributed to one staff
+  member until it succeeds. Returns `429 locked_out`.
+- New `ClockEvent` model (`clock_in`/`clock_out`), RLS-protected the same
+  way as every other tenant-owned table (`tenant_isolation` +
+  `operator_read` policies, migration
+  `20260825035228_pos_auth_clock`). Clock-in-once-per-local-day is enforced
+  by reading the staff member's latest event and comparing calendar dates
+  in the outlet's own timezone (`Outlet.timezone`, not UTC or the server
+  clock) - `src/pos/clock/clock.util.ts#recordClockInIfNeeded`, called from
+  inside the login/select-outlet transaction.
+- `POST /pos/v1/clock/out` (guarded - needs a real pos session) - ends the
+  day's open clock-in; `409 not_clocked_in` if the staff member's latest
+  event isn't already an open clock-in (`src/pos/clock/clock.service.ts`).
+
+### CAP-1 integration points for later stories
+
+- CAP-11 (device & staff attendance status, story 11) reads `ClockEvent`
+  rows directly for "who's clocked in today" - no new mutation needed,
+  this story's rows are the real data source.
+- CAP-2..CAP-10's `pos/*` modules should depend on `CurrentStaff`/
+  `PosPrincipal` from the platform barrel exactly like this story's own
+  controllers do, and reuse this story's `PosAuthGuard` (already global) -
+  never re-verify a pos token themselves.
+- `platform/manager-auth` (CAP-8 below) is a distinct concern - it
+  authorises manager-gated *actions* with a manager's own PIN, not staff
+  login. Do not conflate it with this story's staff PIN login.
+
 ## CAP-2 - Table map and order ownership/transfer
 
 - **Intent:** staff sees live per-table status (empty/occupied/needs-bill)
@@ -74,21 +132,20 @@ model Order {
   See the `TODO(pos/CAP-7 ...)` comment on `TableMapEntry` in
   `src/pos/orders/orders.dtos.ts`.
 
-### The pos auth realm - stubbed ahead of pos/CAP-1
+### The pos auth realm - reconciled with pos/CAP-1 (issue #44)
 
-pos/CAP-1 (PIN login, issue #44) is what's supposed to stand up the `/pos`
-realm and mint its tokens, and wasn't committed when this story started.
-`src/platform/pos-jwt.ts` (`signPosToken`/`verifyPosToken`, `aud: "pos"`,
-`POS_JWT_SECRET`) and `src/platform/pos-auth.guard.ts` (`PosAuthGuard`,
-`CurrentStaff`) are a minimal stub of AD-13's realm - same disjoint-realm
-pattern as `AdminAuthGuard`/`admin-jwt.ts` (AD-10), registered as a third
-global `APP_GUARD` in `PlatformModule` alongside the ops and admin guards.
-`PosPrincipal` is `{ id, tenantId, outletId, name }` - enough for this
-story's ownership checks. **Reconcile once #44 merges:** the real PIN-login
-endpoint should call `signPosToken()` from this file rather than re-deriving
-its own signing logic, and the STUB NOTICE comment in `pos-jwt.ts` should be
-deleted. If CAP-1 needs more principal fields, extend `PosPrincipal` there
-rather than introducing a second pos JWT shape.
+This story was built before pos/CAP-1's real PIN login (issue #44) merged,
+so it originally shipped its own stub of `src/platform/pos-jwt.ts`/
+`pos-auth.guard.ts` with a "reconcile once #44 merges" note. That
+reconciliation is now done: CAP-1's `signPosToken`/`verifyPosToken`/
+`PosAuthGuard`/`CurrentStaff` (`aud: "pos"`, `POS_JWT_SECRET`) are the one
+real implementation this story's `pos/orders/` module calls into - no
+second signing/verification logic remains. The one merge-time addition CAP-1
+didn't originally need: `PosPrincipal` carries `name` (not just `id`/
+`tenantId`/`outletId`) because `orders.service.ts`'s ownership-transfer
+audit row uses `staff.name` as `actorEmail` directly from the token, without
+a second `StaffUser` lookup - `auth.service.ts`'s `finalize()` sets it from
+the same `StaffUser` row it already has in hand.
 
 ### Test coverage (`test/pos-orders.e2e-spec.ts`, 11 tests, e2e against a
 real Postgres test DB)
@@ -108,7 +165,7 @@ real Postgres test DB)
 - No session -> `401`; another tenant's table map/order -> `404` (never a
   different shape leaking existence).
 
-## Integration points for later stories
+### CAP-2 integration points for later stories
 
 - pos/CAP-3 (order taking) and pos/CAP-4 (group ordering) extend this
   `Order` with `OrderLine` - the base shape (`id`, `tenantId`, `outletId`,
@@ -122,10 +179,10 @@ real Postgres test DB)
 - pos/CAP-7 (bill & settle) is what finally makes `status: 'closed'` mean
   something (today it's just a terminal status with no side effects) and is
   what the table map's `needs-bill` TODO depends on.
-- pos/CAP-1 (PIN login, issue #44) replaces the stubbed pos-jwt/pos-auth
-  guard's token minting - see "The pos auth realm" above.
+- pos/CAP-1 (PIN login, issue #44, since merged) is what this story's
+  `/pos` auth realm now defers to - see "The pos auth realm" above.
 
-## Key decisions
+### CAP-2 key decisions
 
 - Table map reads `Floor`/`DiningTable` directly via Prisma inside
   `OrdersService`, rather than importing tenant-admin's `FloorPlanService`:
@@ -153,12 +210,11 @@ real Postgres test DB)
 - **Built** (`src/platform/manager-auth.service.ts`, exported from the
   `src/platform` barrel per AD-2): one shared, callable `ManagerAuthService`
   every gated mutation calls into, instead of six reimplementations of the
-  same PIN-check-plus-audit-row logic. No controller/route - there is no
-  HTTP surface for this story; it is pure shared infrastructure for four
-  future call sites (see "How to call this" below). Registered as a
-  `PlatformModule` provider, so any module that already imports
-  `PlatformModule` (every module in this app does) gets it via constructor
-  injection with no extra module wiring.
+  same PIN-check-plus-audit-row logic. No controller/route of its own - it
+  is pure shared infrastructure for four future call sites (see "How to
+  call this" below). Registered as a `PlatformModule` provider, so any
+  module that already imports `PlatformModule` (every module in this app
+  does) gets it via constructor injection with no extra module wiring.
 
 ### "Manager-capable" - the decision this story had to make
 
@@ -284,12 +340,16 @@ service directly rather than through an HTTP endpoint)
 
 ## Data model
 
-- `roles.is_manager` (new column, default `false`) - see "manager-capable"
-  above. Migration `20260824960000_manager_authorisation` adds it and
-  backfills `true` for existing `'Owner'`/`'Manager'` rows.
-- `audit_events.approver_id` / `audit_events.approver_name` (new, nullable
-  columns) - populated only for manager-gated audit rows; `null` for every
-  routine AD-6 audit action that has no approval step (e.g.
+- `clock_events` (CAP-1, new table) - `id`, `tenantId`, `staffId`,
+  `outletId`, `type` (`clock_in`/`clock_out`), `occurredAt`, `createdAt`.
+  RLS-protected like every other tenant-owned table. Insert-only: a day's
+  attendance is a sequence of events, never edited in place.
+- `roles.is_manager` (CAP-8, new column, default `false`) - see
+  "manager-capable" above. Migration `20260824960000_manager_authorisation`
+  adds it and backfills `true` for existing `'Owner'`/`'Manager'` rows.
+- `audit_events.approver_id` / `audit_events.approver_name` (CAP-8, new,
+  nullable columns) - populated only for manager-gated audit rows; `null`
+  for every routine AD-6 audit action that has no approval step (e.g.
   `staff.role_changed`, `staff.pin_revoked`). `approverName`, not
   `approverEmail`: the approving `StaffUser`'s email is optional but name is
   required, so name is what's guaranteed to identify them. No RLS policy
@@ -312,23 +372,44 @@ service directly rather than through an HTTP endpoint)
 
 ## Key decisions
 
-- This story shipped no `/pos` HTTP module, controller, or DTO of its own -
-  it is exactly AD-15's shared service and nothing else. The task brief
-  explicitly scoped this to a service with no caller in this codebase at the
-  time. (CAP-2, merged separately, ended up standing up the first `/pos`
-  controllers instead of CAP-1; `manager-auth.service.ts` still has no
+- AD-13 explicitly does **not** bind a pos session to an enrolled Device
+  row (unlike AD-12's real device model) - any authenticated browser can
+  act as a POS terminal in this prototype. Logged, deliberate, prototype-
+  only relaxation; the native Android build must bind sessions to real
+  enrolled devices.
+- `StaffUser` has no `outletId` column (it's tenant-wide), which is why
+  CAP-1's login is two-step rather than embedding the outlet in the PIN
+  check itself - the outlet is resolved after the PIN, not as part of it.
+- The intermediate outlet-selection token reuses `POS_JWT_SECRET` rather
+  than introducing a fifth secret - realm separation is enforced by
+  **audience** (`pos` vs `pos-pending`), the same "distinct audience, not
+  necessarily a distinct key" shape AD-3/AD-10 already use for keeping
+  their own two audiences on two different secrets, extended one step
+  further within a single realm's own login handshake.
+- `pinStatus()` is reused across the module boundary rather than
+  reimplemented: it is now exported from `admin/index.ts` (a pure function,
+  safe to share per AD-2's barrel rule). `setTenantContext` is instead
+  duplicated as `src/pos/tenant-context.ts` and, separately, into
+  `manager-auth.service.ts` - that one-line RLS helper is already
+  copy-pasted per admin submodule in this codebase (see its own comment),
+  and neither `pos` nor `platform` may import it from `admin` regardless
+  (`admin` already imports `platform`; the reverse would be circular) - the
+  ponytail "one line? one line" step, applied consistently.
+- CAP-8's own `manager-auth.service.ts` shipped no `/pos` HTTP module,
+  controller, or DTO of its own - it is exactly AD-15's shared service and
+  nothing else, with no caller in this codebase yet. (CAP-2 merged before
+  CAP-1 did and, needing a guard to sit behind, temporarily stubbed its own
+  copy of the pos realm; that stub has since been reconciled away in favour
+  of CAP-1's real implementation - see "The pos auth realm" under CAP-2
+  above. `manager-auth.service.ts` remains a plain service with no
   controller/route of its own - every future gated mutation calls into it
-  as a plain service, per "How to call this" above.)
+  directly, per "How to call this" above.)
 - `ManagerGatedAction` is a closed TypeScript union (`MANAGER_GATED_ACTIONS`),
   not a free-text `string`, so the four future call sites get a compile-time
   guardrail against a typo silently producing an unrecognised `action` value
   in `audit_events`.
 - `authorize()` does one dummy `argon2.verify` on every failure path (wrong
   PIN, non-manager PIN, or zero manager-capable staff), mirroring
-  `OpsAuthService.dummyHash` - so a caller can't learn from response timing
-  whether a given tenant has any managers at all.
-- `setTenantContext` is duplicated into `manager-auth.service.ts` rather than
-  imported from `src/admin/menu/tenant-context.ts` - that 3-line helper is
-  already copy-pasted per admin submodule in this codebase (see its own
-  comment), and `platform` must not import from `admin` regardless (`admin`
-  already imports `platform`; the reverse would be circular).
+  `OpsAuthService.dummyHash` (and CAP-1's own `PosAuthService.dummyHash` -
+  same reasoning, applied independently) - so a caller can't learn from
+  response timing whether a given tenant has any managers/staff at all.

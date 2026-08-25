@@ -13,8 +13,9 @@ the task entry to `tasks/completed.md` after every feature or bug fix.
   currently just the AD-12 device-fleet cross-reference for Tenant Admin's
   CAP-6.
 - [POS Cashier & Waiter (Web Prototype) - backend](features/pos-cashier-waiter.md) -
-  CAP-2 table map and order ownership/transfer, CAP-8 manager authorisation
-  gate (`platform/manager-auth`, shared infrastructure for the
+  CAP-1 PIN login, outlet picker, lockout, and shift clock in/out; CAP-2
+  table map and order ownership/transfer; CAP-8 manager authorisation gate
+  (`platform/manager-auth`, shared infrastructure for the
   void/discount/refund/no-sale stories still to come).
 
 ## Tasks
