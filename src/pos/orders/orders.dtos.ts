@@ -35,6 +35,10 @@ export interface OrderView {
 // pos/CAP-3 order lines. Built against the real menu catalogue (itemId/
 // variantId point straight at MenuItem/ItemVariant, modifierIds at Modifier)
 // - see restiq-backend/src/admin/menu for those models' actual shape.
+//
+// seatNumber (pos/CAP-4, issue #58) is optional here - group ordering is not
+// mandatory for every order, only orders that use it must have every line
+// seated before they can be sent (see orders.service.ts's updateStatus).
 export class AddOrderLineDto {
   @IsUUID()
   itemId!: string
@@ -47,20 +51,27 @@ export class AddOrderLineDto {
 
   @IsOptional() @IsArray() @ArrayUnique() @IsUUID('all', { each: true })
   modifierIds?: string[]
+
+  @IsOptional() @IsInt() @Min(1)
+  seatNumber?: number
 }
 
-// Quantity and/or modifier re-selection only - swapping itemId/variantId is
-// "remove this line, add a different one", not an edit (SPEC/stories.yaml
-// story 4: PATCH covers "change quantity, or re-select modifiers before the
-// order is sent"). Omitting modifierIds leaves the line's selections
-// untouched; passing (possibly empty) modifierIds replaces them wholesale,
-// re-validated the same way as on add.
+// Quantity, seat number, and/or modifier re-selection only - swapping
+// itemId/variantId is "remove this line, add a different one", not an edit
+// (SPEC/stories.yaml story 4: PATCH covers "change quantity, or re-select
+// modifiers before the order is sent"). Omitting modifierIds leaves the
+// line's selections untouched; passing (possibly empty) modifierIds replaces
+// them wholesale, re-validated the same way as on add. Omitting seatNumber
+// leaves it untouched too (pos/CAP-4, issue #58).
 export class UpdateOrderLineDto {
   @IsOptional() @IsInt() @Min(1)
   quantity?: number
 
   @IsOptional() @IsArray() @ArrayUnique() @IsUUID('all', { each: true })
   modifierIds?: string[]
+
+  @IsOptional() @IsInt() @Min(1)
+  seatNumber?: number
 }
 
 export interface OrderLineModifierView {
@@ -79,6 +90,10 @@ export interface OrderLineView {
   // Snapshotted at add-time (and re-snapshotted only by an explicit PATCH) -
   // a later item_prices change never retroactively alters this line.
   unitPriceMinor: number
+  // pos/CAP-4 (issue #58): null until group ordering assigns this line to a
+  // seat/cover. Every line on an order must carry one before that order can
+  // move to "sent" - see orders.service.ts's updateStatus.
+  seatNumber: number | null
   addedByStaffId: string
   createdAt: string
   modifiers: OrderLineModifierView[]

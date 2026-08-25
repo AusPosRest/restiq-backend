@@ -238,3 +238,21 @@
   line. See
   [wiki/features/pos-cashier-waiter.md](../features/pos-cashier-waiter.md).
   Issue AusPosRest/restiq-backend#52.
+- **2026-08-25** - POS Cashier & Waiter story 5: group ordering, seats and
+  covers (CAP-4). Extends story 4's real `OrderLine` in place - one nullable
+  `seatNumber Int?` column (migration `20260825300000_pos_order_line_seat_number`)
+  plus an optional `seatNumber` field on both
+  `POST /pos/v1/orders/:orderId/lines` and
+  `PATCH /pos/v1/orders/:orderId/lines/:lineId` (additive to story 4's DTOs,
+  no new endpoint). The gate is entirely application-level, at send time:
+  `PATCH /pos/v1/orders/:orderId/status { status: 'sent' }` now rejects `400
+  unseated_lines` if any line on the order has no seat assigned, checked in
+  `orders.service.ts#assertAllLinesSeated` inside the same transaction as the
+  status update, so a failed check never flips the order to `sent`. Orders
+  that don't use group ordering are unaffected - the add/edit/remove line
+  paths never require a seat number, only the send transition does. 6 new
+  e2e tests added to `test/pos-order-lines.e2e-spec.ts` (now 26 total); two
+  pre-existing tests there were updated to seat their line before sending,
+  since they test story 4's send-freezes-lines rule, not this gate. See
+  [wiki/features/pos-cashier-waiter.md](../features/pos-cashier-waiter.md).
+  Issue AusPosRest/restiq-backend#58.

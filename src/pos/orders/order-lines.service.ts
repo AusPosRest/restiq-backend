@@ -153,6 +153,7 @@ export class OrderLinesService {
           variantId: dto.variantId ?? null,
           quantity: dto.quantity,
           unitPriceMinor: price.priceMinor,
+          seatNumber: dto.seatNumber ?? null,
           addedByStaffId: staff.id,
         },
       })
@@ -177,6 +178,10 @@ export class OrderLinesService {
 
       if (dto.quantity !== undefined) {
         await tx.orderLine.update({ where: { id: lineId }, data: { quantity: dto.quantity } })
+      }
+
+      if (dto.seatNumber !== undefined) {
+        await tx.orderLine.update({ where: { id: lineId }, data: { seatNumber: dto.seatNumber } })
       }
 
       if (dto.modifierIds !== undefined) {

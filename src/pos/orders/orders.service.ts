@@ -77,6 +77,7 @@ function toOrderLineView(line: OrderLineWithModifiers): OrderLineView {
     variantId: line.variantId,
     quantity: line.quantity,
     unitPriceMinor: Number(line.unitPriceMinor),
+    seatNumber: line.seatNumber,
     addedByStaffId: line.addedByStaffId,
     createdAt: line.createdAt.toISOString(),
     modifiers: line.modifiers.map((m) => ({ id: m.id, modifierId: m.modifierId, name: m.modifier.name, priceMinor: Number(m.priceMinor) })),
@@ -106,6 +107,22 @@ const FORWARD_TRANSITIONS: Record<Order['status'], Order['status'][]> = {
   open: ['sent'],
   sent: ['closed'],
   closed: [],
+}
+
+/**
+ * pos/CAP-4 group ordering (issue #58) success criterion: every item must be
+ * assigned to a seat before the order can be sent to the kitchen; unassigned
+ * items block fire. Only checked on the open->sent transition - once past
+ * it, sent->closed never re-opens the line set to fresh unseated additions.
+ */
+async function assertAllLinesSeated(tx: Tx, orderId: string): Promise<void> {
+  const unseatedCount = await tx.orderLine.count({ where: { orderId, seatNumber: null } })
+  if (unseatedCount > 0) {
+    throw new BadRequestException({
+      code: 'unseated_lines',
+      message: `${unseatedCount} order line(s) have no seat number assigned - every item must be assigned to a seat before this order can be sent to the kitchen`,
+    })
+  }
 }
 
 @Injectable()
@@ -228,6 +245,10 @@ export class OrdersService {
 
       if (!FORWARD_TRANSITIONS[order.status].includes(dto.status)) {
         throw new ConflictException({ code: 'invalid_transition', message: `Cannot move an order from "${order.status}" to "${dto.status}"` })
+      }
+
+      if (dto.status === 'sent') {
+        await assertAllLinesSeated(tx, orderId)
       }
 
       const updated = await tx.order.update({ where: { id: orderId }, data: { status: dto.status } })
