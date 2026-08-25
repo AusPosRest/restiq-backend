@@ -12,6 +12,9 @@ the task entry to `tasks/completed.md` after every feature or bug fix.
 - [Platform Console (Internal Operator Console) - backend](features/platform-console.md) -
   currently just the AD-12 device-fleet cross-reference for Tenant Admin's
   CAP-6.
+- [POS Cashier & Waiter (Web Prototype) - backend](features/pos-cashier-waiter.md) -
+  CAP-8 manager authorisation gate (`platform/manager-auth`, shared
+  infrastructure for the void/discount/refund/no-sale stories still to come).
 
 ## Tasks
 

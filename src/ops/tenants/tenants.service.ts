@@ -10,8 +10,18 @@ export const OWNER_INVITE_TTL_HOURS = 7 * 24
 const DEFAULT_PROVISION_REASON = 'Provisioned via console onboarding wizard'
 
 // Seeded so the owner lands in a working system (FR-2): the six cloneable
-// system roles (FR-13) and a minimal sample menu.
-const SYSTEM_ROLES = ['Owner', 'Manager', 'Cashier', 'Waiter', 'Kitchen', 'Accountant']
+// system roles (FR-13) and a minimal sample menu. isManager marks which of
+// these can approve a CAP-8 gated action (platform/manager-auth, AD-15) -
+// 'Owner' and 'Manager' only, since they're the only roles a real
+// restaurant would trust with void/discount/refund authority.
+const SYSTEM_ROLES: ReadonlyArray<{ name: string; isManager: boolean }> = [
+  { name: 'Owner', isManager: true },
+  { name: 'Manager', isManager: true },
+  { name: 'Cashier', isManager: false },
+  { name: 'Waiter', isManager: false },
+  { name: 'Kitchen', isManager: false },
+  { name: 'Accountant', isManager: false },
+]
 const SAMPLE_MENU: ReadonlyArray<{
   category: string
   items: ReadonlyArray<{ name: string; shortName: string; priceMinor: bigint }>
@@ -159,7 +169,7 @@ export class OpsTenantsService {
         })
 
         await tx.role.createMany({
-          data: SYSTEM_ROLES.map((name) => ({ tenantId, name, isSystem: true })),
+          data: SYSTEM_ROLES.map(({ name, isManager }) => ({ tenantId, name, isSystem: true, isManager })),
         })
 
         for (const [index, { category, items }] of SAMPLE_MENU.entries()) {
