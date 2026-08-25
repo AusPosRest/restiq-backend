@@ -13,18 +13,18 @@
 - POS Cashier & Waiter: CAP-1 (PIN login/clock), CAP-2 (table map &
   ownership), CAP-3 (order taking with modifiers/variants), CAP-4 (group
   ordering - seats/covers on `OrderLine`), CAP-5 (open/held orders), CAP-7
-  (bill & settle), CAP-8 (manager authorisation service), CAP-10 (shift &
-  cash management), and CAP-11 (device & staff attendance status) are done.
-  Still planned: CAP-6 QSR counter & token (composes directly over CAP-7's
-  `pos/bills` endpoints per the architecture's capability map - no new
-  bill/settle code path expected) and CAP-9 refunds (reads a finalised
-  `Bill`'s real totals, issues a separate `CreditNote`, never mutates the
-  `Bill`). CAP-3's still-unimplemented void/comp paths and CAP-9's refund
-  path still need to call into CAP-8's `ManagerAuthService` - each gated
-  action calls `ManagerAuthService.authorize()`/`.recordApproval()` per
+  (bill & settle), CAP-8 (manager authorisation service), CAP-9 (refunds &
+  adjustments), CAP-10 (shift & cash management), and CAP-11 (device & staff
+  attendance status) are done. Still planned: CAP-6 QSR counter & token
+  (composes directly over CAP-7's `pos/bills` endpoints per the
+  architecture's capability map - no new bill/settle code path expected).
+  CAP-3's still-unimplemented void/comp paths still need to call into
+  CAP-8's `ManagerAuthService` - each gated action calls
+  `ManagerAuthService.authorize()`/`.recordApproval()` per
   [wiki/features/pos-cashier-waiter.md](../features/pos-cashier-waiter.md)'s
   "How to call this" section instead of reimplementing their own PIN check,
-  the same way CAP-7's discount-above-threshold path now does. CAP-7's
+  the same way CAP-7's discount-above-threshold path and CAP-9's refund path
+  now do. CAP-7's
   `POST /pos/v1/bills/:id/finalize` deliberately does not validate a
   tender's amount against CAP-4's `OrderLine.seatNumber` for a per-seat
   split - see that story's "Key decisions" entry - so a future per-seat

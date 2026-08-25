@@ -2,7 +2,7 @@
 // request body - they come from the signed-in pos session, same posture as
 // every other pos DTO (AD-5).
 import { Type } from 'class-transformer'
-import { ArrayMinSize, IsArray, IsIn, IsInt, IsOptional, IsString, Min, MinLength, ValidateNested } from 'class-validator'
+import { ArrayMinSize, IsArray, IsIn, IsInt, IsOptional, IsString, IsUUID, Min, MinLength, ValidateNested } from 'class-validator'
 import type { BillStatus, TenderMethod } from '../../generated/prisma/client'
 
 export const TENDER_METHODS = ['cash', 'upi_manual'] as const
@@ -64,4 +64,59 @@ export interface BillView {
   finalizedByStaffId: string | null
   finalizedAt: string | null
   tenders: TenderView[]
+}
+
+// pos/CAP-9 refunds & adjustments. A refund line names an existing OrderLine
+// on the bill's order and how many of its units to reverse - see
+// bills.service.ts's refund() for why itemization targets OrderLine rather
+// than a Bill line (Bill has none of its own).
+export class RefundLineDto {
+  @IsUUID()
+  orderLineId!: string
+
+  // How many units of this line to refund - at least 1, and never more than
+  // that line's own quantity minus whatever earlier credit notes already
+  // reversed (checked in the service, not here).
+  @IsInt() @Min(1)
+  quantity!: number
+}
+
+// managerPin/reason are both mandatory here, unlike FinalizeBillDto's
+// conditional pair - refund is one of CAP-8's six gated actions
+// unconditionally (AD-15), not only above some threshold.
+export class RefundBillDto {
+  @IsString() @MinLength(1)
+  managerPin!: string
+
+  @IsString() @MinLength(1)
+  reason!: string
+
+  // Omitted entirely: refund every order line's full remaining
+  // (not-yet-refunded) quantity - a whole-bill refund, not a separate code
+  // path from a partial one.
+  @IsOptional() @IsArray() @ArrayMinSize(1) @ValidateNested({ each: true }) @Type(() => RefundLineDto)
+  lines?: RefundLineDto[]
+}
+
+export interface CreditNoteLineView {
+  id: string
+  orderLineId: string
+  quantity: number
+  unitPriceMinor: number
+  amountMinor: number
+}
+
+export interface CreditNoteView {
+  id: string
+  tenantId: string
+  originalBillId: string
+  reason: string
+  approvedByStaffId: string
+  createdByStaffId: string
+  subtotalMinor: number
+  taxMinor: number
+  // Same never-persisted-derived-total convention as BillView.totalMinor.
+  totalMinor: number
+  createdAt: string
+  lines: CreditNoteLineView[]
 }

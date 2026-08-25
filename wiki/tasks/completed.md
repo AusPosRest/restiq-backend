@@ -285,3 +285,26 @@
   expected-amount formula. See
   [wiki/features/pos-cashier-waiter.md](../features/pos-cashier-waiter.md).
   Issue AusPosRest/restiq-backend#59.
+- **2026-08-25** - POS Cashier & Waiter story 10: refunds and adjustments
+  (CAP-9). Greenfield `CreditNote`/`CreditNoteLine` models (AD-14 - the
+  third insert-only money-path table pair after `Bill`/`Tender`), extending
+  `src/pos/bills/` (no new module): `POST /pos/v1/bills/:id/refund`
+  `{ managerPin, reason, lines?: [{ orderLineId, quantity }] }` - `lines`
+  omitted refunds every order line's full remaining quantity. `409
+  bill_not_finalized` against a still-open bill. Unconditionally gated by
+  the real `platform/manager-auth` service's `'refund'` action (same
+  `authorize()`/`recordApproval()` call shape story 8's discount gate
+  already uses), never mutates the original `Bill` (no `UPDATE` against
+  `bills`/`tenders` anywhere in `refund()`). Itemizes against `OrderLine`,
+  not a `Bill` line - `Bill` stores only whole-bill aggregates, no lines of
+  its own, so `CreditNoteLine` snapshots each refunded `OrderLine`'s real
+  `unitPriceMinor`+modifiers and `quantity`, with an over-refund guard
+  summing prior credit notes per line. Tax is reversed at the exact same
+  `TAX_RATE_PLACEHOLDER_PERCENT` story 8 computed the original bill's tax
+  with (now exported from `bills.service.ts`, not re-derived). 7 new e2e
+  tests (`test/pos-refunds.e2e-spec.ts`): full refund, partial refund with
+  proportional tax, over-refund rejection, missing/wrong manager PIN,
+  missing reason, refund-against-open-bill rejection, cross-tenant
+  isolation. See
+  [wiki/features/pos-cashier-waiter.md](../features/pos-cashier-waiter.md).
+  Issue AusPosRest/restiq-backend#63.
