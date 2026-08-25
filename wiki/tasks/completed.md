@@ -182,3 +182,18 @@
   where the Bill & Settle story folds in real cash-tender totals. See
   [wiki/features/pos-cashier-waiter.md](../features/pos-cashier-waiter.md).
   Issue AusPosRest/restiq-backend#45.
+- **2026-08-25** - POS Cashier & Waiter story 6: open and held orders,
+  outlet-wide (CAP-5). New `GET /pos/v1/outlets/:outletId/orders` on
+  story 3/CAP-2's existing `OrdersService`/`PosOrdersController` - no new
+  module. Returns every non-`closed` `Order` in the outlet, table-tied or
+  counter (`tableId: null`) alike, unlike CAP-2's `GET .../table-map` which
+  only shows table-tied orders. Take-over reuses CAP-2's real `POST
+  /pos/v1/orders/:orderId/transfer` unchanged - no second ownership
+  mechanism was added. pos/CAP-3 (order taking, issue #52) had not merged
+  as of this story's build, so `OrderLine` doesn't exist yet; SPEC.md
+  doesn't require an item-count/running-total summary for this screen, so
+  it ships as plain `OrderView[]` with a `TODO(pos/CAP-3, issue #52)`
+  comment on `listOpenOrders()` marking where to fold in a summary once
+  `OrderLine` lands. `test/pos-open-held-orders.e2e-spec.ts`, 6 tests. See
+  [wiki/features/pos-cashier-waiter.md](../features/pos-cashier-waiter.md).
+  Issue AusPosRest/restiq-backend#53.

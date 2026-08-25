@@ -171,9 +171,10 @@ real Postgres test DB)
   `Order` with `OrderLine` - the base shape (`id`, `tenantId`, `outletId`,
   `tableId`, `ownerId`, `status`, timestamps) is meant to be extended, not
   replaced. Read the exact field names above before adding `OrderLine`.
-- pos/CAP-5 (open/held orders) lists exactly the rows this story already
-  writes - no new listing logic needed beyond a tenant/outlet-scoped
-  `findMany`.
+- pos/CAP-5 (open/held orders, issue #53, since built - see its own section
+  above) lists exactly the rows this story already writes, via a
+  tenant/outlet-scoped `findMany` added directly to this story's
+  `OrdersService`, and reuses `transfer()` unchanged for take-over.
 - pos/CAP-6 (QSR counter) is the first caller that creates an `Order` with
   `tableId: null`.
 - pos/CAP-7 (bill & settle) is what finally makes `status: 'closed'` mean
@@ -199,6 +200,49 @@ real Postgres test DB)
   CAP-8's six gated actions") but `audit_events.reason` is `NOT NULL` - a
   fixed placeholder string covers the no-reason case rather than making the
   column nullable for one caller.
+
+## CAP-5 - Open and held orders (outlet-wide)
+
+- **Intent:** staff sees every open/held order outlet-wide and resumes their
+  own or takes over someone else's; taking over requires the same
+  explicit-transfer action as CAP-2, never a silent switch.
+- **Built** (`src/pos/orders/`, extending story 3/CAP-2's existing
+  `OrdersService`/`PosOrdersController` - no new module):
+  - `GET /pos/v1/outlets/:outletId/orders` - every non-`closed` `Order` in
+    the outlet, table-tied or counter (`tableId: null`) alike. This is the
+    outlet-wide complement to CAP-2's `GET .../table-map`, which only shows
+    orders attached to a table and would never surface a future CAP-6
+    counter order. Any staff member may view the list - viewing never
+    requires ownership, same posture as `GET /orders/:orderId`.
+  - Take-over is **not** a new mechanism: the response is plain `OrderView[]`
+    (CAP-2's existing shape - `id`, `tenantId`, `outletId`, `tableId`,
+    `ownerId`, `status`, timestamps), and a client takes over an order in
+    this list by calling CAP-2's real `POST /pos/v1/orders/:orderId/transfer`
+    directly. This story adds zero lines to `transfer()`/`updateStatus()`.
+- **No OrderLine summary yet - reconciled decision, not an oversight.**
+  pos/CAP-3 (order taking, issue #52) had not merged as of this story's
+  build - `OrderLine` does not exist in the schema. SPEC.md does not require
+  an item-count/running-total summary for this screen (P6), only the list
+  plus resume/take-over actions, so this ships as plain `OrderView[]`.
+  **TODO(pos/CAP-3, issue #52):** once `OrderLine` lands, extend
+  `listOpenOrders()` in `src/pos/orders/orders.service.ts` (see the `TODO`
+  comment directly above it) to fold in a per-order item-count/running-total
+  summary, reading `OrderLine`'s real committed field names rather than
+  guessing them now.
+- **Ordering:** `orderBy: { createdAt: 'asc' }` - oldest-open-first, so an
+  order that's been sitting longest surfaces first; same tie-break
+  simplicity as CAP-2's table-map query.
+
+### Test coverage (`test/pos-open-held-orders.e2e-spec.ts`, 6 tests, e2e
+against a real Postgres test DB)
+
+- Lists every open/sent order outlet-wide, including a counter order
+  (`tableId: null`) that CAP-2's table-map would never show.
+- Excludes closed orders.
+- A take-over via CAP-2's real `POST /orders/:orderId/transfer` is reflected
+  on the next read of this list (proves reuse, not a second ownership path).
+- Any staff member can view the list, not only the order's owner.
+- No session -> `401`; another tenant's outlet -> `404`.
 
 ## CAP-8 - Manager authorisation gate
 
