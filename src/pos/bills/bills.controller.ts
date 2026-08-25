@@ -1,7 +1,7 @@
 import { Body, Controller, Get, HttpCode, Param, Post } from '@nestjs/common'
 import { CurrentStaff, PosPrincipal } from '../../platform'
 import { BillsService } from './bills.service'
-import { BillView, FinalizeBillDto } from './bills.dtos'
+import { BillView, CreditNoteView, FinalizeBillDto, RefundBillDto } from './bills.dtos'
 
 @Controller('pos/v1')
 export class PosBillsController {
@@ -22,5 +22,11 @@ export class PosBillsController {
   @HttpCode(200)
   finalize(@CurrentStaff() staff: PosPrincipal, @Param('id') id: string, @Body() dto: FinalizeBillDto): Promise<BillView> {
     return this.bills.finalize(staff, id, dto)
+  }
+
+  @Post('bills/:id/refund')
+  @HttpCode(201)
+  refund(@CurrentStaff() staff: PosPrincipal, @Param('id') id: string, @Body() dto: RefundBillDto): Promise<CreditNoteView> {
+    return this.bills.refund(staff, id, dto)
   }
 }

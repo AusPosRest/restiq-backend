@@ -35,7 +35,7 @@ import type { Prisma } from '../../generated/prisma/client'
 import { ManagerApproval, ManagerAuthService, PosPrincipal, RegionRegistryService, uuidv7 } from '../../platform'
 import { setTenantContext } from '../tenant-context'
 import { assertOwner, loadOrder } from '../orders/orders.service'
-import { FinalizeBillDto, BillView, TenderView } from './bills.dtos'
+import { FinalizeBillDto, BillView, CreditNoteLineView, CreditNoteView, RefundBillDto, TenderView } from './bills.dtos'
 
 type Tx = Prisma.TransactionClient
 
@@ -43,8 +43,9 @@ type Tx = Prisma.TransactionClient
 // rate once one exists anywhere in the schema. 5% is a documented, flat
 // placeholder - not a real GST/VAT figure for any jurisdiction - chosen only
 // so bills carry a non-zero, deterministic tax breakdown until that story
-// lands.
-const TAX_RATE_PLACEHOLDER_PERCENT = 5n
+// lands. Exported (not module-private) so pos/CAP-9's refund() below reverses
+// tax at this exact rate rather than re-deriving or re-guessing one.
+export const TAX_RATE_PLACEHOLDER_PERCENT = 5n
 
 // SPEC.md's Assumptions section defers the actual discount-above-threshold
 // value to "a sane default...pending a real settings field" - this story's
@@ -91,6 +92,29 @@ async function loadBill(tx: Tx, tenantId: string, billId: string): Promise<BillW
     throw new NotFoundException({ code: 'not_found', message: 'No such bill' })
   }
   return bill
+}
+
+const CREDIT_NOTE_INCLUDE = { lines: { orderBy: { id: 'asc' as const } } } satisfies Prisma.CreditNoteInclude
+type CreditNoteWithLines = Prisma.CreditNoteGetPayload<{ include: typeof CREDIT_NOTE_INCLUDE }>
+
+function toCreditNoteLineView(l: CreditNoteWithLines['lines'][number]): CreditNoteLineView {
+  return { id: l.id, orderLineId: l.orderLineId, quantity: l.quantity, unitPriceMinor: Number(l.unitPriceMinor), amountMinor: Number(l.amountMinor) }
+}
+
+function toCreditNoteView(note: CreditNoteWithLines): CreditNoteView {
+  return {
+    id: note.id,
+    tenantId: note.tenantId,
+    originalBillId: note.originalBillId,
+    reason: note.reason,
+    approvedByStaffId: note.approvedByStaffId,
+    createdByStaffId: note.createdByStaffId,
+    subtotalMinor: Number(note.subtotalMinor),
+    taxMinor: Number(note.taxMinor),
+    totalMinor: Number(note.subtotalMinor + note.taxMinor),
+    createdAt: note.createdAt.toISOString(),
+    lines: note.lines.map(toCreditNoteLineView),
+  }
 }
 
 /** Sums a bill's snapshotted lines (unit price + selected modifiers, times quantity) into subtotalMinor. */
@@ -270,6 +294,113 @@ export class BillsService {
 
       const final = await loadBill(tx, staff.tenantId, billId)
       return toBillView(final)
+    })
+  }
+
+  /**
+   * pos/CAP-9 refunds & adjustments (AD-14, AD-15). Refunds one or more
+   * items - or, with no `lines` given, every item's full remaining quantity -
+   * against an already-finalized Bill, gated by platform/manager-auth's
+   * 'refund' action exactly like finalize()'s discount-above-threshold gate
+   * above. Writes a brand-new CreditNote (+ CreditNoteLine rows) and the
+   * manager-auth audit row in one transaction; the original Bill is never
+   * read for a write here - no UPDATE statement touches "bills" or "tenders"
+   * anywhere in this method, satisfying AD-14's "never mutates the original
+   * Bill" success criterion structurally, not just by convention.
+   */
+  async refund(staff: PosPrincipal, billId: string, dto: RefundBillDto): Promise<CreditNoteView> {
+    const plane = this.plane()
+    return plane.$transaction(async (tx) => {
+      await setTenantContext(tx, staff.tenantId)
+      const bill = await loadBill(tx, staff.tenantId, billId)
+      if (bill.status !== 'finalized') {
+        throw new ConflictException({ code: 'bill_not_finalized', message: 'Only a finalized bill can be refunded' })
+      }
+
+      const orderLines = await tx.orderLine.findMany({ where: { orderId: bill.orderId }, include: { modifiers: true } })
+      const orderLineById = new Map(orderLines.map((l) => [l.id, l]))
+
+      // Sum every earlier credit note's lines for this bill so a line can
+      // never be refunded past its original quantity across multiple
+      // refunds - CreditNoteLine has no other guard against double-refunding
+      // the same units.
+      const priorLines = await tx.creditNoteLine.findMany({ where: { creditNote: { originalBillId: billId } } })
+      const refundedSoFar = new Map<string, number>()
+      for (const l of priorLines) refundedSoFar.set(l.orderLineId, (refundedSoFar.get(l.orderLineId) ?? 0) + l.quantity)
+
+      const targets =
+        dto.lines ??
+        orderLines
+          .map((l) => ({ orderLineId: l.id, quantity: l.quantity - (refundedSoFar.get(l.id) ?? 0) }))
+          .filter((t) => t.quantity > 0)
+
+      if (targets.length === 0) {
+        throw new BadRequestException({ code: 'nothing_to_refund', message: 'There is nothing left to refund on this bill' })
+      }
+
+      let subtotalMinor = 0n
+      const lineData: { orderLineId: string; quantity: number; unitPriceMinor: bigint; amountMinor: bigint }[] = []
+      for (const target of targets) {
+        const line = orderLineById.get(target.orderLineId)
+        if (!line) {
+          throw new BadRequestException({ code: 'validation_failed', message: `Order line ${target.orderLineId} is not part of this bill` })
+        }
+        const remaining = line.quantity - (refundedSoFar.get(target.orderLineId) ?? 0)
+        if (target.quantity > remaining) {
+          throw new BadRequestException({
+            code: 'over_refund',
+            message: `Cannot refund ${target.quantity} of order line ${target.orderLineId} - only ${remaining} remain refundable`,
+          })
+        }
+
+        // Same per-unit figure computeSubtotal() above folds into a Bill's
+        // subtotal: unit price plus every selected modifier's price.
+        const modifiersTotal = line.modifiers.reduce((sum, m) => sum + m.priceMinor, 0n)
+        const unitPriceMinor = line.unitPriceMinor + modifiersTotal
+        const amountMinor = unitPriceMinor * BigInt(target.quantity)
+        subtotalMinor += amountMinor
+        lineData.push({ orderLineId: target.orderLineId, quantity: target.quantity, unitPriceMinor, amountMinor })
+      }
+
+      // Correct tax reversal (CAP-9): the original bill's tax was
+      // subtotal * TAX_RATE_PLACEHOLDER_PERCENT, computed independently of
+      // any discount (bills.service.ts's createBill()) - reversing the
+      // refunded subtotal at that exact same rate is therefore the correct
+      // inverse, not a re-guessed figure.
+      const taxMinor = (subtotalMinor * TAX_RATE_PLACEHOLDER_PERCENT) / 100n
+
+      // Refund is unconditionally gated (unlike finalize()'s above-threshold
+      // discount) - validate the refund request itself first (cheap), then
+      // spend a manager-PIN check only on a request that's actually valid.
+      const approval = await this.managerAuth.authorize('refund', staff.tenantId, bill.outletId, dto.managerPin, dto.reason)
+
+      const created = await tx.creditNote.create({
+        data: {
+          id: uuidv7(),
+          tenantId: staff.tenantId,
+          originalBillId: billId,
+          reason: dto.reason,
+          approvedByStaffId: approval.approverId,
+          createdByStaffId: staff.id,
+          subtotalMinor,
+          taxMinor,
+          lines: {
+            create: lineData.map((l) => ({
+              id: uuidv7(),
+              tenantId: staff.tenantId,
+              orderLineId: l.orderLineId,
+              quantity: l.quantity,
+              unitPriceMinor: l.unitPriceMinor,
+              amountMinor: l.amountMinor,
+            })),
+          },
+        },
+        include: CREDIT_NOTE_INCLUDE,
+      })
+
+      await this.managerAuth.recordApproval(tx, approval, { actorId: staff.id, actorEmail: staff.name, occurredAt: new Date() })
+
+      return toCreditNoteView(created)
     })
   }
 }

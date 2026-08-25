@@ -15,6 +15,10 @@ const EMAIL = 'sync-health-operator@restiq.example'
 const HOUR = 60 * 60 * 1000
 
 async function wipe(prisma: PrismaClient): Promise<void> {
+  // pos/CAP-9 refunds: CreditNote FKs to bills/staff_users (RESTRICT) and
+  // cascades to its own CreditNoteLine rows - deleted first so later
+  // bill/order_line/staff_user deletes below never hit a live FK.
+  await prisma.creditNote.deleteMany()
   await prisma.orderLineModifier.deleteMany()
   await prisma.orderLine.deleteMany()
   // invoice/subscription (CAP-5) restrict-delete tenants; wiped first so this

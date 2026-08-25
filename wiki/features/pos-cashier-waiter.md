@@ -770,6 +770,107 @@ service directly rather than through an HTTP endpoint)
   (`occurredAt`, `recordedAt`) into a real `audit_events` row, inside a
   transaction standing in for the caller's own mutation transaction.
 
+## CAP-9 - Refunds and adjustments
+
+- **Intent:** staff can refund one or more items against an already-
+  finalized, immutable Bill (story 8), gated by story 9's manager
+  authorisation, with correct tax reversal. Success: a refund never mutates
+  the original Bill - it is issued as a separate, linked credit note read
+  alongside the original Bill's totals, never overwriting them.
+- **Built** (extending `src/pos/bills/` - no new module, per the
+  architecture map's `pos/CAP-9 refunds & adjustments | pos/bills (credit
+  notes)` row - not a parallel implementation):
+  - Greenfield `CreditNote`/`CreditNoteLine` models (AD-14: the third
+    insert-only money-path table pair after `Bill`/`Tender`; migration
+    `20260825500000_refunds_credit_notes`). Nothing in `refund()` issues an
+    `UPDATE` against `bills` or `tenders` - the "never mutates the original
+    Bill" success criterion holds structurally, not just by convention.
+  - `POST /pos/v1/bills/:id/refund` (201) -
+    `{ managerPin, reason, lines?: [{ orderLineId, quantity }] }`. `lines`
+    omitted refunds every order line's full remaining (not-yet-refunded)
+    quantity - a whole-bill refund is the same itemized mechanism applied to
+    every line, not a separate code path. `409 bill_not_finalized` against a
+    still-`open` bill (refunds only make sense against something already
+    finalized). Gated unconditionally by `platform/manager-auth`'s `'refund'`
+    action (`ManagerAuthService.authorize('refund', tenantId, outletId,
+    managerPin, reason)`, `.recordApproval()` inside the same transaction
+    that creates the `CreditNote` - same call shape story 8's
+    discount-above-threshold gate already uses, read from CAP-8's own "How
+    to call this" section above, not guessed). Unlike story 8's discount
+    gate (only above a threshold), a refund is always gated - so the request
+    shape is validated first (bill state, line quantities) and the
+    manager-PIN check runs only once a request is already known-valid, same
+    cheapest-check-first ordering `manager-auth.service.ts` itself already
+    uses for reason-before-PIN.
+  - `GET /pos/v1/bills/:id` (unchanged) still reads the original Bill's own
+    totals; a `CreditNote` is read separately by its own id/`originalBillId`
+    (no new GET endpoint added this story - not required by SPEC or the
+    tests below, and there's no existing "list credit notes" screen calling
+    for one).
+- **Itemization - against `OrderLine`, not a `Bill` line, because `Bill` has
+  none of its own.** `Bill` stores only whole-bill aggregates
+  (`subtotalMinor`/`taxMinor`/`discountMinor` - see its own comment block);
+  the real per-item detail a bill's subtotal was computed from
+  (`bills.service.ts`'s `computeSubtotal()`) lives one hop away, on the
+  order's `OrderLine` rows (`unitPriceMinor`, `quantity`, modifiers). So
+  `CreditNoteLine.orderLineId` points at `OrderLine` directly - this is real
+  line-level detail the data actually supports, not the `amountMinor`+reason
+  fallback the story brief allowed for if it didn't. Each `CreditNoteLine`
+  snapshots `quantity` (units reversed) and `unitPriceMinor` (that line's own
+  `unitPriceMinor` plus its modifiers' `priceMinor` total - the identical
+  per-unit figure `computeSubtotal()` uses) so a later price change never
+  retroactively alters an already-issued credit note.
+- **Over-refund guard:** every earlier `CreditNoteLine` for the bill is
+  summed per `orderLineId` before accepting a new refund, so a line can
+  never be refunded past its original `OrderLine.quantity` across multiple
+  credit notes - `400 over_refund` otherwise, naming exactly how many units
+  remain. Not explicitly named in SPEC.md's success criterion, but a direct
+  consequence of "itemized against the real order lines" - without it, the
+  same dish could be refunded twice.
+- **Correct tax reversal, against the real, documented placeholder rate -
+  not a re-guessed one.** Story 8's `bills.service.ts` computes
+  `taxMinor = subtotalMinor * TAX_RATE_PLACEHOLDER_PERCENT / 100` (5%,
+  independent of any discount). `TAX_RATE_PLACEHOLDER_PERCENT` is now
+  exported from `bills.service.ts` (was module-private) so `refund()`
+  imports the exact same constant - never a second 5%, never a re-derived
+  figure - and reverses each refund's `subtotalMinor` at that identical
+  rate. Because the original tax was computed independent of discount, this
+  is the correct inverse for a partial refund too, not an approximation.
+  `CreditNoteView.totalMinor` (subtotal + tax) is derived, never persisted -
+  same convention as `BillView.totalMinor`.
+- **`CreditNote` schema/endpoint contract:**
+  ```
+  CreditNote { id, tenantId, originalBillId,
+               reason, approvedByStaffId, createdByStaffId,
+               subtotalMinor, taxMinor, createdAt }
+  CreditNoteLine { id, creditNoteId, orderLineId,
+                   quantity, unitPriceMinor, amountMinor }
+
+  POST /pos/v1/bills/:id/refund   -> 201 CreditNoteView
+    body: { managerPin, reason, lines?: [{ orderLineId, quantity }] }
+  // CreditNoteView adds a derived `totalMinor` (subtotal + tax) and
+  // `lines: CreditNoteLineView[]` - never persisted as its own column.
+  ```
+
+### Test coverage (`test/pos-refunds.e2e-spec.ts`, 7 tests, e2e against a
+real Postgres test DB)
+
+- A full refund (no `lines` given) creates a `CreditNote` with the correct
+  subtotal/tax/lines, writes the real `audit_events` row via
+  `platform/manager-auth`, and leaves the original `Bill` completely
+  unchanged (status, number, totals all re-verified after).
+- A partial refund of one unit computes the correct proportional tax
+  reversal.
+- Refunding more units than remain (across two credit notes) is rejected
+  (`400 over_refund`) without creating a partial credit note.
+- No manager PIN -> `400`; a wrong PIN -> `401`; either way, no `CreditNote`
+  is created.
+- A missing reason is rejected.
+- A refund against a still-open (non-finalized) `Bill` is rejected (`409
+  bill_not_finalized`), with no `CreditNote` created.
+- Cross-tenant isolation: another tenant's bill id 404s, not a leaked
+  refund.
+
 ## CAP-10 - Shift open, cash management, and blind-count close
 
 - **Intent:** a cashier opens a shift with a starting float, logs cash

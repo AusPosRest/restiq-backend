@@ -165,6 +165,8 @@ model Tenant {
   bills               Bill[]
   tenders             Tender[]
   billNumberCounters  BillNumberCounter[]
+  creditNotes         CreditNote[]
+  creditNoteLines     CreditNoteLine[]
 
   // The directory list is served from these: filter columns plus the
   // created_at ordering the default sort and cursor walk.
@@ -663,6 +665,8 @@ model StaffUser {
   cashMovementsMade CashMovement[]
   billsCreated      Bill[]         @relation("BillCreatedBy")
   billsFinalized    Bill[]         @relation("BillFinalizedBy")
+  creditNotesCreated  CreditNote[] @relation("CreditNoteCreatedBy")
+  creditNotesApproved CreditNote[] @relation("CreditNoteApprovedBy")
 
   @@index([tenantId])
   @@map("staff_users")
@@ -1057,6 +1061,12 @@ model OrderLine {
   variant      ItemVariant?        @relation(fields: [variantId], references: [id])
   addedByStaff StaffUser           @relation(fields: [addedByStaffId], references: [id])
   modifiers    OrderLineModifier[]
+  // pos/CAP-9 refunds (AD-14): a CreditNoteLine reverses this exact line's
+  // unit price/modifiers snapshot, quantity at a time - see CreditNoteLine's
+  // own comment for why refunds itemize against OrderLine, not against Bill
+  // (Bill carries only whole-bill subtotal/tax aggregates, no lines of its
+  // own).
+  creditNoteLines CreditNoteLine[]
 
   @@index([tenantId])
   @@index([orderId])
@@ -1197,6 +1207,7 @@ model Bill {
   createdByStaff   StaffUser  @relation("BillCreatedBy", fields: [createdByStaffId], references: [id])
   finalizedByStaff StaffUser? @relation("BillFinalizedBy", fields: [finalizedByStaffId], references: [id])
   tenders          Tender[]
+  creditNotes      CreditNote[]
 
   // Gapless numbering's uniqueness guarantee. A plain (non-partial) unique
   // index is enough here - Postgres treats every NULL as distinct from every
@@ -1254,4 +1265,81 @@ model BillNumberCounter {
   outlet Outlet @relation(fields: [outletId], references: [id])
 
   @@map("bill_number_counters")
+}
+
+// ---------------------------------------------------------------------------
+// pos/CAP-9 refunds & adjustments (AD-14, AD-15). The third money-path
+// insert-only table after Bill/Tender - nothing here ever UPDATEs a Bill or
+// its lines/tenders; a refund is always a new, separate CreditNote linked by
+// originalBillId. Gated by platform/manager-auth's 'refund' action
+// (src/pos/bills/bills.service.ts's refund()) exactly like discount-above-
+// threshold already is.
+//
+// Itemization note: Bill itself stores only whole-bill aggregates
+// (subtotalMinor/taxMinor/discountMinor) - it has no line items of its own
+// (see the Bill model's own comment block). The real per-item detail lives
+// one hop away, on the Order's OrderLine rows (unitPriceMinor, quantity,
+// modifiers), which is what a Bill's subtotal was actually computed from
+// (bills.service.ts's computeSubtotal()). So CreditNoteLine itemizes against
+// OrderLine, not against Bill - this is real line-level detail, not a
+// simplification, because that's genuinely where Bill's numbers come from.
+// A CreditNote with no lines client-supplied refunds every OrderLine's full
+// remaining (not-yet-refunded) quantity - a whole-bill refund is just the
+// same itemized mechanism applied to every line, not a separate code path.
+// ---------------------------------------------------------------------------
+
+model CreditNote {
+  id                 String   @id @default(uuid(7)) @db.Uuid
+  tenantId           String   @map("tenant_id") @db.Uuid
+  originalBillId     String   @map("original_bill_id") @db.Uuid
+  reason             String
+  // The manager who approved this refund (platform/manager-auth's
+  // ManagerApproval.approverId) - distinct from createdByStaffId below, same
+  // actor/approver split Bill already draws between createdByStaffId and
+  // finalizedByStaffId.
+  approvedByStaffId  String   @map("approved_by_staff_id") @db.Uuid
+  createdByStaffId   String   @map("created_by_staff_id") @db.Uuid
+  // Sum of this note's lines' amountMinor, and that subtotal's tax reversed
+  // at the same TAX_RATE_PLACEHOLDER_PERCENT the original bill's tax was
+  // computed with (bills.service.ts) - never re-derived or re-guessed.
+  // totalMinor (subtotal + tax) is derived in CreditNoteView, same
+  // never-persisted-derived-total convention as BillView.totalMinor.
+  subtotalMinor      BigInt   @map("subtotal_minor")
+  taxMinor           BigInt   @map("tax_minor")
+  createdAt          DateTime @default(now()) @map("created_at") @db.Timestamptz(6)
+
+  tenant          Tenant           @relation(fields: [tenantId], references: [id])
+  originalBill    Bill             @relation(fields: [originalBillId], references: [id])
+  approvedByStaff StaffUser        @relation("CreditNoteApprovedBy", fields: [approvedByStaffId], references: [id])
+  createdByStaff  StaffUser        @relation("CreditNoteCreatedBy", fields: [createdByStaffId], references: [id])
+  lines           CreditNoteLine[]
+
+  @@index([tenantId])
+  @@index([originalBillId])
+  @@map("credit_notes")
+}
+
+// One row per refunded OrderLine, quantity and amount reversed - unitPriceMinor
+// is copied from that OrderLine's own unitPriceMinor plus its modifiers'
+// priceMinor total (the same per-unit figure computeSubtotal() folds into a
+// Bill's subtotal), snapshotted here so a later price change never
+// retroactively alters an already-issued credit note (same insert-only-
+// snapshot posture as OrderLine.unitPriceMinor itself).
+model CreditNoteLine {
+  id             String @id @default(uuid(7)) @db.Uuid
+  tenantId       String @map("tenant_id") @db.Uuid
+  creditNoteId   String @map("credit_note_id") @db.Uuid
+  orderLineId    String @map("order_line_id") @db.Uuid
+  quantity       Int
+  unitPriceMinor BigInt @map("unit_price_minor")
+  amountMinor    BigInt @map("amount_minor")
+
+  tenant     Tenant     @relation(fields: [tenantId], references: [id])
+  creditNote CreditNote @relation(fields: [creditNoteId], references: [id], onDelete: Cascade)
+  orderLine  OrderLine  @relation(fields: [orderLineId], references: [id])
+
+  @@index([tenantId])
+  @@index([creditNoteId])
+  @@index([orderLineId])
+  @@map("credit_note_lines")
 }
