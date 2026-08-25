@@ -425,10 +425,12 @@ numbers (group ordering)')`, 6 of the file's 26 tests)
 
 ### CAP-4 integration points for later stories
 
-- pos/CAP-7 (bill & settle) is the capability that actually reads
-  `OrderLine.seatNumber` for anything (per-seat split billing) - group
-  ordering itself is just the data entry and the send-time gate; no seat/
-  cover grouping or totals aggregation exists yet.
+- **Update (pos/CAP-7, issue #59, landed after this note was written):**
+  `POST /pos/v1/bills/:id/finalize` does **not**, in the end, read
+  `OrderLine.seatNumber` for anything - see CAP-7's own "Split types" note
+  below. Group ordering's data entry and send-time gate stand as originally
+  built; no seat/cover grouping or totals aggregation exists anywhere in
+  this codebase yet, and CAP-7 deliberately doesn't add one.
 - `OrderLineView.seatNumber` is `number | null` at the API boundary, same
   as every other optional line field - a client renders "no seat" for `null`
   rather than treating it as `0` or omitted.
@@ -474,6 +476,158 @@ against a real Postgres test DB)
   on the next read of this list (proves reuse, not a second ownership path).
 - Any staff member can view the list, not only the order's owner.
 - No session -> `401`; another tenant's outlet -> `404`.
+
+## CAP-7 - Bill and settle
+
+- **Intent:** staff finalises an Order into a Bill with a tax breakdown, an
+  optional discount carrying a reason code, an optional split (seat/item/
+  N-way/amount/percent), and one or more tenders (cash or UPI-manual). A
+  finalised Bill is immutable and carries a gapless per-outlet bill number;
+  multi-tender totals must equal the Bill total before it can finalise.
+- **Built** (new `src/pos/bills/`, greenfield `Bill`/`Tender`/
+  `BillNumberCounter` models per AD-14 - the last pieces of that story's
+  table list, alongside `Order`/`Shift`/`CashMovement`):
+  - `POST /pos/v1/orders/:orderId/bill` (201) - snapshots the order's
+    current lines into `subtotalMinor`/`taxMinor` on a new, still-`open`
+    Bill. **Owner-only** (CAP-2's `assertOwner`, reused verbatim - not
+    reimplemented). The order must be `open` or `sent`, not `closed`:
+    `sent` is the normal dine-in path (already fired to the kitchen), but
+    `open` is accepted too since the architecture's own capability map
+    (`pos/CAP-6 QSR counter & token | pos/orders + pos/bills composition`)
+    composes a future counter-service flow directly over this endpoint, and
+    a counter order never needs a kitchen-fire step. Only one Bill may ever
+    exist per order (`orderId` is unique on `Bill`) - a second create
+    attempt is `409 bill_already_exists`, not merged into the first.
+  - `POST /pos/v1/bills/:id/finalize` (200) - body
+    `{ discountMinor?, discountReason?, managerPin?, tenders: [{ method,
+    amountMinor }] }`. Validates the tender sum equals the bill total
+    (`subtotal + tax - discount`), routes a discount above the threshold
+    through `platform/manager-auth`, reserves the gapless bill number, and
+    writes everything - Bill, Tenders, the manager-auth audit row, and the
+    Order's `closed` status - in one transaction. **Not** owner-restricted
+    (unlike create): a cashier settling at a register is frequently not the
+    waiter who owns the order, and SPEC-CAP-7 names no ownership
+    restriction for this step. `409 already_finalized` on any second
+    finalise attempt (a `status='open'` compare-and-swap `UPDATE`, not a
+    plain update-by-id, so a concurrent double-finalise race lands the same
+    409 instead of corrupting the row).
+  - `GET /pos/v1/bills/:id` - one bill by id, with its tenders, 404 across
+    tenants.
+- **Split types (seat/item/N-way/amount/percent):** implemented as
+  "finalise against an arbitrary list of tenders." N-way and amount/percent
+  splits are structurally just multiple `Tender` rows whose amounts sum to
+  the bill total - however a client computed each tender's amount, this
+  endpoint doesn't need to know. Per-seat/per-item splits are, per SPEC's
+  own words, mostly a web-side UI concern of grouping lines before computing
+  those tender amounts - so even though `OrderLine.seatNumber` now exists
+  (pos/CAP-4 group ordering, issue #58, merged into `dev` while this story
+  was in flight), `finalize()` deliberately does not read it or validate a
+  split's tender amounts against seat assignment. Re-deriving a per-seat
+  subtotal here would duplicate a grouping this module has no other use
+  for; a future per-seat billing UI computes those amounts client-side from
+  the order's own `lines[].seatNumber` (already returned by every order
+  read) and just posts however many tenders that produces. Documented as a
+  deliberate scope call, not an oversight - see the CAP-4 section's own
+  updated integration-points note above.
+- **Tax - no real rate field exists anywhere in the schema.** Checked
+  `MenuItem`/`MenuCategory`/`ItemPrice` (admin/menu) and
+  `Tenant`/`TenantTaxRegistration` (the latter carries a registration-type
+  enum and a `taxProfile` string, not a rate) - none carry a tax rate.
+  Per this story's brief, a flat **5% placeholder** is applied to
+  `subtotalMinor` (`TAX_RATE_PLACEHOLDER_PERCENT` in `bills.service.ts`),
+  clearly commented as a TODO rather than a real GST/VAT figure for any
+  jurisdiction. **A future tax-configuration story owns making this a real,
+  tenant-configurable rate** - not invented here.
+- **Discount-above-threshold routes through the real `platform/manager-auth`
+  service (AD-15)**, per stories.yaml's explicit instruction, rather than
+  accepting a bare reason string: `ManagerAuthService.authorize
+  ('discount_above_threshold', tenantId, outletId, managerPin,
+  discountReason)` before the mutation, `.recordApproval()` inside the same
+  finalise transaction - the exact call shape documented in this doc's own
+  CAP-8 "How to call this" section above, followed as written, not guessed.
+  `discountMinor`/`discountReason` must be given together or not at all
+  (validated in the service; class-validator has no clean "both or
+  neither" decorator for two independent optional fields).
+  - **Threshold value:** SPEC.md's Assumptions/Open Questions leave the
+    actual number undecided ("a sane default is assumed pending a real
+    settings field"); this story's own `.memlog.md` names the example "any
+    discount over 20%". `DISCOUNT_THRESHOLD_PERCENT = 20` (of the bill's
+    `subtotalMinor`) is that default, documented as a TODO for a future
+    tenant-settings story to make real and per-tenant configurable.
+- **Gapless numbering (AD-14): reserve-then-commit via a counter row, not a
+  Postgres `SEQUENCE`.** `BillNumberCounter` is one row per outlet
+  (`lastNumber`), incremented by a plain `UPDATE`/`upsert` **inside** the
+  same finalise transaction, only after every validation (order/bill state,
+  discount/reason pairing, manager-auth, tender-sum match) has already
+  passed. A `SEQUENCE`'s `nextval()` is deliberately not used here: it does
+  not roll back with an aborted transaction, which is exactly the gap this
+  story must not introduce. Because the counter is touched last and inside
+  the same transaction as everything else, a validation failure never
+  reserves a number, and if anything later still fails, the whole
+  transaction (counter increment included) rolls back with it - either way,
+  gapless. `bills.bill_number` is nullable (`null` until finalised) with a
+  plain (non-partial) unique index on `(tenant_id, outlet_id, bill_number)`
+  - Postgres already treats every `NULL` as distinct in a unique index, so
+  any number of still-open bills coexist without needing a partial-index
+  `WHERE` clause.
+- **`ShiftsService.closeShift()`'s expected-amount formula, completed.**
+  CAP-10's own doc entry below left a TODO here ("fold in real cash-tender
+  bill totals... once Order/Bill/Tender land"): `expectedMinor` is now
+  `floatMinor + sum(cash-tender bill totals since the shift opened) -
+  paid_outs - bank_drops`, not just float minus paid-outs/bank-drops.
+  `Tender` carries no `shiftId` column (by design - see the DTO/schema
+  contract below); "cash tenders on bills finalised at this outlet since
+  `shift.openedAt`" is unambiguous without one, since CAP-10 already
+  enforces one open shift per outlet at a time. See
+  `test/shift-cash-management.e2e-spec.ts`'s two new cases proving this
+  (folds in real cash sales; never folds in a bill finalised before the
+  shift opened or at a different outlet).
+- **Schema/endpoint contract other stories depend on** (story 7/QSR counter,
+  story 10/refunds - read this before building against it):
+  ```
+  Bill { id, tenantId, outletId, orderId (unique),
+         billNumber: number | null,     // null until finalised
+         subtotalMinor, taxMinor,
+         discountMinor: number | null, discountReason: string | null,
+         status: "open" | "finalized",
+         createdByStaffId, createdAt,
+         finalizedByStaffId: string | null, finalizedAt: string | null }
+  Tender { id, tenantId, billId, method: "cash" | "upi_manual", amountMinor, createdAt }
+
+  POST /pos/v1/orders/:orderId/bill          -> 201 BillView (empty body)
+  GET  /pos/v1/bills/:id                     -> 200 BillView
+  POST /pos/v1/bills/:id/finalize            -> 200 BillView
+    body: { discountMinor?, discountReason?, managerPin?,
+            tenders: [{ method: "cash"|"upi_manual", amountMinor }] }
+  // BillView adds a derived `totalMinor` (subtotal + tax - discount) and
+  // `tenders: TenderView[]` - never persisted as its own column.
+  ```
+
+### Test coverage (`test/pos-bills.e2e-spec.ts`, 12 tests, e2e against a
+real Postgres test DB)
+
+- Creating a bill from a real order's lines computes the correct
+  subtotal and the 5% placeholder tax.
+- A non-owner cannot create a bill (403, naming the current owner).
+- A second bill cannot be created for the same order (409
+  `bill_already_exists`).
+- Finalising with a matching single tender succeeds, closes the order, and
+  is immutable after - a second finalise attempt is `409 already_finalized`.
+- A split multi-tender settlement summing to the total succeeds.
+- A mismatched tender sum is rejected (400 `tender_mismatch`), and the bill
+  stays `open`.
+- A discount above the threshold with no manager PIN is rejected (400
+  `manager_pin_required`); with a wrong PIN, `401`; the bill stays `open`
+  either way.
+- A discount above the threshold with a valid manager PIN succeeds and
+  writes the real `audit_events` row via `platform/manager-auth`.
+- A discount below the threshold needs no manager PIN at all.
+- `discountMinor` without `discountReason` is rejected (400
+  `validation_failed`).
+- Bill numbers are gapless per outlet across multiple bills, **including
+  after a rejected/failed finalise attempt** (a failed finalise never
+  touches the counter).
+- Numbering is independent per outlet - a second outlet also starts at 1.
 
 ## CAP-8 - Manager authorisation gate
 
@@ -660,15 +814,17 @@ service directly rather than through an HTTP endpoint)
   supplied, and no "peek" endpoint exists. Proven directly in
   `test/shift-cash-management.e2e-spec.ts`'s "blind-count enforcement"
   suite, not just asserted.
-- **Expected-amount formula is deliberately partial for this story:**
-  `expectedMinor = floatMinor - sum(paid_out) - sum(bank_drop)`. `Order`/
-  `Bill`/`Tender` don't exist anywhere in this codebase yet (greenfield
-  alongside this story, per AD-14's table list - story 3/issue #46 builds
-  `Order` independently). **TODO for the Bill & Settle story** (once
-  `Order`/`Bill`/`Tender` land): fold in real cash-tender bill totals so the
-  formula becomes `floatMinor + sum(cash-tender bill totals) -
-  sum(paid_out) - sum(bank_drop)` - the one line to change is in
-  `ShiftsService.closeShift()`.
+- **Expected-amount formula was deliberately partial when this story
+  shipped** (`expectedMinor = floatMinor - sum(paid_out) -
+  sum(bank_drop)`, since `Order`/`Bill`/`Tender` didn't exist in the schema
+  yet - greenfield alongside this story, per AD-14's table list; story
+  3/issue #46 built `Order` independently). **Completed by pos/CAP-7 (Bill &
+  Settle, issue #59):** the formula is now `floatMinor + sum(cash-tender
+  bill totals finalised at this outlet since the shift opened) -
+  sum(paid_out) - sum(bank_drop)` - see that story's own entry above for the
+  detail (`Tender` carries no `shiftId`; the outlet + "finalised since
+  `openedAt`" filter is unambiguous because only one shift is ever open per
+  outlet at a time).
 - **Pos-realm auth - reconciled with pos/CAP-1 (issue #44).** This story was
   built before pos/CAP-1's real PIN login merged, so it originally shipped
   its own e2e-only stub of `src/platform/pos-jwt.ts`/`pos-auth.guard.ts`
@@ -796,6 +952,28 @@ a real Postgres test DB)
   menu module.
 - CAP-11 adds **no table or column** - it is a pure read over CAP-1's
   existing `clock_events`, per stories.yaml story 11.
+- `bills` (new, CAP-7) - `{ id, tenantId, outletId, orderId (unique),
+  billNumber? (null until finalised), subtotalMinor, taxMinor,
+  discountMinor?, discountReason?, status (open|finalized),
+  createdByStaffId, createdAt, finalizedByStaffId?, finalizedAt? }`. RLS
+  `tenant_isolation` + `operator_read`. Insert-only past finalisation (AD-14)
+  - `BillsService.finalize()` is the sole writer of `billNumber`/
+  `discountMinor`/`discountReason`/`status`/`finalizedByStaffId`/
+  `finalizedAt`, and always via a `status='open'` compare-and-swap `UPDATE`,
+  never a plain update-by-id. Unique on `(tenantId, outletId, billNumber)` -
+  a plain (non-partial) index, since Postgres already treats every `NULL`
+  `billNumber` as distinct.
+- `tenders` (new, CAP-7) - `{ id, tenantId, billId, method (cash |
+  upi_manual), amountMinor, createdAt }`. RLS `tenant_isolation` +
+  `operator_read`. Insert-only, like every other money-path row under
+  AD-14 - no update/delete path for a tender once written.
+- `bill_number_counters` (new, CAP-7) - `{ id, tenantId, outletId (unique),
+  lastNumber }`. One row per outlet, incremented by a plain transactional
+  `UPDATE`/`upsert` inside `finalize()`'s own transaction - deliberately not
+  a Postgres `SEQUENCE` (see CAP-7's own entry above for why). RLS
+  `tenant_isolation` + `operator_read`.
+- Money is `bigint` minor units on all three new CAP-7 tables, same
+  workspace convention as every other money-path table.
 
 ## Integration points for later stories
 
@@ -810,10 +988,6 @@ a real Postgres test DB)
   wants a role beyond Owner/Manager to approve gated actions, flip that
   role's `isManager` to `true` (a data change) - `manager-auth.service.ts`
   needs no code change for that.
-- **For CAP-10's shift & cash management: Bill & Settle** (issue not yet
-  dispatched) - once `Order`/`Bill`/`Tender` exist, `ShiftsService.closeShift()`
-  is the one place to add real cash-tender bill totals into the
-  expected-amount formula - see the TODO comment right on that computation.
 - **pos/CAP-1 (issue #44):** see CAP-10's "pos-realm auth is a stub" note
   above - this is the first thing to reconcile once that story lands; it
   also unblocks a real caller for CAP-8's `ManagerAuthService` (PIN-login
@@ -821,8 +995,22 @@ a real Postgres test DB)
 - **pos/CAP-10's own no-sale drawer-open action** (not built by this story)
   is the natural first caller of `ManagerAuthService` from within the shift
   module, once it's dispatched.
+- **For CAP-6 (QSR counter & token, not yet dispatched):** the architecture's
+  own capability map composes it directly over `pos/bills`
+  (`POST /pos/v1/orders/:orderId/bill` + `.../finalize`) - see CAP-7's own
+  entry above for exactly why `open` (not just `sent`) is an accepted order
+  status for bill creation. That story should not need a second bill/settle
+  code path, only its own token-issuing wrapper around these two endpoints.
+- **For CAP-9 (refunds & adjustments, not yet dispatched):** reads a
+  finalised `Bill`'s real `subtotalMinor`/`taxMinor`/`discountMinor`/
+  `tenders` to compute tax reversal, and is gated by CAP-8's
+  `ManagerAuthService` the same way CAP-7's discount step is - a `CreditNote`
+  is a new, separate insert-only table linked by `originalBillId` (AD-14),
+  never a `Bill`/`Tender` mutation; nothing in `bills.service.ts` needs to
+  change to support it.
 - No pos capability besides the ones named above reads or writes
-  `shifts`/`cash_movements`/`roles.is_manager`/`audit_events.approver_*` yet.
+  `shifts`/`cash_movements`/`roles.is_manager`/`audit_events.approver_*`/
+  `bills`/`tenders`/`bill_number_counters` yet.
 
 ## Key decisions
 

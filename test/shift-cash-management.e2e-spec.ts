@@ -54,6 +54,8 @@ interface ShiftBody {
 // reports-catalogue.e2e-spec.ts's wipe(), the most complete one prior to
 // this story - cash_movements/shifts are new here, prepended in FK order).
 async function wipe(prisma: PrismaClient): Promise<void> {
+  await prisma.orderLineModifier.deleteMany()
+  await prisma.orderLine.deleteMany()
   await prisma.cashMovement.deleteMany()
   await prisma.shift.deleteMany()
   await prisma.invoice.deleteMany()
@@ -75,6 +77,10 @@ async function wipe(prisma: PrismaClient): Promise<void> {
   await prisma.itemVariant.deleteMany()
   await prisma.menuItem.deleteMany()
   await prisma.menuCategory.deleteMany()
+  await prisma.tender.deleteMany()
+  await prisma.bill.deleteMany()
+  await prisma.billNumberCounter.deleteMany()
+  await prisma.order.deleteMany()
   await prisma.staffUser.deleteMany()
   await prisma.role.deleteMany()
   await prisma.outletCapability.deleteMany()
@@ -354,6 +360,71 @@ describe('/pos/v1/shifts (e2e)', () => {
       const body = res.body as ShiftBody
       expect(body.expectedMinor).toBe(100000)
       expect(body.overShortMinor).toBe(3000)
+    })
+
+    it('folds real finalised cash-tender bill totals into expected (pos/CAP-7 Bill & Settle)', async () => {
+      const tenantId = await createTenant(prisma)
+      const outletId = await createOutlet(prisma, tenantId)
+      const { staffId, token } = await createCashier(prisma, tenantId)
+      const shiftId = await openShift(token, outletId, 50000)
+
+      // A bill finalised at this outlet while the shift is open, settled
+      // partly cash and partly UPI - only the cash tender counts toward the
+      // till. Created directly via Prisma: the bill/finalise HTTP flow
+      // itself is covered by test/pos-bills.e2e-spec.ts, this test only
+      // pins down closeShift()'s arithmetic.
+      const order = await prisma.order.create({ data: { tenantId, outletId, ownerId: staffId, status: 'closed' } })
+      const bill = await prisma.bill.create({
+        data: {
+          tenantId,
+          outletId,
+          orderId: order.id,
+          billNumber: 1,
+          subtotalMinor: 100000n,
+          taxMinor: 5000n,
+          status: 'finalized',
+          createdByStaffId: staffId,
+          finalizedByStaffId: staffId,
+          finalizedAt: new Date(),
+        },
+      })
+      await prisma.tender.create({ data: { tenantId, billId: bill.id, method: 'cash', amountMinor: 80000n } })
+      await prisma.tender.create({ data: { tenantId, billId: bill.id, method: 'upi_manual', amountMinor: 25000n } })
+
+      await authed(request(httpServer).post(`/pos/v1/shifts/${shiftId}/cash-movements`), token).send({ type: 'paid_out', amountMinor: 10000, reason: 'Vendor payment' })
+
+      // expected = float(50000) + cash tenders(80000) - paid_out(10000) = 120000
+      const res = await authed(request(httpServer).post(`/pos/v1/shifts/${shiftId}/close`), token).send({ countedMinor: 120000 })
+      expect(res.status).toBe(200)
+      expect((res.body as ShiftBody).expectedMinor).toBe(120000)
+      expect((res.body as ShiftBody).overShortMinor).toBe(0)
+    })
+
+    it('never folds a bill finalised before the shift opened, or at another outlet, into expected', async () => {
+      const tenantId = await createTenant(prisma)
+      const outletId = await createOutlet(prisma, tenantId)
+      const otherOutletId = await createOutlet(prisma, tenantId, 'Other Outlet')
+      const { staffId, token } = await createCashier(prisma, tenantId)
+
+      // Finalised BEFORE this test's shift ever opens.
+      const staleOrder = await prisma.order.create({ data: { tenantId, outletId, ownerId: staffId, status: 'closed' } })
+      const staleBill = await prisma.bill.create({
+        data: { tenantId, outletId, orderId: staleOrder.id, billNumber: 1, subtotalMinor: 100000n, taxMinor: 5000n, status: 'finalized', createdByStaffId: staffId, finalizedByStaffId: staffId, finalizedAt: new Date(Date.now() - 60_000) },
+      })
+      await prisma.tender.create({ data: { tenantId, billId: staleBill.id, method: 'cash', amountMinor: 999999n } })
+
+      const shiftId = await openShift(token, outletId, 50000)
+
+      // Finalised at a DIFFERENT outlet, after this shift opened.
+      const otherOrder = await prisma.order.create({ data: { tenantId, outletId: otherOutletId, ownerId: staffId, status: 'closed' } })
+      const otherBill = await prisma.bill.create({
+        data: { tenantId, outletId: otherOutletId, orderId: otherOrder.id, billNumber: 1, subtotalMinor: 100000n, taxMinor: 5000n, status: 'finalized', createdByStaffId: staffId, finalizedByStaffId: staffId, finalizedAt: new Date() },
+      })
+      await prisma.tender.create({ data: { tenantId, billId: otherBill.id, method: 'cash', amountMinor: 999999n } })
+
+      const res = await authed(request(httpServer).post(`/pos/v1/shifts/${shiftId}/close`), token).send({ countedMinor: 50000 })
+      expect(res.status).toBe(200)
+      expect((res.body as ShiftBody).expectedMinor).toBe(50000)
     })
 
     it('rejects closing an already-closed shift (409) - insert-only past finalisation', async () => {

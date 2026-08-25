@@ -29,6 +29,8 @@ interface ListBody {
 }
 
 async function wipe(prisma: PrismaClient): Promise<void> {
+  await prisma.orderLineModifier.deleteMany()
+  await prisma.orderLine.deleteMany()
   // invoice/subscription (CAP-5) restrict-delete tenants; wiped first so this
   // helper is safe regardless of what another e2e file left behind (the test
   // suite shares one database and file execution order is not guaranteed).
@@ -55,6 +57,9 @@ async function wipe(prisma: PrismaClient): Promise<void> {
   await prisma.itemVariant.deleteMany()
   await prisma.menuItem.deleteMany()
   await prisma.menuCategory.deleteMany()
+  await prisma.tender.deleteMany()
+  await prisma.bill.deleteMany()
+  await prisma.billNumberCounter.deleteMany()
   await prisma.order.deleteMany()
   await prisma.clockEvent.deleteMany()
   await prisma.staffUser.deleteMany()

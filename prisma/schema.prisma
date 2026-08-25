@@ -162,6 +162,9 @@ model Tenant {
   orderLineModifiers  OrderLineModifier[]
   shifts              Shift[]
   cashMovements       CashMovement[]
+  bills               Bill[]
+  tenders             Tender[]
+  billNumberCounters  BillNumberCounter[]
 
   // The directory list is served from these: filter columns plus the
   // created_at ordering the default sort and cursor walk.
@@ -252,6 +255,8 @@ model Outlet {
   clockEvents         ClockEvent[]
   orders              Order[]
   shifts              Shift[]
+  bills               Bill[]
+  billNumberCounter   BillNumberCounter?
 
   @@index([tenantId])
   @@map("outlets")
@@ -656,6 +661,8 @@ model StaffUser {
   shiftsOpened      Shift[]        @relation("ShiftOpenedBy")
   shiftsClosed      Shift[]        @relation("ShiftClosedBy")
   cashMovementsMade CashMovement[]
+  billsCreated      Bill[]         @relation("BillCreatedBy")
+  billsFinalized    Bill[]         @relation("BillFinalizedBy")
 
   @@index([tenantId])
   @@map("staff_users")
@@ -1007,6 +1014,7 @@ model Order {
   table  DiningTable? @relation(fields: [tableId], references: [id])
   owner  StaffUser    @relation(fields: [ownerId], references: [id])
   lines  OrderLine[]
+  bill   Bill?
 
   @@index([tenantId])
   @@index([outletId])
@@ -1144,4 +1152,106 @@ model CashMovement {
   @@index([tenantId])
   @@index([shiftId])
   @@map("cash_movements")
+}
+
+// ---------------------------------------------------------------------------
+// pos/CAP-7 bill & settle (AD-14). Greenfield alongside Order/Shift/
+// CashMovement per AD-14's table list - Bill/Tender/BillNumberCounter are the
+// last pieces of that set. A Bill is created "open" from an Order's current
+// lines (subtotal/tax snapshotted at that moment, same posture as OrderLine's
+// own price snapshot one layer down) and moves open -> finalized exactly
+// once - no UPDATE path once finalized (src/pos/bills/bills.service.ts is the
+// sole writer, and it always does so via a status='open' compare-and-swap
+// UPDATE, never a plain update-by-id, to make a concurrent double-finalise
+// race land a 409 instead of corrupting the row - see that file for the
+// detail). discountMinor/discountReason are set together or not at all -
+// enforced in the service, since Prisma's schema DSL has no cross-column
+// CHECK constraint syntax.
+enum BillStatus {
+  open
+  finalized
+}
+
+model Bill {
+  id                 String     @id @default(uuid(7)) @db.Uuid
+  tenantId           String     @map("tenant_id") @db.Uuid
+  outletId           String     @map("outlet_id") @db.Uuid
+  orderId            String     @unique @map("order_id") @db.Uuid
+  // Assigned only at finalise time, by the reserve-then-commit counter below
+  // - null on a still-open Bill. Gapless per (tenant_id, outlet_id), not per
+  // device (AD-14: this prototype's sessions aren't device-bound).
+  billNumber         Int?       @map("bill_number")
+  subtotalMinor      BigInt     @map("subtotal_minor")
+  taxMinor           BigInt     @map("tax_minor")
+  discountMinor      BigInt?    @map("discount_minor")
+  discountReason     String?    @map("discount_reason")
+  status             BillStatus @default(open)
+  createdByStaffId   String     @map("created_by_staff_id") @db.Uuid
+  createdAt          DateTime   @default(now()) @map("created_at") @db.Timestamptz(6)
+  finalizedByStaffId String?    @map("finalized_by_staff_id") @db.Uuid
+  finalizedAt        DateTime?  @map("finalized_at") @db.Timestamptz(6)
+
+  tenant           Tenant     @relation(fields: [tenantId], references: [id])
+  outlet           Outlet     @relation(fields: [outletId], references: [id])
+  order            Order      @relation(fields: [orderId], references: [id])
+  createdByStaff   StaffUser  @relation("BillCreatedBy", fields: [createdByStaffId], references: [id])
+  finalizedByStaff StaffUser? @relation("BillFinalizedBy", fields: [finalizedByStaffId], references: [id])
+  tenders          Tender[]
+
+  // Gapless numbering's uniqueness guarantee. A plain (non-partial) unique
+  // index is enough here - Postgres treats every NULL as distinct from every
+  // other NULL in a unique index, so any number of still-open Bills
+  // (billNumber IS NULL) coexist freely, and only two actually-numbered bills
+  // in the same outlet could ever collide.
+  @@unique([tenantId, outletId, billNumber])
+  @@index([tenantId])
+  @@index([outletId])
+  @@map("bills")
+}
+
+enum TenderMethod {
+  cash
+  upi_manual
+}
+
+// Multiple tenders per bill = split payment (SPEC CAP-7's N-way/amount split,
+// structurally: the caller posts however many tender rows the split
+// produces). Insert-only, like every other money-path row under AD-14 - no
+// UPDATE/DELETE path for a tender once finalise has written it.
+model Tender {
+  id          String       @id @default(uuid(7)) @db.Uuid
+  tenantId    String       @map("tenant_id") @db.Uuid
+  billId      String       @map("bill_id") @db.Uuid
+  method      TenderMethod
+  amountMinor BigInt       @map("amount_minor")
+  createdAt   DateTime     @default(now()) @map("created_at") @db.Timestamptz(6)
+
+  tenant Tenant @relation(fields: [tenantId], references: [id])
+  bill   Bill   @relation(fields: [billId], references: [id])
+
+  @@index([tenantId])
+  @@index([billId])
+  @@map("tenders")
+}
+
+// The reserve-then-commit counter AD-14 calls for: one row per outlet,
+// incremented by a real UPDATE inside the SAME transaction that writes the
+// finalized Bill. This is deliberately NOT a Postgres SEQUENCE - nextval() on
+// a sequence is non-transactional (it does not roll back with its
+// transaction), which is exactly the gap a sequence would introduce on a
+// failed/aborted finalise. A plain row updated by a normal UPDATE statement
+// participates in the transaction like any other write: if the finalise
+// transaction rolls back for any reason, the increment rolls back with it,
+// and the next attempt reserves the same number - genuinely gapless, not
+// just gapless in the common case.
+model BillNumberCounter {
+  id         String @id @default(uuid(7)) @db.Uuid
+  tenantId   String @map("tenant_id") @db.Uuid
+  outletId   String @unique @map("outlet_id") @db.Uuid
+  lastNumber Int    @default(0) @map("last_number")
+
+  tenant Tenant @relation(fields: [tenantId], references: [id])
+  outlet Outlet @relation(fields: [outletId], references: [id])
+
+  @@map("bill_number_counters")
 }
