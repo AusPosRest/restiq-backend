@@ -164,3 +164,21 @@
   [wiki/features/pos-cashier-waiter.md](../features/pos-cashier-waiter.md)
   for the full "how to call this" contract the next four stories need.
   Issue AusPosRest/restiq-backend#47.
+- **2026-08-25** - POS Cashier & Waiter story 2: shift open, cash
+  management, and blind-count close (CAP-10). New `src/pos/` module and
+  `/pos` auth realm (AD-13, `aud:"pos"` - stubbed pending issue #44's real
+  PIN-login, which hadn't landed when this story started): `POST
+  /pos/v1/shifts` (409 on a second open shift for the same outlet, backed by
+  a partial unique index), `GET /pos/v1/shifts/current`, `GET
+  /pos/v1/shifts/:id`, `POST /pos/v1/shifts/:id/cash-movements` (paid-out /
+  bank-drop), `POST /pos/v1/shifts/:id/close`. The close endpoint is the one
+  atomic call that computes and stores `expectedMinor`/`overShortMinor`
+  together with the counted amount - **no endpoint or response field ever
+  exposes an expected figure before that call**, proven directly in
+  `test/shift-cash-management.e2e-spec.ts`. New `shifts`/`cash_movements`
+  tables (AD-14, insert-only past finalisation). Expected-amount is
+  `float - paid_outs - bank_drops` only for this story - `Order`/`Bill`/
+  `Tender` don't exist yet; a TODO in `ShiftsService.closeShift()` marks
+  where the Bill & Settle story folds in real cash-tender totals. See
+  [wiki/features/pos-cashier-waiter.md](../features/pos-cashier-waiter.md).
+  Issue AusPosRest/restiq-backend#45.

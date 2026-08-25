@@ -158,6 +158,8 @@ model Tenant {
   staffUsers          StaffUser[]
   clockEvents         ClockEvent[]
   orders              Order[]
+  shifts              Shift[]
+  cashMovements       CashMovement[]
 
   // The directory list is served from these: filter columns plus the
   // created_at ordering the default sort and cursor walk.
@@ -247,6 +249,7 @@ model Outlet {
   printers            Printer[]
   clockEvents         ClockEvent[]
   orders              Order[]
+  shifts              Shift[]
 
   @@index([tenantId])
   @@map("outlets")
@@ -640,10 +643,13 @@ model StaffUser {
   createdAt    DateTime  @default(now()) @map("created_at") @db.Timestamptz(6)
   updatedAt    DateTime  @updatedAt @map("updated_at") @db.Timestamptz(6)
 
-  tenant      Tenant       @relation(fields: [tenantId], references: [id])
-  role        Role         @relation(fields: [roleId], references: [id])
-  clockEvents ClockEvent[]
-  orders      Order[]
+  tenant            Tenant         @relation(fields: [tenantId], references: [id])
+  role              Role           @relation(fields: [roleId], references: [id])
+  clockEvents       ClockEvent[]
+  orders            Order[]
+  shiftsOpened      Shift[]        @relation("ShiftOpenedBy")
+  shiftsClosed      Shift[]        @relation("ShiftClosedBy")
+  cashMovementsMade CashMovement[]
 
   @@index([tenantId])
   @@map("staff_users")
@@ -999,4 +1005,75 @@ model Order {
   @@index([outletId])
   @@index([tableId])
   @@map("orders")
+}
+
+// ---------------------------------------------------------------------------
+// pos/CAP-10 shift & cash management (AD-14). Greenfield for the whole
+// money-path domain alongside Order/Bill (built independently by story 3) -
+// see AD-14's table list. Shift and CashMovement are insert-only past
+// finalisation: nothing ever UPDATEs a CashMovement row, and a Shift's
+// counted/expected/overShort trio is written exactly once, by close(), in
+// the same call that sets closedAt (pos/shifts/shifts.service.ts is the only
+// writer of those four columns). "One open shift per outlet at a time" is
+// enforced two ways: a partial unique index on (outlet_id) WHERE
+// closed_at IS NULL (see this table's migration.sql - Prisma's schema DSL
+// has no partial-index syntax, same reason RLS policies live in migration
+// SQL rather than here) is the actual guarantee under concurrent opens; the
+// service also pre-checks for a friendlier 409 message, but the index is
+// what a race condition ultimately falls back on.
+// ---------------------------------------------------------------------------
+
+model Shift {
+  id              String    @id @default(uuid(7)) @db.Uuid
+  tenantId        String    @map("tenant_id") @db.Uuid
+  outletId        String    @map("outlet_id") @db.Uuid
+  openedByStaffId String    @map("opened_by_staff_id") @db.Uuid
+  floatMinor      BigInt    @map("float_minor")
+  openedAt        DateTime  @default(now()) @map("opened_at") @db.Timestamptz(6)
+  closedByStaffId String?   @map("closed_by_staff_id") @db.Uuid
+  closedAt        DateTime? @map("closed_at") @db.Timestamptz(6)
+  // Set together, once, by close() - never independently, and never before
+  // countedMinor is supplied by the caller (CAP-10's blind-count rule: the
+  // server computes expectedMinor/overShortMinor only inside this same
+  // write, so no earlier read of this row can have exposed them).
+  countedMinor    BigInt?   @map("counted_minor")
+  expectedMinor   BigInt?   @map("expected_minor")
+  overShortMinor  BigInt?   @map("over_short_minor")
+
+  tenant        Tenant         @relation(fields: [tenantId], references: [id])
+  outlet        Outlet         @relation(fields: [outletId], references: [id])
+  openedByStaff StaffUser      @relation("ShiftOpenedBy", fields: [openedByStaffId], references: [id])
+  closedByStaff StaffUser?     @relation("ShiftClosedBy", fields: [closedByStaffId], references: [id])
+  cashMovements CashMovement[]
+
+  @@index([tenantId])
+  @@index([outletId])
+  @@map("shifts")
+}
+
+enum CashMovementType {
+  paid_out
+  bank_drop
+}
+
+// A cash movement is logged against the currently open shift only (checked
+// in the service, not here); insert-only, like every other money-path row
+// under AD-14 - there is no update/delete path for a logged movement.
+model CashMovement {
+  id               String           @id @default(uuid(7)) @db.Uuid
+  tenantId         String           @map("tenant_id") @db.Uuid
+  shiftId          String           @map("shift_id") @db.Uuid
+  type             CashMovementType
+  amountMinor      BigInt           @map("amount_minor")
+  reason           String
+  createdByStaffId String           @map("created_by_staff_id") @db.Uuid
+  createdAt        DateTime         @default(now()) @map("created_at") @db.Timestamptz(6)
+
+  tenant         Tenant    @relation(fields: [tenantId], references: [id])
+  shift          Shift     @relation(fields: [shiftId], references: [id])
+  createdByStaff StaffUser @relation(fields: [createdByStaffId], references: [id])
+
+  @@index([tenantId])
+  @@index([shiftId])
+  @@map("cash_movements")
 }
