@@ -38,6 +38,14 @@ export default tseslint.config(
               group: ['**/platform/*', '!**/platform/index'],
               message: 'Import the platform module through its barrel (src/platform)',
             },
+            {
+              group: ['**/admin/*', '!**/admin/index'],
+              message: 'Import the admin module through its barrel (src/admin)',
+            },
+            {
+              group: ['**/pos/*', '!**/pos/index'],
+              message: 'Import the pos module through its barrel (src/pos)',
+            },
           ],
         },
       ],

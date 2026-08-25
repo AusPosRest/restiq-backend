@@ -124,38 +124,39 @@ model Tenant {
   updatedAt         DateTime         @updatedAt @map("updated_at") @db.Timestamptz(6)
   deletedAt         DateTime?        @map("deleted_at") @db.Timestamptz(6)
 
-  taxRegistrations TenantTaxRegistration[]
-  brands           Brand[]
-  outlets          Outlet[]
-  roles            Role[]
-  menuCategories   MenuCategory[]
-  menuItems        MenuItem[]
-  itemVariants     ItemVariant[]
-  itemPrices       ItemPrice[]
-  modifierGroups   ModifierGroup[]
-  modifiers        Modifier[]
-  itemModifierGroups ItemModifierGroup[]
-  allergens        Allergen[]
-  itemAllergens    ItemAllergen[]
-  combos           Combo[]
-  comboComponents  ComboComponent[]
+  taxRegistrations    TenantTaxRegistration[]
+  brands              Brand[]
+  outlets             Outlet[]
+  roles               Role[]
+  menuCategories      MenuCategory[]
+  menuItems           MenuItem[]
+  itemVariants        ItemVariant[]
+  itemPrices          ItemPrice[]
+  modifierGroups      ModifierGroup[]
+  modifiers           Modifier[]
+  itemModifierGroups  ItemModifierGroup[]
+  allergens           Allergen[]
+  itemAllergens       ItemAllergen[]
+  combos              Combo[]
+  comboComponents     ComboComponent[]
   itemOutletOverrides ItemOutletOverride[]
-  menuImportDrafts MenuImportDraft[]
-  ownerInvites     OwnerInvite[]
-  ownerUsers       OwnerUser[]
-  capabilities     TenantCapability[]
-  outletCapabilities OutletCapability[]
-  devices          Device[]
-  enrolmentCodes   EnrolmentCode[]
-  deadLetters      SyncDeadLetter[]
-  subscription     Subscription?
-  invoices         Invoice[]
-  checklistProgress ChecklistProgress?
-  floors           Floor[]
-  diningTables     DiningTable[]
-  stations         Station[]
-  printers         Printer[]
-  staffUsers       StaffUser[]
+  menuImportDrafts    MenuImportDraft[]
+  ownerInvites        OwnerInvite[]
+  ownerUsers          OwnerUser[]
+  capabilities        TenantCapability[]
+  outletCapabilities  OutletCapability[]
+  devices             Device[]
+  enrolmentCodes      EnrolmentCode[]
+  deadLetters         SyncDeadLetter[]
+  subscription        Subscription?
+  invoices            Invoice[]
+  checklistProgress   ChecklistProgress?
+  floors              Floor[]
+  diningTables        DiningTable[]
+  stations            Station[]
+  printers            Printer[]
+  staffUsers          StaffUser[]
+  clockEvents         ClockEvent[]
 
   // The directory list is served from these: filter columns plus the
   // created_at ordering the default sort and cursor walk.
@@ -233,16 +234,17 @@ model Outlet {
   createdAt DateTime   @default(now()) @map("created_at") @db.Timestamptz(6)
   deletedAt DateTime?  @map("deleted_at") @db.Timestamptz(6)
 
-  tenant         Tenant          @relation(fields: [tenantId], references: [id])
-  brand          Brand           @relation(fields: [brandId], references: [id])
-  devices        Device[]
-  enrolmentCodes EnrolmentCode[]
+  tenant              Tenant               @relation(fields: [tenantId], references: [id])
+  brand               Brand                @relation(fields: [brandId], references: [id])
+  devices             Device[]
+  enrolmentCodes      EnrolmentCode[]
   itemPrices          ItemPrice[]
   itemOutletOverrides ItemOutletOverride[]
   capabilities        OutletCapability[]
   floors              Floor[]
   stations            Station[]
   printers            Printer[]
+  clockEvents         ClockEvent[]
 
   @@index([tenantId])
   @@map("outlets")
@@ -308,12 +310,12 @@ model MenuItem {
   available  Boolean  @default(true)
   createdAt  DateTime @default(now()) @map("created_at") @db.Timestamptz(6)
 
-  tenant         Tenant               @relation(fields: [tenantId], references: [id])
-  category       MenuCategory         @relation(fields: [categoryId], references: [id])
-  variants       ItemVariant[]
-  prices         ItemPrice[]
-  modifierGroups ItemModifierGroup[]
-  allergens      ItemAllergen[]
+  tenant          Tenant               @relation(fields: [tenantId], references: [id])
+  category        MenuCategory         @relation(fields: [categoryId], references: [id])
+  variants        ItemVariant[]
+  prices          ItemPrice[]
+  modifierGroups  ItemModifierGroup[]
+  allergens       ItemAllergen[]
   comboComponents ComboComponent[]
   outletOverrides ItemOutletOverride[]
 
@@ -549,19 +551,19 @@ model MenuImportDraft {
 }
 
 model OwnerInvite {
-  id        String   @id @default(uuid(7)) @db.Uuid
-  tenantId  String   @map("tenant_id") @db.Uuid
+  id        String    @id @default(uuid(7)) @db.Uuid
+  tenantId  String    @map("tenant_id") @db.Uuid
   email     String
-  firstName String   @map("first_name")
-  lastName  String   @map("last_name")
+  firstName String    @map("first_name")
+  lastName  String    @map("last_name")
   // Only the hash is stored; the raw token is delivered out of band when the
   // invite email ships (Tenant Admin story).
-  tokenHash String   @unique @map("token_hash")
-  expiresAt DateTime @map("expires_at") @db.Timestamptz(6)
+  tokenHash String    @unique @map("token_hash")
+  expiresAt DateTime  @map("expires_at") @db.Timestamptz(6)
   // Distinct from expiry (CAP-1: expired vs. already-used are different
   // rejections) - set once, on the accept that consumes the token.
   usedAt    DateTime? @map("used_at") @db.Timestamptz(6)
-  createdAt DateTime @default(now()) @map("created_at") @db.Timestamptz(6)
+  createdAt DateTime  @default(now()) @map("created_at") @db.Timestamptz(6)
 
   tenant Tenant @relation(fields: [tenantId], references: [id])
 
@@ -629,11 +631,41 @@ model StaffUser {
   createdAt    DateTime  @default(now()) @map("created_at") @db.Timestamptz(6)
   updatedAt    DateTime  @updatedAt @map("updated_at") @db.Timestamptz(6)
 
-  tenant Tenant @relation(fields: [tenantId], references: [id])
-  role   Role   @relation(fields: [roleId], references: [id])
+  tenant      Tenant       @relation(fields: [tenantId], references: [id])
+  role        Role         @relation(fields: [roleId], references: [id])
+  clockEvents ClockEvent[]
 
   @@index([tenantId])
   @@map("staff_users")
+}
+
+// ---------------------------------------------------------------------------
+// pos/CAP-1 PIN login & shift clock (AD-13). Records every clock-in/out for a
+// staff member at an outlet - "clock-in once per local day" is enforced by
+// reading the latest row, not by a separate flag column (see
+// pos/clock/clock.util.ts). Insert-only: a day's attendance is a sequence of
+// events, never edited in place.
+enum ClockEventType {
+  clock_in
+  clock_out
+}
+
+model ClockEvent {
+  id         String         @id @default(uuid(7)) @db.Uuid
+  tenantId   String         @map("tenant_id") @db.Uuid
+  staffId    String         @map("staff_id") @db.Uuid
+  outletId   String         @map("outlet_id") @db.Uuid
+  type       ClockEventType
+  occurredAt DateTime       @map("occurred_at") @db.Timestamptz(6)
+  createdAt  DateTime       @default(now()) @map("created_at") @db.Timestamptz(6)
+
+  tenant Tenant    @relation(fields: [tenantId], references: [id])
+  staff  StaffUser @relation(fields: [staffId], references: [id])
+  outlet Outlet    @relation(fields: [outletId], references: [id])
+
+  @@index([tenantId])
+  @@index([staffId, occurredAt])
+  @@map("clock_events")
 }
 
 // ---------------------------------------------------------------------------
@@ -725,16 +757,16 @@ model Printer {
 // criterion: never silently save an unset printer). A station's actual
 // "has no printer" state is simply primaryPrinterId = null.
 model Station {
-  id                      String   @id @default(uuid(7)) @db.Uuid
-  tenantId                String   @map("tenant_id") @db.Uuid
-  outletId                String   @map("outlet_id") @db.Uuid
-  name                    String
-  ageingThresholdMinutes  Int      @map("ageing_threshold_minutes")
-  primaryPrinterId        String?  @map("primary_printer_id") @db.Uuid
-  fallbackPrinterId       String?  @map("fallback_printer_id") @db.Uuid
-  createdAt               DateTime @default(now()) @map("created_at") @db.Timestamptz(6)
-  updatedAt               DateTime @updatedAt @map("updated_at") @db.Timestamptz(6)
-  deletedAt               DateTime? @map("deleted_at") @db.Timestamptz(6)
+  id                     String    @id @default(uuid(7)) @db.Uuid
+  tenantId               String    @map("tenant_id") @db.Uuid
+  outletId               String    @map("outlet_id") @db.Uuid
+  name                   String
+  ageingThresholdMinutes Int       @map("ageing_threshold_minutes")
+  primaryPrinterId       String?   @map("primary_printer_id") @db.Uuid
+  fallbackPrinterId      String?   @map("fallback_printer_id") @db.Uuid
+  createdAt              DateTime  @default(now()) @map("created_at") @db.Timestamptz(6)
+  updatedAt              DateTime  @updatedAt @map("updated_at") @db.Timestamptz(6)
+  deletedAt              DateTime? @map("deleted_at") @db.Timestamptz(6)
 
   tenant          Tenant   @relation(fields: [tenantId], references: [id])
   outlet          Outlet   @relation(fields: [outletId], references: [id])
