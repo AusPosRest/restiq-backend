@@ -53,9 +53,10 @@ story by story.
 
 ### CAP-1 integration points for later stories
 
-- CAP-11 (device & staff attendance status, story 11) reads `ClockEvent`
-  rows directly for "who's clocked in today" - no new mutation needed,
-  this story's rows are the real data source.
+- CAP-11 (device & staff attendance status, story 11, since built - see
+  its own section below) reads `ClockEvent` rows directly for "who's
+  clocked in today" - no new mutation needed, this story's rows are the
+  real data source.
 - CAP-2..CAP-10's `pos/*` modules should depend on `CurrentStaff`/
   `PosPrincipal` from the platform barrel exactly like this story's own
   controllers do, and reuse this story's `PosAuthGuard` (already global) -
@@ -454,6 +455,76 @@ service directly rather than through an HTTP endpoint)
   no-sale drawer-open, a distinct future action this story does not
   implement, is in the shift/cash domain). See "Key decisions" below.
 
+## CAP-11 - Device and staff attendance status
+
+- **Intent:** staff or a manager can see who is clocked in on this device
+  (outlet) today, plus the device's own (mocked) printer/connectivity
+  status, since there is no real hardware in this prototype. Success:
+  the list reflects real CAP-1 `ClockEvent` rows for today - no fabricated
+  staff or times.
+- **Pure read story, no new mutation model** (stories.yaml story 11) -
+  built entirely on story 1's `ClockEvent` rows.
+- `GET /pos/v1/outlets/:outletId/attendance`
+  (`src/pos/clock/attendance.controller.ts`,
+  `src/pos/clock/attendance.service.ts`, wired into `PosModule` alongside
+  the rest of `src/pos/clock/`) returns:
+  ```json
+  {
+    "outletId": "…",
+    "asOf": "2026-08-25T10:40:00.000Z",
+    "staff": [{ "staffId": "…", "name": "Asha", "clockedInAt": "…" }],
+    "printerStatus": { "status": "connected", "mocked": true }
+  }
+  ```
+- **"Clocked in" derivation:** for each staff member, take their latest
+  `ClockEvent` at this outlet; they're listed iff that event is a
+  `clock_in` **and** it falls on today's local calendar day in the
+  outlet's own timezone (`Outlet.timezone`). Reuses
+  `clock.util.ts#localDateKey` verbatim - the exact same "today" CAP-1's
+  own once-per-day clock-in already relies on - rather than
+  reimplementing local-day logic a second time. A staff member's second
+  clock-in on the same day never produces a duplicate entry: events are
+  read newest-first and only the first (latest) event per `staffId` is
+  considered.
+- Query is bounded to the last 48 hours (`LOOKBACK_HOURS` in
+  `attendance.service.ts`) rather than scanning the whole insert-only
+  `clock_events` table - wide enough to contain "today" in any IANA
+  timezone (max UTC offset spread is +14/-12) without unbounded growth
+  over time. A stale open clock-in from an earlier local day (staff never
+  clocked out, then simply didn't log in again) correctly falls out of
+  the list once its calendar date no longer matches today's.
+- **Mocked printer status, honestly labeled:** `printerStatus.status` is
+  a hardcoded `'connected'` string, never a real ESC/POS or peripheral
+  check (SPEC.md Constraints: no real hardware integration in this
+  prototype) - `mocked: true` on the same object keeps that unmistakable
+  to any consumer, and a code comment on `MockedPrinterStatus`
+  (`attendance.dtos.ts`) explains why. Same honesty discipline as the
+  owner dashboard's `hasData`/`message` convention
+  (`admin/dashboard/dashboard.service.ts`), adapted to this field's shape
+  since there's no "amount" here to null out - a boolean flag plus a
+  fixed value is the equivalent for a mocked status rather than a mocked
+  number.
+- Outlet-scoped like every other `/pos` read: 404s (not a different
+  shape) for an outlet from another tenant, same as `table-map`/`orders`.
+  Not scoped by the caller's own `outletId` claim - any staff member in
+  the tenant can read any of the tenant's outlets' attendance, matching
+  `GET /pos/v1/outlets/:outletId/table-map`'s existing posture.
+
+### Test coverage (`test/pos-attendance.e2e-spec.ts`, 9 tests, e2e against
+a real Postgres test DB)
+
+- A staff member who clocked in and hasn't clocked out shows up.
+- A staff member who has clocked out is excluded.
+- Two clock-ins on the same day (in, out, in again) produce exactly one
+  entry, not two.
+- A stale open clock-in from an earlier local day is excluded.
+- Multiple currently-clocked-in staff are listed, sorted by name.
+- A staff member clocked in at a different outlet in the same tenant
+  never appears in this outlet's list.
+- `printerStatus` is always present and exactly `{ status: 'connected',
+  mocked: true }`.
+- No pos session -> `401`; another tenant's outlet -> `404`.
+
 ## Data model
 
 - `clock_events` (CAP-1, new table) - `id`, `tenantId`, `staffId`,
@@ -493,6 +564,8 @@ service directly rather than through an HTTP endpoint)
   convention); DTOs/views convert to/from plain JS `number` at the API
   boundary, same pattern as `item_prices.priceMinor` in the tenant-admin
   menu module.
+- CAP-11 adds **no table or column** - it is a pure read over CAP-1's
+  existing `clock_events`, per stories.yaml story 11.
 
 ## Integration points for later stories
 
@@ -606,3 +679,17 @@ service directly rather than through an HTTP endpoint)
 - No manager-PIN gate on shift open/close or cash movements - per this
   story's dispatch notes, AD-6's mutation-and-audit reference binds CAP-8's
   six named actions, and shift/cash-management is not among them.
+- CAP-11's attendance list is derived, not stored - "clocked in" is
+  computed fresh on every request from `clock_events` (latest event per
+  staff = clock_in, dated today) rather than maintained as a live flag on
+  `StaffUser`. A derived read keeps this story genuinely mutation-free
+  (per its dispatch note) and can never drift from CAP-1's actual
+  clock-in/out history, at the cost of one bounded query per read - an
+  acceptable tradeoff for a per-outlet attendance panel, not a hot path.
+- CAP-11's mocked printer status is a plain object literal
+  (`{ status: 'connected', mocked: true }`), not a richer per-printer
+  model keyed off the existing `printers` table (CAP-6/CAP-5's floor-plan
+  work) - the SPEC explicitly scopes this to "a mocked printer/
+  connectivity status", singular and static, with no real device driver
+  call in this prototype; wiring it to real `Printer` rows would imply a
+  liveness check this codebase has nowhere to perform.
