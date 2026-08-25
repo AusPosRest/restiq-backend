@@ -21,6 +21,8 @@ interface AttendanceBody {
 }
 
 async function wipe(prisma: PrismaClient): Promise<void> {
+  await prisma.orderLineModifier.deleteMany()
+  await prisma.orderLine.deleteMany()
   await prisma.invoice.deleteMany()
   await prisma.subscription.deleteMany()
   await prisma.appliedOp.deleteMany()
@@ -40,6 +42,9 @@ async function wipe(prisma: PrismaClient): Promise<void> {
   await prisma.itemVariant.deleteMany()
   await prisma.menuItem.deleteMany()
   await prisma.menuCategory.deleteMany()
+  await prisma.tender.deleteMany()
+  await prisma.bill.deleteMany()
+  await prisma.billNumberCounter.deleteMany()
   await prisma.order.deleteMany()
   await prisma.clockEvent.deleteMany()
   await prisma.staffUser.deleteMany()

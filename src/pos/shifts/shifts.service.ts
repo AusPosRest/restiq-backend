@@ -94,6 +94,14 @@ async function loadOpenShift(tx: Tx, tenantId: string, shiftId: string): Promise
   return shift
 }
 
+/** Sum of cash tenders on bills finalised at this outlet since the shift opened - the real cash sales that landed in the till. */
+async function computeCashSalesMinor(tx: Tx, tenantId: string, outletId: string, sinceOpenedAt: Date): Promise<bigint> {
+  const cashTenders = await tx.tender.findMany({
+    where: { tenantId, method: 'cash', bill: { outletId, status: 'finalized', finalizedAt: { gte: sinceOpenedAt } } },
+  })
+  return cashTenders.reduce((sum, t) => sum + t.amountMinor, 0n)
+}
+
 // The pos guard only verifies the JWT signature/audience (issue #44's real
 // login isn't wired up yet - see pos-jwt.ts's stub notice); it never touches
 // the database. Every mutating action here re-checks that the session's
@@ -208,18 +216,20 @@ export class ShiftsService {
       await assertStaffInTenant(tx, staff.tenantId, staff.id)
       const shift = await loadOpenShift(tx, staff.tenantId, shiftId)
 
-      // Order/Bill/Tender don't exist yet - greenfield alongside this story
-      // per AD-14's table list - so "expected" is float minus cash paid out
-      // of the till, full stop. TODO(Bill & Settle story, once
-      // Order/Bill/Tender land): expected must become
-      // float + sum(cash-tender bill totals) - paid_outs - bank_drops.
       let paidOutMinor = 0n
       let bankDropMinor = 0n
       for (const movement of shift.cashMovements) {
         if (movement.type === 'paid_out') paidOutMinor += movement.amountMinor
         else bankDropMinor += movement.amountMinor
       }
-      const expectedMinor = shift.floatMinor - paidOutMinor - bankDropMinor
+      // pos/CAP-7 (Bill & Settle) landed Order/Bill/Tender - this fulfils the
+      // TODO left here by that story: real cash-tender bill totals now count
+      // toward the till, not just float minus paid-outs/bank-drops. Bill/
+      // Tender carry no shiftId (only one shift may be open per outlet at a
+      // time, so an outlet + "finalized since this shift opened" filter is
+      // unambiguous - no new column needed).
+      const cashSalesMinor = await computeCashSalesMinor(tx, staff.tenantId, shift.outletId, shift.openedAt)
+      const expectedMinor = shift.floatMinor + cashSalesMinor - paidOutMinor - bankDropMinor
       const countedMinor = BigInt(dto.countedMinor)
       const overShortMinor = countedMinor - expectedMinor
 

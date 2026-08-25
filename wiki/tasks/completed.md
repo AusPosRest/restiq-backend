@@ -256,3 +256,32 @@
   since they test story 4's send-freezes-lines rule, not this gate. See
   [wiki/features/pos-cashier-waiter.md](../features/pos-cashier-waiter.md).
   Issue AusPosRest/restiq-backend#58.
+- **2026-08-25** - POS Cashier & Waiter story 8: bill and settle (CAP-7).
+  Greenfield `Bill`/`Tender`/`BillNumberCounter` models (AD-14). New
+  `src/pos/bills/`: `POST /pos/v1/orders/:orderId/bill` (owner-only,
+  snapshots the order's lines into subtotal/tax on an `open` Bill; order
+  must be `open` or `sent`), `POST /pos/v1/bills/:id/finalize`
+  (validates the tender sum against the bill total, routes a discount above
+  a 20%-of-subtotal threshold through the real `platform/manager-auth`
+  service per AD-15, reserves a gapless per-outlet bill number via a
+  transactional counter row - not a `SEQUENCE`, whose `nextval()` would not
+  roll back on a failed attempt - and writes Bill/Tenders/the manager-auth
+  audit row/the order's `closed` status in one transaction), `GET
+  /pos/v1/bills/:id`. Split types (seat/item/N-way/amount/percent) are
+  implemented as "finalise against an arbitrary list of tenders" - N-way and
+  amount/percent splits are structurally just multiple `Tender` rows;
+  per-seat/per-item splits are left to the web client to compute (story 5's
+  `OrderLine.seatNumber` exists by the time this story rebased onto it, but
+  this endpoint deliberately doesn't validate a split's tender amounts
+  against seat assignment - SPEC treats that grouping as a web-side concern,
+  and validating it here would mean re-deriving a per-seat subtotal this
+  module has no other use for). No per-item/tenant tax-rate field exists
+  anywhere in the schema, so a flat, clearly-commented 5% placeholder is
+  applied pending a real tax-configuration story. Also completes a TODO
+  CAP-10 left behind: `ShiftsService.closeShift()`'s expected-amount formula
+  now folds in real cash-tender bill totals, not just float minus
+  paid-outs/bank-drops. 12 new e2e tests (`test/pos-bills.e2e-spec.ts`) plus
+  2 more added to `test/shift-cash-management.e2e-spec.ts` for the
+  expected-amount formula. See
+  [wiki/features/pos-cashier-waiter.md](../features/pos-cashier-waiter.md).
+  Issue AusPosRest/restiq-backend#59.
