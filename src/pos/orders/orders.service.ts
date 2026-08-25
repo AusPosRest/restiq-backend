@@ -143,6 +143,32 @@ export class OrdersService {
     })
   }
 
+  /**
+   * pos/CAP-5: every open/sent order outlet-wide, table-tied or counter
+   * (tableId null) alike - unlike getTableMap above, which only surfaces
+   * orders attached to a table. Viewing this list never requires ownership;
+   * taking over one of these orders is done via the existing transfer()
+   * action below, not a second mechanism.
+   *
+   * TODO(pos/CAP-3, issue #52): once OrderLine exists, each entry here
+   * should carry an item-count/running-total summary. SPEC.md does not
+   * require one for this screen, so it's plain OrderView until #52 lands
+   * and this can reconcile against its real OrderLine schema.
+   */
+  async listOpenOrders(staff: PosPrincipal, outletId: string): Promise<OrderView[]> {
+    const plane = this.plane()
+    return plane.$transaction(async (tx) => {
+      await setTenantContext(tx, staff.tenantId)
+      await loadOutlet(tx, staff.tenantId, outletId)
+
+      const orders = await tx.order.findMany({
+        where: { tenantId: staff.tenantId, outletId, status: { not: 'closed' } },
+        orderBy: { createdAt: 'asc' },
+      })
+      return orders.map(toOrderView)
+    })
+  }
+
   /** Any staff member may view an order - viewing never requires ownership. */
   async getOrder(staff: PosPrincipal, orderId: string): Promise<OrderView> {
     const plane = this.plane()

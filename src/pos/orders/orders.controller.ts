@@ -12,6 +12,14 @@ export class PosOrdersController {
     return this.orders.getTableMap(staff, outletId)
   }
 
+  // pos/CAP-5: outlet-wide, unlike table-map above which only shows orders
+  // tied to a table - a counter order (tableId null) would be invisible on
+  // the table map but must still show up here.
+  @Get('outlets/:outletId/orders')
+  listOpenOrders(@CurrentStaff() staff: PosPrincipal, @Param('outletId') outletId: string): Promise<OrderView[]> {
+    return this.orders.listOpenOrders(staff, outletId)
+  }
+
   // 200 always, not 201-on-create/200-on-existing: this is a get-or-open
   // action from the caller's point of view (occupied tables return the
   // existing order unchanged, never an error) - one status code, not a
