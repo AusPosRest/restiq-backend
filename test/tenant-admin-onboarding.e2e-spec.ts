@@ -15,6 +15,10 @@ const CHECKLIST_STEPS = ['outlet_details', 'floor_plan', 'menu_import', 'devices
 const STRONG_PASSWORD = 'a-strong-owner-password'
 
 async function wipe(prisma: PrismaClient): Promise<void> {
+  // shifts/cash_movements (pos/CAP-10) restrict-delete tenants/outlets/staff;
+  // wiped first for the same reason invoice/subscription is below.
+  await prisma.cashMovement.deleteMany()
+  await prisma.shift.deleteMany()
   await prisma.invoice.deleteMany()
   await prisma.subscription.deleteMany()
   await prisma.appliedOp.deleteMany()

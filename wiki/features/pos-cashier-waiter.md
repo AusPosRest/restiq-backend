@@ -1,7 +1,7 @@
 # POS Cashier & Waiter (Web Prototype) - backend
 
-Backend for the `/pos` realm (AD-13): the online-only web prototype standing
-in for the native Android POS/KDS build. See
+Backend for the `/pos` realm (AD-13): an online-only restiq-web prototype
+standing in for the real native Android POS build. See
 `restiq-design/docs/specs/spec-pos-cashier-waiter/SPEC.md` for the full
 capability set (CAP-1..11); this doc tracks what's actually built here,
 story by story.
@@ -210,11 +210,14 @@ real Postgres test DB)
 - **Built** (`src/platform/manager-auth.service.ts`, exported from the
   `src/platform` barrel per AD-2): one shared, callable `ManagerAuthService`
   every gated mutation calls into, instead of six reimplementations of the
-  same PIN-check-plus-audit-row logic. No controller/route of its own - it
-  is pure shared infrastructure for four future call sites (see "How to
-  call this" below). Registered as a `PlatformModule` provider, so any
-  module that already imports `PlatformModule` (every module in this app
-  does) gets it via constructor injection with no extra module wiring.
+  same PIN-check-plus-audit-row logic. No controller/route of its own - this
+  story shipped it with no caller in this codebase yet (see "How to call
+  this" below); pos/CAP-10's shift module (also this doc) is the first `/pos`
+  HTTP surface to exist, but it does not call this service (shift open/close
+  and cash movements are not among CAP-8's six gated actions). Registered as
+  a `PlatformModule` provider, so any module that already imports
+  `PlatformModule` (every module in this app does) gets it via constructor
+  injection with no extra module wiring.
 
 ### "Manager-capable" - the decision this story had to make
 
@@ -338,6 +341,75 @@ service directly rather than through an HTTP endpoint)
   (`occurredAt`, `recordedAt`) into a real `audit_events` row, inside a
   transaction standing in for the caller's own mutation transaction.
 
+## CAP-10 - Shift open, cash management, and blind-count close
+
+- **Intent:** a cashier opens a shift with a starting float, logs cash
+  movements (paid-outs, bank drops) through the shift, and closes it with a
+  blind cash count - the counted amount is entered before the system reveals
+  the expected amount, and the resulting over/short lands on an immutable
+  end-of-shift record.
+- **Built** (`src/pos/shifts/`), all under `/pos/v1/shifts` - the first real
+  `/pos` HTTP surface in this codebase:
+  - `POST /` -> `{ outletId, floatMinor }` (201). Rejects a second open shift
+    on the same outlet with 409 `shift_already_open` - checked up front for a
+    clear message, and backed by a partial unique index
+    (`shifts_one_open_per_outlet` on `outlet_id WHERE closed_at IS NULL`,
+    see the migration) that is the actual guarantee under a concurrent
+    double-open race; the service catches the resulting unique-violation and
+    reports the same 409.
+  - `GET /current?outletId=` - the outlet's currently open shift (404 if
+    none), for a reloaded/rejoined session that doesn't already know the
+    shift's id.
+  - `GET /:id` - one shift by id (open or closed), 404 across tenants.
+  - `POST /:id/cash-movements` -> `{ type: "paid_out"|"bank_drop",
+    amountMinor, reason }` (201). 409 if the shift is already closed - a
+    cash movement can only ever be logged against an open shift.
+  - `POST /:id/close` -> `{ countedMinor }` (200). **The single atomic call**
+    this story's blind-count rule depends on: `expectedMinor` and
+    `overShortMinor` are computed and written in this same transaction,
+    together with `closedAt`/`closedByStaffId` - never before this call,
+    never by a separate endpoint. 409 to close an already-closed shift (the
+    counted/expected/overShort trio, once written, is never overwritten -
+    AD-14's insert-only-past-finalisation rule for this table).
+  - Every mutating action re-verifies the pos session's staff id against a
+    real, tenant-owned `StaffUser` row before writing anything under their
+    name (`assertStaffInTenant` in `shifts.service.ts`) - defense in depth,
+    since the pos guard only checks the JWT signature/audience and never
+    touches the database (see the pos-realm stub note below).
+- **Blind-count enforcement (AD-14, the load-bearing requirement):**
+  `expectedMinor`/`overShortMinor` are `null` on every read of an open shift
+  (`GET /current`, `GET /:id`, and the response of every
+  `POST /:id/cash-movements` call) because the DB columns themselves are
+  `null` until `close()` runs - there is no code path anywhere in this
+  service that computes an expected figure ahead of a counted amount being
+  supplied, and no "peek" endpoint exists. Proven directly in
+  `test/shift-cash-management.e2e-spec.ts`'s "blind-count enforcement"
+  suite, not just asserted.
+- **Expected-amount formula is deliberately partial for this story:**
+  `expectedMinor = floatMinor - sum(paid_out) - sum(bank_drop)`. `Order`/
+  `Bill`/`Tender` don't exist anywhere in this codebase yet (greenfield
+  alongside this story, per AD-14's table list - story 3/issue #46 builds
+  `Order` independently). **TODO for the Bill & Settle story** (once
+  `Order`/`Bill`/`Tender` land): fold in real cash-tender bill totals so the
+  formula becomes `floatMinor + sum(cash-tender bill totals) -
+  sum(paid_out) - sum(bank_drop)` - the one line to change is in
+  `ShiftsService.closeShift()`.
+- **Pos-realm auth - reconciled with pos/CAP-1 (issue #44).** This story was
+  built before pos/CAP-1's real PIN login merged, so it originally shipped
+  its own e2e-only stub of `src/platform/pos-jwt.ts`/`pos-auth.guard.ts`
+  (tokens signed directly via `signPosToken` in tests, no real login). That
+  reconciliation is now done automatically by rebasing onto `dev` after #44
+  merged: this story's own commit never touched `pos-jwt.ts`/
+  `pos-auth.guard.ts` (it only consumed `CurrentStaff`/`PosPrincipal`), so
+  the real, merged implementation (`{ id: staffId, tenantId, outletId, name
+  }`, signed by pos/CAP-1's real login/select-outlet endpoints) is what this
+  story's `/pos/v1/shifts/*` routes run against - no code change was needed
+  here, only this note.
+- **Not gated by CAP-8's manager-authorisation service** - shift open/close
+  and cash movements are not among the six actions AD-6/AD-15 name (only
+  no-sale drawer-open, a distinct future action this story does not
+  implement, is in the shift/cash domain). See "Key decisions" below.
+
 ## Data model
 
 - `clock_events` (CAP-1, new table) - `id`, `tenantId`, `staffId`,
@@ -355,20 +427,55 @@ service directly rather than through an HTTP endpoint)
   required, so name is what's guaranteed to identify them. No RLS policy
   change needed - both are plain additive columns on a table whose existing
   `tenant_id`-scoped policies already cover them.
+- `shifts` (new, CAP-10) - `{ id, tenantId, outletId, openedByStaffId,
+  floatMinor, openedAt, closedByStaffId?, closedAt?, countedMinor?,
+  expectedMinor?, overShortMinor? }`. RLS `tenant_isolation` +
+  `operator_read` (AD-5), same posture as every other tenant-owned table.
+  `closedByStaffId`/`closedAt`/`countedMinor`/`expectedMinor`/
+  `overShortMinor` are set together, exactly once, only by
+  `ShiftsService.closeShift()` - nothing else in this codebase writes them,
+  and there is no UPDATE path back to `null` once set. **One open shift per
+  outlet at a time** is enforced by a partial unique index,
+  `shifts_one_open_per_outlet` on `(outlet_id) WHERE closed_at IS NULL` -
+  hand-written in the migration SQL, since Prisma's schema DSL has no
+  partial-index syntax (same reason RLS policies live in migration SQL
+  rather than `schema.prisma`).
+- `cash_movements` (new, CAP-10) - `{ id, tenantId, shiftId, type (paid_out |
+  bank_drop), amountMinor, reason, createdByStaffId, createdAt }`. RLS
+  `tenant_isolation` + `operator_read`. Insert-only, like every other
+  money-path row under AD-14 - there is no update/delete path for a logged
+  movement anywhere in this service.
+- Money is `bigint` minor units on both new CAP-10 tables (workspace
+  convention); DTOs/views convert to/from plain JS `number` at the API
+  boundary, same pattern as `item_prices.priceMinor` in the tenant-admin
+  menu module.
 
-## Integration points for stories 4, 8, 10, and 2 (pos/CAP-3, CAP-7, CAP-9, CAP-10)
+## Integration points for later stories
 
-- Every gated mutation (order void-after-fire and comp, bill
-  discount-above-threshold and price override, refund, shift no-sale
-  drawer-open) calls `ManagerAuthService.authorize()` then
-  `.recordApproval()` exactly as shown above - **never** a per-action PIN
-  check or a second `audit_events` insert helper.
-- None of those four stories need to touch `Role.isManager` or
+- **For CAP-8's manager authorisation:** every gated mutation (order
+  void-after-fire and comp, bill discount-above-threshold and price
+  override, refund, shift no-sale drawer-open) calls
+  `ManagerAuthService.authorize()` then `.recordApproval()` exactly as shown
+  above - **never** a per-action PIN check or a second `audit_events` insert
+  helper. None of those future call sites need to touch `Role.isManager` or
   `AuditEvent.approverId`/`approverName` directly - `ManagerAuthService` is
-  the only reader/writer of those columns.
-- If a future product decision wants a role beyond Owner/Manager to approve
-  gated actions, flip that role's `isManager` to `true` (a data change) -
-  `manager-auth.service.ts` needs no code change for that.
+  the only reader/writer of those columns. If a future product decision
+  wants a role beyond Owner/Manager to approve gated actions, flip that
+  role's `isManager` to `true` (a data change) - `manager-auth.service.ts`
+  needs no code change for that.
+- **For CAP-10's shift & cash management: Bill & Settle** (issue not yet
+  dispatched) - once `Order`/`Bill`/`Tender` exist, `ShiftsService.closeShift()`
+  is the one place to add real cash-tender bill totals into the
+  expected-amount formula - see the TODO comment right on that computation.
+- **pos/CAP-1 (issue #44):** see CAP-10's "pos-realm auth is a stub" note
+  above - this is the first thing to reconcile once that story lands; it
+  also unblocks a real caller for CAP-8's `ManagerAuthService` (PIN-login
+  needs no manager gate itself, but every screen built after it will).
+- **pos/CAP-10's own no-sale drawer-open action** (not built by this story)
+  is the natural first caller of `ManagerAuthService` from within the shift
+  module, once it's dispatched.
+- No pos capability besides the ones named above reads or writes
+  `shifts`/`cash_movements`/`roles.is_manager`/`audit_events.approver_*` yet.
 
 ## Key decisions
 
@@ -413,3 +520,45 @@ service directly rather than through an HTTP endpoint)
   `OpsAuthService.dummyHash` (and CAP-1's own `PosAuthService.dummyHash` -
   same reasoning, applied independently) - so a caller can't learn from
   response timing whether a given tenant has any managers/staff at all.
+- `setTenantContext` is duplicated per realm rather than imported across
+  module boundaries - CAP-8 duplicated it into `manager-auth.service.ts`
+  (that 3-line helper is already copy-pasted per admin submodule in this
+  codebase, and `platform` must not import from `admin` regardless: `admin`
+  already imports `platform`, so the reverse would be circular). CAP-10
+  independently made the same call for the same reason, duplicating it into
+  `src/pos/tenant-context.ts` rather than reaching into `src/admin/menu/`'s
+  copy - AD-4's cross-realm-import rule (no reaching into another realm's
+  module tree) extends to this backend module layout, not just restiq-web's
+  route groups.
+- One open shift per outlet, enforced both ways (pre-check for a clear
+  error message, partial unique index for the actual race-safe guarantee) -
+  the SPEC left the enforcement mechanism to the builder; a DB-level
+  constraint is what "enforce it" has to mean once two terminals could
+  plausibly race to open a shift for the same outlet at the same moment.
+- `expectedMinor`/`countedMinor`/`overShortMinor` are nullable columns on
+  the same `shifts` row (not a separate `EndOfShiftRecord` table) - the
+  SPEC calls for "an immutable end-of-shift record", and a shift already
+  has exactly one lifecycle (open -> closed) with exactly one close event;
+  splitting it into a second table would need a 1:1 join for no isolation
+  benefit, since the insert-only guarantee is enforced at the application
+  layer (one write, in `closeShift()`, ever touches those columns) rather
+  than by table boundaries.
+- `CashMovement.reason` is a required plain string, not a reason-code enum -
+  the SPEC's CAP-8 manager-authorisation actions (void, comp, discount,
+  price override, refund, no-sale) use mandatory reason codes, but shift
+  open/close and cash movements are explicitly *not* one of CAP-8's six
+  gated actions (confirmed against AD-6/AD-15's binds lists, which name only
+  the six) - so this story asks for a reason string, not a coded reason,
+  and does not call the shared `platform/manager-auth` service or write an
+  `audit_events` row for any CAP-10 action.
+- **`PosPrincipal`'s real shape (`{ id, tenantId, outletId, name }`, settled
+  by pos/CAP-1/issue #44) carries `outletId` on the token itself** - this
+  story's own endpoints still take `outletId` explicitly in the request body
+  /query rather than trusting the token's claim, since every shift action is
+  already scoped through the shift's own stored `outletId` once one exists
+  (`GET /current?outletId=`, `POST /`). No code change was needed here; this
+  replaces an earlier note in this doc that guessed a narrower, no-`outletId`
+  claim shape before #44 settled the real one.
+- No manager-PIN gate on shift open/close or cash movements - per this
+  story's dispatch notes, AD-6's mutation-and-audit reference binds CAP-8's
+  six named actions, and shift/cash-management is not among them.

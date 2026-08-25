@@ -19,6 +19,10 @@ import { ManagerAuthService, PlatformModule, uuidv7 } from '../src/platform'
 // could have left behind, the same list staff-roles.e2e-spec.ts and
 // reports-catalogue.e2e-spec.ts already use.
 async function wipe(prisma: PrismaClient): Promise<void> {
+  // shifts/cash_movements (pos/CAP-10) restrict-delete tenants/outlets/staff;
+  // wiped first for the same reason invoice/subscription is below.
+  await prisma.cashMovement.deleteMany()
+  await prisma.shift.deleteMany()
   await prisma.invoice.deleteMany()
   await prisma.subscription.deleteMany()
   await prisma.appliedOp.deleteMany()

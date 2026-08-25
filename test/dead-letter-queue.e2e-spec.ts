@@ -30,6 +30,10 @@ async function wipe(prisma: PrismaClient): Promise<void> {
   // invoice/subscription (CAP-5) restrict-delete tenants; wiped first so this
   // helper is safe regardless of what another e2e file left behind (the test
   // suite shares one database and file execution order is not guaranteed).
+  // shifts/cash_movements (pos/CAP-10) restrict-delete tenants/outlets/staff
+  // the same way - wiped first for the same reason.
+  await prisma.cashMovement.deleteMany()
+  await prisma.shift.deleteMany()
   await prisma.invoice.deleteMany()
   await prisma.subscription.deleteMany()
   await prisma.appliedOp.deleteMany()
