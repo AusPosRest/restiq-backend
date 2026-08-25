@@ -6,6 +6,7 @@ import { PosAuthController } from './auth/auth.controller'
 import { PosAuthService } from './auth/auth.service'
 import { PosClockController } from './clock/clock.controller'
 import { ClockService } from './clock/clock.service'
+import { OrderLinesService } from './orders/order-lines.service'
 import { PosOrdersController } from './orders/orders.controller'
 import { OrdersService } from './orders/orders.service'
 import { PosShiftsController } from './shifts/shifts.controller'
@@ -14,6 +15,6 @@ import { ShiftsService } from './shifts/shifts.service'
 @Module({
   imports: [PlatformModule],
   controllers: [PosAuthController, PosClockController, PosAttendanceController, PosOrdersController, PosShiftsController],
-  providers: [PosAuthService, ClockService, AttendanceService, OrdersService, ShiftsService],
+  providers: [PosAuthService, ClockService, AttendanceService, OrdersService, OrderLinesService, ShiftsService],
 })
 export class PosModule {}

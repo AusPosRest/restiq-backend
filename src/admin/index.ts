@@ -5,3 +5,7 @@ export { AdminModule } from './admin.module'
 // Admin's PIN issue/revoke already established.
 export { pinStatus } from './staff/staff.service'
 export type { PinStatus } from './staff/staff.service'
+// pos/CAP-3 reuses this verbatim to snapshot an order line's price at
+// add-time against the real, already-shipped item_prices resolution rules -
+// no second price-picking implementation.
+export { resolveCurrentPrice } from './menu/pricing'

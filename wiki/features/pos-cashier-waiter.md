@@ -202,6 +202,164 @@ real Postgres test DB)
   fixed placeholder string covers the no-reason case rather than making the
   column nullable for one caller.
 
+## CAP-3 - Order taking with modifiers, variants, combos
+
+- **Intent:** staff builds an order via grid/category/search, configuring
+  modifier groups per item; a line violating a modifier group's min/max
+  cannot be added, and every line records which staff member added it.
+- **Built** (`src/pos/orders/order-lines.service.ts`, wired into the same
+  controller/module as CAP-2's `src/pos/orders/orders.controller.ts` -
+  extends the existing module, no parallel one):
+  - `POST /pos/v1/orders/:orderId/lines` -> `{ itemId, variantId?, quantity,
+    modifierIds? }` (201). Owner-only. Validates `itemId`/`variantId`/every
+    `modifierIds` entry against the real menu catalogue (tenant-admin/CAP-4's
+    `MenuItem`/`ItemVariant`/`ModifierGroup`/`Modifier` - read directly, no
+    duplicated shape), resolves the item's *current* price via
+    `admin/menu/pricing.ts#resolveCurrentPrice` (reused verbatim through the
+    admin barrel, channel fixed to `'dine_in'` - see "Key decisions"), and
+    snapshots it into `unitPriceMinor`/`OrderLineModifier.priceMinor` at
+    add-time. Returns the full `OrderView` (base fields + `lines[]`), not just
+    the created line - same "mutate a sub-resource, return the whole parent
+    view" convention as `admin/menu/items.service.ts#addVariant`.
+  - `PATCH /pos/v1/orders/:orderId/lines/:lineId` -> `{ quantity?,
+    modifierIds? }` (200). Owner-only, **only while the order is still
+    `open`**. Omitting `modifierIds` leaves selections untouched; passing it
+    (even `[]`) replaces the line's modifiers wholesale, re-validated exactly
+    like on add (a fresh price snapshot for whatever's newly selected).
+  - `DELETE /pos/v1/orders/:orderId/lines/:lineId` -> (200, full `OrderView`).
+    Owner-only, **only while the order is still `open`**.
+  - `GET /pos/v1/orders/:orderId` (CAP-2's existing endpoint) now returns
+    `lines[]` too - `OrdersService`'s `buildOrderView()` replaced the old
+    `toOrderView()` everywhere (table-map claim/open, status update, transfer,
+    get, and CAP-5's `listOpenOrders()`) so every order read/mutation
+    response carries the same shape.
+- **Modifier-group validation is against every group attached to the item,
+  not just the groups a submitted `modifierId` happens to touch.** A required
+  group (`minSelections > 0`) with nothing selected is rejected exactly like
+  over-selecting an optional one - `400 modifier_selection_invalid` naming
+  the group and the required range. A `modifierId` that doesn't belong to any
+  of the item's attached groups is rejected `400 validation_failed`. This
+  runs server-side unconditionally - a client that skips its own validation
+  gets the same rejection (`src/pos/orders/order-lines.service.ts#assertModifierSelectionValid`).
+- **Add vs. edit/remove have different mutability windows, on purpose:** a
+  line can be **added** any time the order isn't `closed` (kitchen can still
+  receive more items on an already-`sent` order - AD-14: "Order is mutable
+  pre-finalisation"), but can only be **edited or removed** while the order
+  is still `open` - once `sent`, the kitchen may already be acting on that
+  specific line, so it's frozen except for outright new additions. See
+  stories.yaml story 4's own PATCH/DELETE wording ("before the order is
+  sent" / "only while order is still open") for where this split comes from.
+- **Ownership is reused, not reimplemented.** `loadOrder`/`assertOwner` were
+  pulled out of `OrdersService` into exported top-level functions in
+  `orders.service.ts`; `order-lines.service.ts` imports and calls them
+  directly. A non-owner gets the exact same `403 not_owner` (message +
+  `ownerId`) as CAP-2's own status/transfer endpoints.
+
+### Data model
+
+```prisma
+model OrderLine {
+  id             String   @id @default(uuid(7)) @db.Uuid
+  tenantId       String   @map("tenant_id") @db.Uuid
+  orderId        String   @map("order_id") @db.Uuid
+  itemId         String   @map("item_id") @db.Uuid
+  variantId      String?  @map("variant_id") @db.Uuid
+  quantity       Int
+  unitPriceMinor BigInt   @map("unit_price_minor")   // snapshotted at add-time
+  addedByStaffId String   @map("added_by_staff_id") @db.Uuid
+  createdAt      DateTime @default(now()) @map("created_at") @db.Timestamptz(6)
+}
+
+model OrderLineModifier {
+  id          String @id @default(uuid(7)) @db.Uuid
+  tenantId    String @map("tenant_id") @db.Uuid
+  orderLineId String @map("order_line_id") @db.Uuid   // ON DELETE CASCADE from OrderLine
+  modifierId  String @map("modifier_id") @db.Uuid
+  priceMinor  BigInt @map("price_minor")              // snapshotted at add-time
+}
+```
+
+- Migration `20260825200000_pos_order_lines_modifiers`. Standard AD-5
+  `tenant_isolation` + `operator_read` RLS on both new tables, same posture
+  as every other tenant-owned table. `order_line_modifiers.order_line_id` is
+  the only `ON DELETE CASCADE` FK in this pair (deleting an `OrderLine` via
+  the DELETE endpoint cleans up its modifier-selection rows automatically);
+  every other FK here (`order_id`, `item_id`, `variant_id`, `added_by_staff_id`,
+  `modifier_id`) is `RESTRICT`/`SET NULL` per the existing schema-wide
+  convention (see `orders`/`item_variants` for the same pattern).
+- `itemId`/`variantId`/`addedByStaffId` point straight at
+  `MenuItem`/`ItemVariant`/`StaffUser` - no duplicated snapshot of the item's
+  name/etc. on the line itself (a display layer joins for that; only the
+  *price* is a snapshot, per the story's explicit requirement).
+- Money is `bigint` minor units on both tables (workspace convention); the
+  `OrderLineView`/`OrderLineModifierView` DTOs convert to plain JS `number`
+  at the API boundary, same pattern as `item_prices.priceMinor` elsewhere.
+
+### Test coverage (`test/pos-order-lines.e2e-spec.ts`, 20 tests, e2e against
+a real Postgres test DB)
+
+- A valid line is added and appears on the order (and on a subsequent `GET`);
+  a variant-specific price resolves correctly when `variantId` is given.
+- A valid modifier selection is added with each modifier's price snapshotted
+  per-selection.
+- A line violating a modifier group's min/max is rejected `400
+  modifier_selection_invalid` - both under-selecting a required group (empty
+  selection) and over-selecting an optional one - even when the request sends
+  no client-side-valid selection at all.
+- A `modifierId` that doesn't belong to the item, an item with no configured
+  price, and an item from another tenant are each rejected `400`.
+- Adding a line still succeeds once the order has been `sent` (proving the
+  add/edit mutability asymmetry above); adding to a `closed` order is
+  rejected `409`.
+- A non-owner is rejected `403 not_owner` on add, edit, and remove.
+- Changing quantity via `PATCH` works while `open`; re-selecting modifiers via
+  `PATCH` re-runs the same min/max validation as add.
+- Editing or removing a line once the order is `sent` is rejected `409` on
+  both endpoints; the line is left untouched in the DB (row-count checked
+  directly, not just the HTTP status).
+- **Price snapshotting proof:** a line is added, the item's price is then
+  changed via a fresh `ItemPrice` insert, and the *existing* line's
+  `unitPriceMinor` on a subsequent `GET` is unchanged - while a *new* line
+  added afterward picks up the new price, proving the first line's value is
+  a frozen snapshot and not a live join.
+- Removing a line id that doesn't belong to the given order 404s.
+
+### CAP-3 integration points for later stories
+
+- pos/CAP-4 (group ordering, story 5) extends this exact `OrderLine` with a
+  seat number - read the field names above before adding a column; nothing
+  here is expected to be renamed.
+- pos/CAP-6 (QSR counter) and pos/CAP-7 (bill & settle) compose over these
+  same endpoints/rows rather than a parallel line-item implementation. CAP-7
+  is what will need to sum `OrderLine.unitPriceMinor * quantity +
+  OrderLineModifier.priceMinor` per line for a Bill's total - no such
+  aggregation exists yet in this codebase.
+- `ORDER_PRICE_CHANNEL` in `order-lines.service.ts` is hardcoded to
+  `'dine_in'` because `Order` has no channel column and this story only ever
+  builds dine-in table orders (opened via CAP-2's table map). If/when
+  pos/CAP-6 needs a different channel for counter orders, that's a new
+  decision for that story to make, not a change forced on this one.
+
+### CAP-3 key decisions
+
+- Combos (mentioned in the capability title) are **not** built as an
+  order-line type in this story - stories.yaml story 4's actual endpoint
+  contract and the SPEC's screens (P3/P4) only describe item/variant/modifier
+  lines, and the UX companion docs have no combo-ordering screen either.
+  `OrderLine.itemId` points at `MenuItem` only; a combo line is left for
+  whichever future story actually needs it (ponytail: don't build what
+  wasn't asked for).
+- `resolveCurrentPrice` is imported from `admin/menu/pricing.ts` through the
+  `admin` barrel (`src/admin/index.ts`) rather than reimplemented - the exact
+  same channel/outlet/variant specificity and future-dated-row rules
+  tenant-admin/CAP-4 already established are what a POS add-line has to
+  respect; a second price-picker would be a second place for that logic to
+  drift.
+- No price is resolved for a *modifier* through `resolveCurrentPrice` -
+  `Modifier.priceMinor` is a flat, non-versioned column by schema design (see
+  `prisma/schema.prisma`'s comment on `Modifier`), so its current value is
+  read directly and snapshotted into `OrderLineModifier.priceMinor`.
+
 ## CAP-5 - Open and held orders (outlet-wide)
 
 - **Intent:** staff sees every open/held order outlet-wide and resumes their
@@ -215,21 +373,20 @@ real Postgres test DB)
     orders attached to a table and would never surface a future CAP-6
     counter order. Any staff member may view the list - viewing never
     requires ownership, same posture as `GET /orders/:orderId`.
-  - Take-over is **not** a new mechanism: the response is plain `OrderView[]`
-    (CAP-2's existing shape - `id`, `tenantId`, `outletId`, `tableId`,
-    `ownerId`, `status`, timestamps), and a client takes over an order in
+  - Take-over is **not** a new mechanism: a client takes over an order in
     this list by calling CAP-2's real `POST /pos/v1/orders/:orderId/transfer`
     directly. This story adds zero lines to `transfer()`/`updateStatus()`.
-- **No OrderLine summary yet - reconciled decision, not an oversight.**
-  pos/CAP-3 (order taking, issue #52) had not merged as of this story's
-  build - `OrderLine` does not exist in the schema. SPEC.md does not require
-  an item-count/running-total summary for this screen (P6), only the list
-  plus resume/take-over actions, so this ships as plain `OrderView[]`.
-  **TODO(pos/CAP-3, issue #52):** once `OrderLine` lands, extend
-  `listOpenOrders()` in `src/pos/orders/orders.service.ts` (see the `TODO`
-  comment directly above it) to fold in a per-order item-count/running-total
-  summary, reading `OrderLine`'s real committed field names rather than
-  guessing them now.
+- **No OrderLine summary at the time this story was built - since resolved
+  by CAP-3 (issue #52), not by this story.** `OrderLine` didn't exist in the
+  schema when this story shipped, so it originally returned plain
+  `OrderView` with a TODO to fold in a summary once it did. CAP-3 has since
+  landed and its `buildOrderView()` now backs every order read/mutation
+  response, including this list - `listOpenOrders()` was updated to call it
+  (one line: `orders.map(toOrderView)` became
+  `Promise.all(orders.map((order) => buildOrderView(tx, order)))`) so each
+  entry carries its real `lines[]` (full detail, not a separate
+  item-count/running-total projection; SPEC.md never required a summary
+  distinct from the real lines).
 - **Ordering:** `orderBy: { createdAt: 'asc' }` - oldest-open-first, so an
   order that's been sitting longest surfaces first; same tie-break
   simplicity as CAP-2's table-map query.

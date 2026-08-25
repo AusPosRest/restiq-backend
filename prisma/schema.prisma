@@ -158,6 +158,8 @@ model Tenant {
   staffUsers          StaffUser[]
   clockEvents         ClockEvent[]
   orders              Order[]
+  orderLines          OrderLine[]
+  orderLineModifiers  OrderLineModifier[]
   shifts              Shift[]
   cashMovements       CashMovement[]
 
@@ -330,6 +332,7 @@ model MenuItem {
   allergens       ItemAllergen[]
   comboComponents ComboComponent[]
   outletOverrides ItemOutletOverride[]
+  orderLines      OrderLine[]
 
   // No two items in the same category may share a name (also the natural
   // forced-failure anchor for the menu-import commit atomicity test).
@@ -348,9 +351,10 @@ model ItemVariant {
   sortOrder Int      @map("sort_order")
   createdAt DateTime @default(now()) @map("created_at") @db.Timestamptz(6)
 
-  tenant Tenant      @relation(fields: [tenantId], references: [id])
-  item   MenuItem    @relation(fields: [itemId], references: [id])
-  prices ItemPrice[]
+  tenant     Tenant      @relation(fields: [tenantId], references: [id])
+  item       MenuItem    @relation(fields: [itemId], references: [id])
+  prices     ItemPrice[]
+  orderLines OrderLine[]
 
   @@unique([itemId, name])
   @@map("item_variants")
@@ -425,8 +429,9 @@ model Modifier {
   priceMinor BigInt @default(0) @map("price_minor")
   sortOrder  Int    @map("sort_order")
 
-  tenant Tenant        @relation(fields: [tenantId], references: [id])
-  group  ModifierGroup @relation(fields: [groupId], references: [id])
+  tenant             Tenant              @relation(fields: [tenantId], references: [id])
+  group              ModifierGroup       @relation(fields: [groupId], references: [id])
+  orderLineModifiers OrderLineModifier[]
 
   @@unique([groupId, name])
   @@map("modifiers")
@@ -647,6 +652,7 @@ model StaffUser {
   role              Role           @relation(fields: [roleId], references: [id])
   clockEvents       ClockEvent[]
   orders            Order[]
+  orderLinesAdded   OrderLine[]
   shiftsOpened      Shift[]        @relation("ShiftOpenedBy")
   shiftsClosed      Shift[]        @relation("ShiftClosedBy")
   cashMovementsMade CashMovement[]
@@ -1000,11 +1006,65 @@ model Order {
   outlet Outlet       @relation(fields: [outletId], references: [id])
   table  DiningTable? @relation(fields: [tableId], references: [id])
   owner  StaffUser    @relation(fields: [ownerId], references: [id])
+  lines  OrderLine[]
 
   @@index([tenantId])
   @@index([outletId])
   @@index([tableId])
   @@map("orders")
+}
+
+// pos/CAP-3 order lines (AD-14). Built against the real menu catalogue
+// (MenuItem/ItemVariant/Modifier from tenant-admin/CAP-4) - itemId/variantId
+// point straight at those tables rather than duplicating a shape. Price is
+// snapshotted at add-time into unitPriceMinor/OrderLineModifier.priceMinor so
+// a later item_prices or modifier price change never retroactively alters an
+// in-progress order (same insert-only-snapshot posture as item_prices
+// itself, applied one layer up). A line is only ever mutated (quantity,
+// modifier re-selection) or removed while its order is still "open" - once
+// "sent", pos/orders/orders.service.ts is the sole enforcer since Order
+// (not OrderLine) owns the status column.
+model OrderLine {
+  id             String   @id @default(uuid(7)) @db.Uuid
+  tenantId       String   @map("tenant_id") @db.Uuid
+  orderId        String   @map("order_id") @db.Uuid
+  itemId         String   @map("item_id") @db.Uuid
+  variantId      String?  @map("variant_id") @db.Uuid
+  quantity       Int
+  unitPriceMinor BigInt   @map("unit_price_minor")
+  addedByStaffId String   @map("added_by_staff_id") @db.Uuid
+  createdAt      DateTime @default(now()) @map("created_at") @db.Timestamptz(6)
+
+  tenant       Tenant              @relation(fields: [tenantId], references: [id])
+  order        Order               @relation(fields: [orderId], references: [id])
+  item         MenuItem            @relation(fields: [itemId], references: [id])
+  variant      ItemVariant?        @relation(fields: [variantId], references: [id])
+  addedByStaff StaffUser           @relation(fields: [addedByStaffId], references: [id])
+  modifiers    OrderLineModifier[]
+
+  @@index([tenantId])
+  @@index([orderId])
+  @@map("order_lines")
+}
+
+// A line's selected modifiers - many-to-many via a join row rather than a
+// scalar array so each selection carries its own price snapshot (the same
+// per-item add-on can be re-priced later without touching rows already
+// added to an order).
+model OrderLineModifier {
+  id          String @id @default(uuid(7)) @db.Uuid
+  tenantId    String @map("tenant_id") @db.Uuid
+  orderLineId String @map("order_line_id") @db.Uuid
+  modifierId  String @map("modifier_id") @db.Uuid
+  priceMinor  BigInt @map("price_minor")
+
+  tenant    Tenant    @relation(fields: [tenantId], references: [id])
+  orderLine OrderLine @relation(fields: [orderLineId], references: [id], onDelete: Cascade)
+  modifier  Modifier  @relation(fields: [modifierId], references: [id])
+
+  @@index([tenantId])
+  @@index([orderLineId])
+  @@map("order_line_modifiers")
 }
 
 // ---------------------------------------------------------------------------
