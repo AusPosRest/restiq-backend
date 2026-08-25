@@ -197,3 +197,19 @@
   `OrderLine` lands. `test/pos-open-held-orders.e2e-spec.ts`, 6 tests. See
   [wiki/features/pos-cashier-waiter.md](../features/pos-cashier-waiter.md).
   Issue AusPosRest/restiq-backend#53.
+- **2026-08-25** - POS Cashier & Waiter story 11: device and staff
+  attendance status (CAP-11). Pure read story, no new mutation model:
+  `GET /pos/v1/outlets/:outletId/attendance` (new
+  `src/pos/clock/attendance.controller.ts`/`attendance.service.ts`)
+  derives "clocked in" from story 1's real `ClockEvent` rows - the latest
+  event per staff member at the outlet being a `clock_in` with no later
+  `clock_out`, scoped to today in the outlet's own timezone by reusing
+  `clock.util.ts#localDateKey` verbatim rather than reimplementing
+  local-day logic. Response also carries a static, honestly-labeled mocked
+  printer status (`printerStatus: { status: 'connected', mocked: true }`)
+  since this prototype has no real hardware - same honesty discipline as
+  the owner dashboard's `hasData`/`message` convention. 9 new e2e tests
+  (`test/pos-attendance.e2e-spec.ts`) cover clocked-in/out state,
+  same-day-clock-in dedup, cross-outlet isolation, and the mocked field.
+  See [wiki/features/pos-cashier-waiter.md](../features/pos-cashier-waiter.md).
+  Issue AusPosRest/restiq-backend#54.
