@@ -1,11 +1,15 @@
-import { Body, Controller, Get, HttpCode, Param, Patch, Post } from '@nestjs/common'
+import { Body, Controller, Delete, Get, HttpCode, Param, Patch, Post } from '@nestjs/common'
 import { CurrentStaff, PosPrincipal } from '../../platform'
-import { OrderView, TableMapEntry, TransferOrderDto, UpdateOrderStatusDto } from './orders.dtos'
+import { AddOrderLineDto, OrderView, TableMapEntry, TransferOrderDto, UpdateOrderLineDto, UpdateOrderStatusDto } from './orders.dtos'
+import { OrderLinesService } from './order-lines.service'
 import { OrdersService } from './orders.service'
 
 @Controller('pos/v1')
 export class PosOrdersController {
-  constructor(private readonly orders: OrdersService) {}
+  constructor(
+    private readonly orders: OrdersService,
+    private readonly orderLines: OrderLinesService,
+  ) {}
 
   @Get('outlets/:outletId/table-map')
   getTableMap(@CurrentStaff() staff: PosPrincipal, @Param('outletId') outletId: string): Promise<TableMapEntry[]> {
@@ -51,5 +55,26 @@ export class PosOrdersController {
   @Post('orders/:orderId/transfer')
   transfer(@CurrentStaff() staff: PosPrincipal, @Param('orderId') orderId: string, @Body() dto: TransferOrderDto): Promise<OrderView> {
     return this.orders.transfer(staff, orderId, dto)
+  }
+
+  @Post('orders/:orderId/lines')
+  @HttpCode(201)
+  addLine(@CurrentStaff() staff: PosPrincipal, @Param('orderId') orderId: string, @Body() dto: AddOrderLineDto): Promise<OrderView> {
+    return this.orderLines.addLine(staff, orderId, dto)
+  }
+
+  @Patch('orders/:orderId/lines/:lineId')
+  updateLine(
+    @CurrentStaff() staff: PosPrincipal,
+    @Param('orderId') orderId: string,
+    @Param('lineId') lineId: string,
+    @Body() dto: UpdateOrderLineDto,
+  ): Promise<OrderView> {
+    return this.orderLines.updateLine(staff, orderId, lineId, dto)
+  }
+
+  @Delete('orders/:orderId/lines/:lineId')
+  removeLine(@CurrentStaff() staff: PosPrincipal, @Param('orderId') orderId: string, @Param('lineId') lineId: string): Promise<OrderView> {
+    return this.orderLines.removeLine(staff, orderId, lineId)
   }
 }

@@ -1,4 +1,4 @@
-import { IsEnum, IsOptional, IsString, IsUUID, MinLength } from 'class-validator'
+import { ArrayUnique, IsArray, IsEnum, IsInt, IsOptional, IsString, IsUUID, Min, MinLength } from 'class-validator'
 import type { OrderStatus } from '../../generated/prisma/client'
 
 const ORDER_STATUSES = ['open', 'sent', 'closed'] as const
@@ -29,6 +29,59 @@ export interface OrderView {
   status: OrderStatus
   createdAt: string
   updatedAt: string
+  lines: OrderLineView[]
+}
+
+// pos/CAP-3 order lines. Built against the real menu catalogue (itemId/
+// variantId point straight at MenuItem/ItemVariant, modifierIds at Modifier)
+// - see restiq-backend/src/admin/menu for those models' actual shape.
+export class AddOrderLineDto {
+  @IsUUID()
+  itemId!: string
+
+  @IsOptional() @IsUUID()
+  variantId?: string
+
+  @IsInt() @Min(1)
+  quantity!: number
+
+  @IsOptional() @IsArray() @ArrayUnique() @IsUUID('all', { each: true })
+  modifierIds?: string[]
+}
+
+// Quantity and/or modifier re-selection only - swapping itemId/variantId is
+// "remove this line, add a different one", not an edit (SPEC/stories.yaml
+// story 4: PATCH covers "change quantity, or re-select modifiers before the
+// order is sent"). Omitting modifierIds leaves the line's selections
+// untouched; passing (possibly empty) modifierIds replaces them wholesale,
+// re-validated the same way as on add.
+export class UpdateOrderLineDto {
+  @IsOptional() @IsInt() @Min(1)
+  quantity?: number
+
+  @IsOptional() @IsArray() @ArrayUnique() @IsUUID('all', { each: true })
+  modifierIds?: string[]
+}
+
+export interface OrderLineModifierView {
+  id: string
+  modifierId: string
+  name: string
+  priceMinor: number
+}
+
+export interface OrderLineView {
+  id: string
+  orderId: string
+  itemId: string
+  variantId: string | null
+  quantity: number
+  // Snapshotted at add-time (and re-snapshotted only by an explicit PATCH) -
+  // a later item_prices change never retroactively alters this line.
+  unitPriceMinor: number
+  addedByStaffId: string
+  createdAt: string
+  modifiers: OrderLineModifierView[]
 }
 
 export type TableMapStatus = 'occupied' | 'empty'

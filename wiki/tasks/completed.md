@@ -213,3 +213,28 @@
   same-day-clock-in dedup, cross-outlet isolation, and the mocked field.
   See [wiki/features/pos-cashier-waiter.md](../features/pos-cashier-waiter.md).
   Issue AusPosRest/restiq-backend#54.
+- **2026-08-25** - POS Cashier & Waiter story 4: order taking with
+  modifiers, variants, combos (CAP-3). Extends story 3's `Order` with new
+  `OrderLine`/`OrderLineModifier` tables, built against the real, already-
+  shipped menu catalogue (tenant-admin/CAP-4's `MenuItem`/`ItemVariant`/
+  `ModifierGroup`/`Modifier`). `POST /pos/v1/orders/:orderId/lines`
+  (validates every modifier group attached to the item against min/max -
+  including a required group with nothing selected, not just an
+  over-selected optional one - and snapshots the item's current price plus
+  each selected modifier's price at add-time), `PATCH
+  /pos/v1/orders/:orderId/lines/:lineId` (quantity and/or modifier
+  re-selection, owner-only, only while `open`), `DELETE
+  /pos/v1/orders/:orderId/lines/:lineId` (owner-only, only while `open`).
+  Adding a line is allowed even after the order is `sent` (AD-14: mutable
+  pre-finalisation); editing/removing is not, once sent. `loadOrder`/
+  `assertOwner` were lifted out of `OrdersService` into shared top-level
+  functions so ownership enforcement is reused, not reimplemented.
+  `admin/menu/pricing.ts#resolveCurrentPrice` is reused verbatim (now
+  exported through the `admin` barrel) rather than re-picking prices.
+  Combos are not built as an order-line type - out of this story's actual
+  endpoint contract and screens. 20 new e2e tests
+  (`test/pos-order-lines.e2e-spec.ts`), including a direct proof that a
+  price change after a line is added never retroactively changes that
+  line. See
+  [wiki/features/pos-cashier-waiter.md](../features/pos-cashier-waiter.md).
+  Issue AusPosRest/restiq-backend#52.

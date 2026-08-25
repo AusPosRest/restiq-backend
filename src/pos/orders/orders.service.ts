@@ -7,9 +7,9 @@
 import { BadRequestException, ConflictException, ForbiddenException, Injectable, NotFoundException } from '@nestjs/common'
 import type { Order, Prisma } from '../../generated/prisma/client'
 import { PosPrincipal, RegionRegistryService } from '../../platform'
-import { OrderView, TableMapEntry, TransferOrderDto, UpdateOrderStatusDto } from './orders.dtos'
+import { OrderLineView, OrderView, TableMapEntry, TransferOrderDto, UpdateOrderStatusDto } from './orders.dtos'
 
-type Tx = Prisma.TransactionClient
+export type Tx = Prisma.TransactionClient
 
 // Same one-line-per-module convention as admin/checklist/checklist.service.ts
 // and others - not worth a cross-module import for a single set_config call.
@@ -39,7 +39,7 @@ async function loadTableInOutlet(tx: Tx, tenantId: string, outletId: string, tab
   return table
 }
 
-async function loadOrder(tx: Tx, tenantId: string, orderId: string): Promise<Order> {
+export async function loadOrder(tx: Tx, tenantId: string, orderId: string): Promise<Order> {
   const order = await tx.order.findUnique({ where: { id: orderId } })
   if (!order || order.tenantId !== tenantId) {
     throw new NotFoundException({ code: 'not_found', message: 'No such order' })
@@ -47,16 +47,55 @@ async function loadOrder(tx: Tx, tenantId: string, orderId: string): Promise<Ord
   return order
 }
 
-function toOrderView(o: Order): OrderView {
+/**
+ * Owner-only mutation guard, shared by every order/order-line mutation
+ * (pos/CAP-2's core rule, reused as-is by pos/CAP-3's order-line endpoints -
+ * not reimplemented per module boundary).
+ */
+export async function assertOwner(tx: Tx, order: Order, staff: PosPrincipal): Promise<void> {
+  if (order.ownerId === staff.id) return
+  const owner = await tx.staffUser.findUnique({ where: { id: order.ownerId } })
+  const ownerName = owner?.name ?? order.ownerId
+  throw new ForbiddenException({
+    code: 'not_owner',
+    message: `This order is owned by ${ownerName} - use the transfer endpoint to take it over`,
+    ownerId: order.ownerId,
+  })
+}
+
+const ORDER_LINE_INCLUDE = {
+  modifiers: { include: { modifier: true } },
+} satisfies Prisma.OrderLineInclude
+
+type OrderLineWithModifiers = Prisma.OrderLineGetPayload<{ include: typeof ORDER_LINE_INCLUDE }>
+
+function toOrderLineView(line: OrderLineWithModifiers): OrderLineView {
   return {
-    id: o.id,
-    tenantId: o.tenantId,
-    outletId: o.outletId,
-    tableId: o.tableId,
-    ownerId: o.ownerId,
-    status: o.status,
-    createdAt: o.createdAt.toISOString(),
-    updatedAt: o.updatedAt.toISOString(),
+    id: line.id,
+    orderId: line.orderId,
+    itemId: line.itemId,
+    variantId: line.variantId,
+    quantity: line.quantity,
+    unitPriceMinor: Number(line.unitPriceMinor),
+    addedByStaffId: line.addedByStaffId,
+    createdAt: line.createdAt.toISOString(),
+    modifiers: line.modifiers.map((m) => ({ id: m.id, modifierId: m.modifierId, name: m.modifier.name, priceMinor: Number(m.priceMinor) })),
+  }
+}
+
+/** Builds the full OrderView (base fields + lines) - the shape every order read/mutation endpoint returns. */
+export async function buildOrderView(tx: Tx, order: Order): Promise<OrderView> {
+  const lines = await tx.orderLine.findMany({ where: { orderId: order.id }, include: ORDER_LINE_INCLUDE, orderBy: { createdAt: 'asc' } })
+  return {
+    id: order.id,
+    tenantId: order.tenantId,
+    outletId: order.outletId,
+    tableId: order.tableId,
+    ownerId: order.ownerId,
+    status: order.status,
+    createdAt: order.createdAt.toISOString(),
+    updatedAt: order.updatedAt.toISOString(),
+    lines: lines.map(toOrderLineView),
   }
 }
 
@@ -122,13 +161,13 @@ export class OrdersService {
       await loadTableInOutlet(tx, staff.tenantId, outletId, tableId)
 
       const existing = await tx.order.findFirst({ where: { tenantId: staff.tenantId, tableId, status: { not: 'closed' } } })
-      if (existing) return toOrderView(existing)
+      if (existing) return buildOrderView(tx, existing)
 
       try {
         const created = await tx.order.create({
           data: { tenantId: staff.tenantId, outletId, tableId, ownerId: staff.id, status: 'open' },
         })
-        return toOrderView(created)
+        return buildOrderView(tx, created)
       } catch (error) {
         // Backstop for the orders_one_active_per_table partial unique index:
         // the check-then-create above has a race window under concurrent
@@ -136,7 +175,7 @@ export class OrdersService {
         // raw DB error to the caller.
         if (isUniqueViolation(error)) {
           const raced = await tx.order.findFirst({ where: { tenantId: staff.tenantId, tableId, status: { not: 'closed' } } })
-          if (raced) return toOrderView(raced)
+          if (raced) return buildOrderView(tx, raced)
         }
         throw error
       }
@@ -150,10 +189,10 @@ export class OrdersService {
    * taking over one of these orders is done via the existing transfer()
    * action below, not a second mechanism.
    *
-   * TODO(pos/CAP-3, issue #52): once OrderLine exists, each entry here
-   * should carry an item-count/running-total summary. SPEC.md does not
-   * require one for this screen, so it's plain OrderView until #52 lands
-   * and this can reconcile against its real OrderLine schema.
+   * pos/CAP-3 (issue #52) has since landed: each entry now carries its real
+   * lines[] via buildOrderView, same as every other order read/mutation
+   * response - no separate item-count/running-total summary was needed on
+   * top of that, since the full line detail is already there.
    */
   async listOpenOrders(staff: PosPrincipal, outletId: string): Promise<OrderView[]> {
     const plane = this.plane()
@@ -165,7 +204,7 @@ export class OrdersService {
         where: { tenantId: staff.tenantId, outletId, status: { not: 'closed' } },
         orderBy: { createdAt: 'asc' },
       })
-      return orders.map(toOrderView)
+      return Promise.all(orders.map((order) => buildOrderView(tx, order)))
     })
   }
 
@@ -175,7 +214,7 @@ export class OrdersService {
     return plane.$transaction(async (tx) => {
       await setTenantContext(tx, staff.tenantId)
       const order = await loadOrder(tx, staff.tenantId, orderId)
-      return toOrderView(order)
+      return buildOrderView(tx, order)
     })
   }
 
@@ -185,14 +224,14 @@ export class OrdersService {
     return plane.$transaction(async (tx) => {
       await setTenantContext(tx, staff.tenantId)
       const order = await loadOrder(tx, staff.tenantId, orderId)
-      await this.assertOwner(tx, order, staff)
+      await assertOwner(tx, order, staff)
 
       if (!FORWARD_TRANSITIONS[order.status].includes(dto.status)) {
         throw new ConflictException({ code: 'invalid_transition', message: `Cannot move an order from "${order.status}" to "${dto.status}"` })
       }
 
       const updated = await tx.order.update({ where: { id: orderId }, data: { status: dto.status } })
-      return toOrderView(updated)
+      return buildOrderView(tx, updated)
     })
   }
 
@@ -233,18 +272,7 @@ export class OrdersService {
         },
       })
 
-      return toOrderView(updated)
-    })
-  }
-
-  private async assertOwner(tx: Tx, order: Order, staff: PosPrincipal): Promise<void> {
-    if (order.ownerId === staff.id) return
-    const owner = await tx.staffUser.findUnique({ where: { id: order.ownerId } })
-    const ownerName = owner?.name ?? order.ownerId
-    throw new ForbiddenException({
-      code: 'not_owner',
-      message: `This order is owned by ${ownerName} - use the transfer endpoint to take it over`,
-      ownerId: order.ownerId,
+      return buildOrderView(tx, updated)
     })
   }
 }
