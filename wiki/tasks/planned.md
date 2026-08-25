@@ -11,14 +11,15 @@
   checkboxes. See the CAP-7 key-decisions note in
   [wiki/features/tenant-admin.md](../features/tenant-admin.md).
 - POS Cashier & Waiter: CAP-1 (PIN login/clock), CAP-2 (table map &
-  ownership), CAP-3 (order taking with modifiers/variants), CAP-8 (manager
-  authorisation service), and CAP-10 (shift & cash management) are done. Still
-  planned: CAP-4 group ordering (seats/covers on `OrderLine`), CAP-5 open/held
-  orders (list view over existing `Order` rows), CAP-6 QSR counter & token,
-  CAP-7 bill & settle (its discount-above-threshold and price-override paths,
-  plus CAP-3's still-unimplemented void/comp, call into CAP-8's
-  `ManagerAuthService`), CAP-9 refunds, and CAP-11 device & staff attendance
-  status - each gated action calls
-  `ManagerAuthService.authorize()`/`.recordApproval()` per
+  ownership), CAP-3 (order taking with modifiers/variants), CAP-4 (group
+  ordering - seats/covers on `OrderLine`), CAP-5 (open/held orders), CAP-8
+  (manager authorisation service), CAP-10 (shift & cash management), and
+  CAP-11 (device & staff attendance status) are done. Still planned: CAP-6
+  QSR counter & token, and CAP-7 bill & settle (its discount-above-threshold
+  and price-override paths, plus CAP-3's still-unimplemented void/comp, call
+  into CAP-8's `ManagerAuthService`) and CAP-9 refunds - each gated action
+  calls `ManagerAuthService.authorize()`/`.recordApproval()` per
   [wiki/features/pos-cashier-waiter.md](../features/pos-cashier-waiter.md)'s
   "How to call this" section instead of reimplementing their own PIN check.
+  CAP-7 also needs to read CAP-4's `OrderLine.seatNumber` for per-seat split
+  billing - no such aggregation exists yet.

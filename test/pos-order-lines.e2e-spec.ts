@@ -35,6 +35,7 @@ interface OrderLineBody {
   variantId: string | null
   quantity: number
   unitPriceMinor: number
+  seatNumber: number | null
   addedByStaffId: string
   createdAt: string
   modifiers: OrderLineModifierBody[]
@@ -188,6 +189,12 @@ describe('/pos/v1 order lines (e2e)', () => {
   })
 
   afterAll(async () => {
+    // Other spec files' own wipe() helpers delete menu_items without first
+    // clearing order_lines (that FK didn't exist when they were written) -
+    // leaving rows here after this file's last test would break whichever
+    // spec file happens to run next, purely by file-execution order. Clean
+    // up on the way out so this file is never the cause of that.
+    await wipe(prisma)
     await app.close()
     await prisma.$disconnect()
   })
@@ -442,9 +449,13 @@ describe('/pos/v1 order lines (e2e)', () => {
       const waiter = await createStaff(prisma, tenantId, outletId, 'Asha')
       const { itemId } = await createItemWithPrice(prisma, tenantId, 19000)
       const order = await openOrder(outletId, tableId, waiter.token)
-      const added = await authed(request(httpServer).post(`/pos/v1/orders/${order.id}/lines`), waiter.token).send({ itemId, quantity: 1 })
+      // Seated (pos/CAP-4, issue #58) so the status transition below succeeds
+      // - this test is about the send-blocks-further-edits rule, not the
+      // group-ordering gate itself.
+      const added = await authed(request(httpServer).post(`/pos/v1/orders/${order.id}/lines`), waiter.token).send({ itemId, quantity: 1, seatNumber: 1 })
       const lineId = (added.body as OrderBody).lines[0]?.id
-      await authed(request(httpServer).patch(`/pos/v1/orders/${order.id}/status`), waiter.token).send({ status: 'sent' })
+      const sent = await authed(request(httpServer).patch(`/pos/v1/orders/${order.id}/status`), waiter.token).send({ status: 'sent' })
+      expect(sent.status).toBe(200)
 
       const res = await authed(request(httpServer).patch(`/pos/v1/orders/${order.id}/lines/${lineId}`), waiter.token).send({ quantity: 9 })
       expect(res.status).toBe(409)
@@ -490,9 +501,13 @@ describe('/pos/v1 order lines (e2e)', () => {
       const waiter = await createStaff(prisma, tenantId, outletId, 'Asha')
       const { itemId } = await createItemWithPrice(prisma, tenantId, 19000)
       const order = await openOrder(outletId, tableId, waiter.token)
-      const added = await authed(request(httpServer).post(`/pos/v1/orders/${order.id}/lines`), waiter.token).send({ itemId, quantity: 1 })
+      // Seated (pos/CAP-4, issue #58) so the status transition below succeeds
+      // - this test is about the send-blocks-removal rule, not the
+      // group-ordering gate itself.
+      const added = await authed(request(httpServer).post(`/pos/v1/orders/${order.id}/lines`), waiter.token).send({ itemId, quantity: 1, seatNumber: 1 })
       const lineId = (added.body as OrderBody).lines[0]?.id
-      await authed(request(httpServer).patch(`/pos/v1/orders/${order.id}/status`), waiter.token).send({ status: 'sent' })
+      const sent = await authed(request(httpServer).patch(`/pos/v1/orders/${order.id}/status`), waiter.token).send({ status: 'sent' })
+      expect(sent.status).toBe(200)
 
       const res = await authed(request(httpServer).delete(`/pos/v1/orders/${order.id}/lines/${lineId}`), waiter.token)
       expect(res.status).toBe(409)
@@ -524,6 +539,104 @@ describe('/pos/v1 order lines (e2e)', () => {
 
       const res = await authed(request(httpServer).delete(`/pos/v1/orders/${order.id}/lines/${uuidv7()}`), waiter.token)
       expect(res.status).toBe(404)
+    })
+  })
+
+  // pos/CAP-4 group ordering (SPEC-pos-cashier-waiter, story 5, issue #58):
+  // extends story 4's OrderLine with an application-enforced seat number -
+  // every line must carry one before the order can move to "sent", but the
+  // add/edit/remove paths themselves never require it (a table not using
+  // group ordering just never sets seatNumber, and behaves exactly as before).
+  describe('seat numbers (group ordering)', () => {
+    it('adds a line with a seat number', async () => {
+      const tenantId = await createTenant(prisma)
+      const outletId = await createOutlet(prisma, tenantId)
+      const tableId = await createTable(prisma, tenantId, outletId)
+      const waiter = await createStaff(prisma, tenantId, outletId, 'Asha')
+      const { itemId } = await createItemWithPrice(prisma, tenantId, 19000)
+      const order = await openOrder(outletId, tableId, waiter.token)
+
+      const res = await authed(request(httpServer).post(`/pos/v1/orders/${order.id}/lines`), waiter.token).send({ itemId, quantity: 1, seatNumber: 2 })
+      expect(res.status).toBe(201)
+      expect((res.body as OrderBody).lines[0]).toMatchObject({ seatNumber: 2 })
+    })
+
+    it('a line added without a seat number carries a null seatNumber (story 4 behaviour unchanged)', async () => {
+      const tenantId = await createTenant(prisma)
+      const outletId = await createOutlet(prisma, tenantId)
+      const tableId = await createTable(prisma, tenantId, outletId)
+      const waiter = await createStaff(prisma, tenantId, outletId, 'Asha')
+      const { itemId } = await createItemWithPrice(prisma, tenantId, 19000)
+      const order = await openOrder(outletId, tableId, waiter.token)
+
+      const res = await authed(request(httpServer).post(`/pos/v1/orders/${order.id}/lines`), waiter.token).send({ itemId, quantity: 1 })
+      expect(res.status).toBe(201)
+      expect((res.body as OrderBody).lines[0]).toMatchObject({ seatNumber: null })
+    })
+
+    it('assigns a seat number on an existing line via PATCH', async () => {
+      const tenantId = await createTenant(prisma)
+      const outletId = await createOutlet(prisma, tenantId)
+      const tableId = await createTable(prisma, tenantId, outletId)
+      const waiter = await createStaff(prisma, tenantId, outletId, 'Asha')
+      const { itemId } = await createItemWithPrice(prisma, tenantId, 19000)
+      const order = await openOrder(outletId, tableId, waiter.token)
+      const added = await authed(request(httpServer).post(`/pos/v1/orders/${order.id}/lines`), waiter.token).send({ itemId, quantity: 1 })
+      const lineId = (added.body as OrderBody).lines[0]?.id
+
+      const res = await authed(request(httpServer).patch(`/pos/v1/orders/${order.id}/lines/${lineId}`), waiter.token).send({ seatNumber: 3 })
+      expect(res.status).toBe(200)
+      expect((res.body as OrderBody).lines[0]).toMatchObject({ id: lineId, seatNumber: 3 })
+    })
+
+    it('sends an order to the kitchen once every line has a seat number', async () => {
+      const tenantId = await createTenant(prisma)
+      const outletId = await createOutlet(prisma, tenantId)
+      const tableId = await createTable(prisma, tenantId, outletId)
+      const waiter = await createStaff(prisma, tenantId, outletId, 'Asha')
+      const { itemId } = await createItemWithPrice(prisma, tenantId, 19000)
+      const order = await openOrder(outletId, tableId, waiter.token)
+      await authed(request(httpServer).post(`/pos/v1/orders/${order.id}/lines`), waiter.token).send({ itemId, quantity: 1, seatNumber: 1 })
+      await authed(request(httpServer).post(`/pos/v1/orders/${order.id}/lines`), waiter.token).send({ itemId, quantity: 2, seatNumber: 2 })
+
+      const res = await authed(request(httpServer).patch(`/pos/v1/orders/${order.id}/status`), waiter.token).send({ status: 'sent' })
+      expect(res.status).toBe(200)
+      expect((res.body as OrderBody).status).toBe('sent')
+    })
+
+    it('rejects sending an order when any line has no seat number, with a clear message, and leaves the order open', async () => {
+      const tenantId = await createTenant(prisma)
+      const outletId = await createOutlet(prisma, tenantId)
+      const tableId = await createTable(prisma, tenantId, outletId)
+      const waiter = await createStaff(prisma, tenantId, outletId, 'Asha')
+      const { itemId } = await createItemWithPrice(prisma, tenantId, 19000)
+      const order = await openOrder(outletId, tableId, waiter.token)
+      await authed(request(httpServer).post(`/pos/v1/orders/${order.id}/lines`), waiter.token).send({ itemId, quantity: 1, seatNumber: 1 })
+      await authed(request(httpServer).post(`/pos/v1/orders/${order.id}/lines`), waiter.token).send({ itemId, quantity: 1 }) // unseated
+
+      const res = await authed(request(httpServer).patch(`/pos/v1/orders/${order.id}/status`), waiter.token).send({ status: 'sent' })
+      expect(res.status).toBe(400)
+      const body = res.body as ErrorBody
+      expect(body.error.code).toBe('unseated_lines')
+      expect(body.error.message).toMatch(/seat/i)
+
+      const fetched = await authed(request(httpServer).get(`/pos/v1/orders/${order.id}`), waiter.token)
+      expect((fetched.body as OrderBody).status).toBe('open')
+    })
+
+    it('still rejects an order with zero seated lines out of several unseated ones', async () => {
+      const tenantId = await createTenant(prisma)
+      const outletId = await createOutlet(prisma, tenantId)
+      const tableId = await createTable(prisma, tenantId, outletId)
+      const waiter = await createStaff(prisma, tenantId, outletId, 'Asha')
+      const { itemId } = await createItemWithPrice(prisma, tenantId, 19000)
+      const order = await openOrder(outletId, tableId, waiter.token)
+      await authed(request(httpServer).post(`/pos/v1/orders/${order.id}/lines`), waiter.token).send({ itemId, quantity: 1 })
+      await authed(request(httpServer).post(`/pos/v1/orders/${order.id}/lines`), waiter.token).send({ itemId, quantity: 1 })
+
+      const res = await authed(request(httpServer).patch(`/pos/v1/orders/${order.id}/status`), waiter.token).send({ status: 'sent' })
+      expect(res.status).toBe(400)
+      expect((res.body as ErrorBody).error.code).toBe('unseated_lines')
     })
   })
 })

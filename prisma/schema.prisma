@@ -1024,6 +1024,13 @@ model Order {
 // modifier re-selection) or removed while its order is still "open" - once
 // "sent", pos/orders/orders.service.ts is the sole enforcer since Order
 // (not OrderLine) owns the status column.
+//
+// pos/CAP-4 group ordering (issue #58): seatNumber is nullable at the DB
+// level (migration safety - existing rows have none, and CAP-3's own
+// add/edit/remove paths never require it), but application-enforced as
+// required before an order can move to "sent" - see
+// pos/orders/orders.service.ts's updateStatus, the sole enforcer of that
+// gate, same posture as the status column itself.
 model OrderLine {
   id             String   @id @default(uuid(7)) @db.Uuid
   tenantId       String   @map("tenant_id") @db.Uuid
@@ -1032,6 +1039,7 @@ model OrderLine {
   variantId      String?  @map("variant_id") @db.Uuid
   quantity       Int
   unitPriceMinor BigInt   @map("unit_price_minor")
+  seatNumber     Int?     @map("seat_number")
   addedByStaffId String   @map("added_by_staff_id") @db.Uuid
   createdAt      DateTime @default(now()) @map("created_at") @db.Timestamptz(6)
 

@@ -266,6 +266,7 @@ model OrderLine {
   variantId      String?  @map("variant_id") @db.Uuid
   quantity       Int
   unitPriceMinor BigInt   @map("unit_price_minor")   // snapshotted at add-time
+  seatNumber     Int?     @map("seat_number")         // pos/CAP-4 (issue #58) - see below
   addedByStaffId String   @map("added_by_staff_id") @db.Uuid
   createdAt      DateTime @default(now()) @map("created_at") @db.Timestamptz(6)
 }
@@ -295,8 +296,8 @@ model OrderLineModifier {
   `OrderLineView`/`OrderLineModifierView` DTOs convert to plain JS `number`
   at the API boundary, same pattern as `item_prices.priceMinor` elsewhere.
 
-### Test coverage (`test/pos-order-lines.e2e-spec.ts`, 20 tests, e2e against
-a real Postgres test DB)
+### Test coverage (`test/pos-order-lines.e2e-spec.ts`, 26 tests including
+pos/CAP-4's below, e2e against a real Postgres test DB)
 
 - A valid line is added and appears on the order (and on a subsequent `GET`);
   a variant-specific price resolves correctly when `variantId` is given.
@@ -326,9 +327,9 @@ a real Postgres test DB)
 
 ### CAP-3 integration points for later stories
 
-- pos/CAP-4 (group ordering, story 5) extends this exact `OrderLine` with a
-  seat number - read the field names above before adding a column; nothing
-  here is expected to be renamed.
+- pos/CAP-4 (group ordering, story 5, issue #58) has since landed - see the
+  dedicated section below. It extended this exact `OrderLine` with
+  `seatNumber`, no field renamed.
 - pos/CAP-6 (QSR counter) and pos/CAP-7 (bill & settle) compose over these
   same endpoints/rows rather than a parallel line-item implementation. CAP-7
   is what will need to sum `OrderLine.unitPriceMinor * quantity +
@@ -359,6 +360,78 @@ a real Postgres test DB)
   `Modifier.priceMinor` is a flat, non-versioned column by schema design (see
   `prisma/schema.prisma`'s comment on `Modifier`), so its current value is
   read directly and snapshotted into `OrderLineModifier.priceMinor`.
+
+## CAP-4 - Group ordering (seats and covers)
+
+- **Intent:** staff can split one table's order into named seats/covers for
+  later per-seat billing. **Success:** every item is assigned to a seat
+  number before the order can be sent to the kitchen; unassigned items block
+  fire.
+- **Built** (issue #58, story 5): extends pos/CAP-3's exact `OrderLine`
+  (`src/pos/orders/order-lines.service.ts`, `orders.dtos.ts`) and pos/CAP-2's
+  order status transition (`src/pos/orders/orders.service.ts#updateStatus`)
+  in place - no new endpoint, no new module.
+  - `POST /pos/v1/orders/:orderId/lines` and
+    `PATCH /pos/v1/orders/:orderId/lines/:lineId` both gained an optional
+    `seatNumber` (`number`, `>= 1`) field, additive to CAP-3's DTOs. Add
+    defaults it to `null` when omitted; PATCH leaves it untouched when
+    omitted, same "omit = leave alone" convention CAP-3 already established
+    for `modifierIds`. Every `OrderLineView` now carries `seatNumber: number
+    | null`.
+  - `PATCH /pos/v1/orders/:orderId/status` with `{ status: 'sent' }` now
+    rejects `400 unseated_lines` (naming the count, `/seat/i`-matchable
+    message) if **any** line on the order has `seatNumber: null` - checked in
+    `orders.service.ts#assertAllLinesSeated` only on the `open -> sent`
+    transition, inside the same `$transaction` as the rest of `updateStatus`.
+    The order's `status` is left `open` when this fires (the `tx.order.update`
+    never runs).
+  - Orders that never use group ordering are completely unaffected: a table
+    order with zero lines, or every line still carrying `seatNumber: null`
+    only fails to `send` if the tenant actually has an unseated line at that
+    moment - a table with **no lines at all** sends exactly as it did before
+    this story (existing pos/CAP-2/CAP-3 tests exercise this, unchanged).
+- **Application-enforced, not a DB constraint.** `seat_number` is nullable at
+  the Postgres level (migration safety on an already-populated table); the
+  "every line must be seated before send" rule lives entirely in
+  `orders.service.ts`, the sole enforcer of `Order.status`, same posture the
+  file already documents for the status column itself.
+
+### Data model
+
+Adds one column to the table CAP-3 already owns - see the updated
+`OrderLine.seatNumber` line in CAP-3's Data model block above; nothing else
+changes.
+
+- Migration `20260825300000_pos_order_line_seat_number`:
+  `ALTER TABLE "order_lines" ADD COLUMN "seat_number" INTEGER;` - no RLS
+  changes needed (existing `order_lines` policies already cover every column).
+
+### Test coverage (`test/pos-order-lines.e2e-spec.ts`, `describe('seat
+numbers (group ordering)')`, 6 of the file's 26 tests)
+
+- A line added with `seatNumber` carries it on the returned `OrderView`; a
+  line added without one carries `seatNumber: null` (CAP-3 behaviour
+  unchanged for tenants not using group ordering).
+- `PATCH .../lines/:lineId` can assign a seat number to an existing line.
+- An order with every line seated sends successfully (`status` becomes
+  `'sent'`).
+- An order with any unseated line (including a mix of seated and unseated, or
+  all-unseated) is rejected `400 unseated_lines` with a message matching
+  `/seat/i`, and a follow-up `GET` confirms the order is still `'open'`.
+- `test/pos-order-lines.e2e-spec.ts`'s two pre-existing "once the order has
+  been sent" tests (editing/removing a sent-order line) now seat their line
+  before sending - they exist to prove CAP-3's send-freezes-lines rule, not
+  this gate, so they satisfy the new gate rather than exercising it.
+
+### CAP-4 integration points for later stories
+
+- pos/CAP-7 (bill & settle) is the capability that actually reads
+  `OrderLine.seatNumber` for anything (per-seat split billing) - group
+  ordering itself is just the data entry and the send-time gate; no seat/
+  cover grouping or totals aggregation exists yet.
+- `OrderLineView.seatNumber` is `number | null` at the API boundary, same
+  as every other optional line field - a client renders "no seat" for `null`
+  rather than treating it as `0` or omitted.
 
 ## CAP-5 - Open and held orders (outlet-wide)
 
