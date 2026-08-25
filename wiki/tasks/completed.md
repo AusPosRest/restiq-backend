@@ -130,3 +130,21 @@
   reconciliation once that story lands. See
   [wiki/features/pos-cashier-waiter.md](../features/pos-cashier-waiter.md).
   Issue AusPosRest/restiq-backend#46.
+- **2026-08-25** - POS Cashier & Waiter story 9: manager authorisation gate
+  (CAP-8, AD-15). New `src/platform/manager-auth.service.ts`
+  (`ManagerAuthService`, barrel-exported from `src/platform`) - one shared
+  service for all six gated actions (void-after-fire, comp,
+  discount-above-threshold, price override, refund, no-sale drawer-open),
+  no per-action reimplementation. `authorize()` verifies a manager PIN
+  (argon2, same convention as `staff_users.pin_hash`) against every
+  manager-capable `StaffUser` in the tenant and returns the approver's
+  identity; `recordApproval()` is a helper the caller invokes inside its own
+  mutation transaction to write the `audit_events` row (AD-6). New
+  `Role.isManager` column (seeded `true` for 'Owner'/'Manager' only - a flag,
+  not a hardcoded role-name check) and new `audit_events.approverId`/
+  `approverName` columns. No `/pos` HTTP surface yet - this is pure shared
+  infrastructure with no caller in this codebase, tested directly
+  (`test/manager-auth.e2e-spec.ts`, 6 tests). See
+  [wiki/features/pos-cashier-waiter.md](../features/pos-cashier-waiter.md)
+  for the full "how to call this" contract the next four stories need.
+  Issue AusPosRest/restiq-backend#47.

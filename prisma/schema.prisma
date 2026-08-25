@@ -270,11 +270,18 @@ model OutletCapability {
   @@map("outlet_capabilities")
 }
 
+// isManager (CAP-8/AD-15): the flag platform/manager-auth checks to decide
+// whether a StaffUser can approve a gated action - a role property, not a
+// hardcoded name check, so a tenant's set of approving roles can change
+// without touching manager-auth code. Seeded true for 'Owner' and 'Manager'
+// only (tenants.service.ts SYSTEM_ROLES); see manager-auth.service.ts for
+// the full reasoning.
 model Role {
-  id       String  @id @default(uuid(7)) @db.Uuid
-  tenantId String  @map("tenant_id") @db.Uuid
-  name     String
-  isSystem Boolean @default(false) @map("is_system")
+  id        String  @id @default(uuid(7)) @db.Uuid
+  tenantId  String  @map("tenant_id") @db.Uuid
+  name      String
+  isSystem  Boolean @default(false) @map("is_system")
+  isManager Boolean @default(false) @map("is_manager")
 
   tenant     Tenant      @relation(fields: [tenantId], references: [id])
   staffUsers StaffUser[]
@@ -753,15 +760,26 @@ model Station {
 // Region-plane audit trail (AD-8): tenant-affecting mutations audit here, in
 // the same transaction as the mutation (AD-6). Append-only - the RLS policies
 // in the migration grant INSERT and SELECT only.
+//
+// approverId/approverName (CAP-8/AD-15): populated only for manager-gated
+// actions (void-after-fire, comp, discount-above-threshold, price override,
+// refund, no-sale drawer-open) - null for every routine AD-6 audit row that
+// has no approval step (e.g. staff.role_changed, staff.pin_revoked above).
+// approverName, not approverEmail: the approving StaffUser's email is
+// optional (see StaffUser.email) but name is required, so name is what's
+// guaranteed to identify them. actorEmail already carries the acting
+// StaffUser's identity the same way non-pos callers do today.
 model AuditEvent {
-  id         String   @id @default(uuid(7)) @db.Uuid
-  tenantId   String   @map("tenant_id") @db.Uuid
-  actorId    String?  @map("actor_id") @db.Uuid
-  actorEmail String   @map("actor_email")
-  action     String
-  reason     String
-  occurredAt DateTime @map("occurred_at") @db.Timestamptz(6)
-  recordedAt DateTime @default(now()) @map("recorded_at") @db.Timestamptz(6)
+  id           String   @id @default(uuid(7)) @db.Uuid
+  tenantId     String   @map("tenant_id") @db.Uuid
+  actorId      String?  @map("actor_id") @db.Uuid
+  actorEmail   String   @map("actor_email")
+  approverId   String?  @map("approver_id") @db.Uuid
+  approverName String?  @map("approver_name")
+  action       String
+  reason       String
+  occurredAt   DateTime @map("occurred_at") @db.Timestamptz(6)
+  recordedAt   DateTime @default(now()) @map("recorded_at") @db.Timestamptz(6)
 
   @@map("audit_events")
 }
