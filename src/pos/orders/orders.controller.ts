@@ -38,6 +38,16 @@ export class PosOrdersController {
     return this.orders.openOrClaimTable(staff, outletId, tableId)
   }
 
+  // pos/CAP-6 QSR counter and token mode (issue #62): a counter order has no
+  // table to key a get-or-open lookup on (unlike openOrClaimTable above), so
+  // unlike that 200-always endpoint, this always creates a brand-new order
+  // and token - 201, not 200.
+  @Post('outlets/:outletId/counter-orders')
+  @HttpCode(201)
+  createCounterOrder(@CurrentStaff() staff: PosPrincipal, @Param('outletId') outletId: string): Promise<OrderView> {
+    return this.orders.createCounterOrder(staff, outletId)
+  }
+
   @Get('orders/:orderId')
   getOrder(@CurrentStaff() staff: PosPrincipal, @Param('orderId') orderId: string): Promise<OrderView> {
     return this.orders.getOrder(staff, orderId)

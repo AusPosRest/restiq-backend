@@ -477,6 +477,116 @@ against a real Postgres test DB)
 - Any staff member can view the list, not only the order's owner.
 - No session -> `401`; another tenant's outlet -> `404`.
 
+## CAP-6 - QSR counter and token mode
+
+- **Intent:** for counter-service outlets, one staff member rings up items
+  and takes payment in a single flow, issuing a queue token instead of
+  assigning a table. **Success:** completing a counter order issues a
+  sequential token number and finalises the bill in the same action - no
+  separate waiter hop.
+- **This is a composition story, not a parallel implementation** (per its
+  own dispatch note). It does not add a new order type or reimplement
+  order-line/bill logic: `Order.tableId: null` (a counter order) was already
+  supported by CAP-2/CAP-3's real schema and `order-lines.service.ts`; the
+  only genuine gap was that **no endpoint existed to create one** -
+  `openOrClaimTable` (CAP-2) always requires a `tableId`. This story fills
+  exactly that gap and adds token numbering; everything after creation
+  reuses CAP-3's and CAP-7's real endpoints **unchanged**.
+- **Built** (`src/pos/orders/orders.service.ts`/`orders.controller.ts`,
+  extending the existing module - no new module):
+  - `POST /pos/v1/outlets/:outletId/counter-orders` (201) -
+    `OrdersService.createCounterOrder()`. In one transaction: validates the
+    outlet, reserves the next token number, then creates an
+    `Order { tableId: null, ownerId: <caller>, status: 'open', tokenNumber }`.
+    Always creates a brand-new order (unlike `openOrClaimTable`'s
+    get-or-open semantics) - a counter has no table identity to key an
+    existing-order lookup on, so every call issues a new order and a new
+    token. Empty body; no DTO.
+  - `Order.tokenNumber: Int?` (new column, `orders.token_number`) - `null`
+    on every table (dine-in) order, a real number only on a counter order.
+    Returned on every `OrderView` (table map, list, get, and every mutation
+    response) alongside the existing fields.
+- **The rest of the flow is composition over already-merged endpoints,
+  exactly as scoped - see "Call sequence for the web story" below.**
+  `order-lines.service.ts`'s `addLine`/`updateLine`/`removeLine` and
+  `bills.service.ts`'s `createBill`/`finalize` were not touched.
+  `bills.service.ts`'s `createBill` already accepted an `'open'` order (not
+  just `'sent'`) specifically anticipating this story (see CAP-7's own doc
+  entry) - a counter order never needs to transition through `'sent'`
+  (kitchen-fire) at all, which is exactly the "no separate waiter hop" the
+  success criterion asks for. Sending it to the kitchen (`PATCH
+  /orders/:orderId/status {status:'sent'}`) is optional and only needed if
+  the outlet also wants a KOT print for the kitchen; CAP-4's
+  every-line-must-be-seated gate only applies on that transition, so a pure
+  ring-up-and-settle counter flow that skips it never has to assign seats
+  either.
+- **Call sequence for the web story** (one continuous client interaction,
+  per SPEC.md's success signal - not necessarily one HTTP call):
+  ```
+  1. POST /pos/v1/outlets/:outletId/counter-orders      -> OrderView (tokenNumber assigned)
+  2. POST /pos/v1/orders/:orderId/lines   (repeat per item, unchanged CAP-3)
+     [optional] PATCH/DELETE .../lines/:lineId           while order stays 'open'
+  3. POST /pos/v1/orders/:orderId/bill                   -> BillView (status 'open', unchanged CAP-7)
+  4. POST /pos/v1/bills/:billId/finalize  { tenders: [...] } -> BillView (status 'finalized', unchanged CAP-7)
+  ```
+  Step 1 issues the token (shown to the customer/on the POS/KDS screen per
+  SPEC's inherited assumption - no separate customer-facing token board);
+  step 4 is the single action that both takes payment and closes the order.
+  No step in between requires a second staff member or a table hand-off.
+- **Token numbering (gapless, per outlet) - `TokenNumberCounter`, a new
+  model, not a second column on `BillNumberCounter`.** Same reserve-then-
+  commit discipline as CAP-7's `BillNumberCounter`: one row per outlet
+  (`lastNumber`), incremented by a plain transactional `UPDATE`/`upsert`
+  **inside** `createCounterOrder()`'s own transaction, only after the
+  outlet-existence check has passed - a validation failure never touches
+  the counter, and if the order-create itself somehow failed afterward, the
+  whole transaction (counter increment included) rolls back with it, same
+  as CAP-7's bill numbering. Not a Postgres `SEQUENCE`, for the identical
+  reason CAP-7 gives: `nextval()` does not roll back with an aborted
+  transaction. **A separate table from `BillNumberCounter`, not a second
+  column on it**, because the two sequences are reserved at different
+  moments by different services (token at order creation, bill number at
+  bill finalise) - an outlet's counter-order count and bill count diverge
+  from the very first order, and a shared row would need to distinguish
+  "not yet touched" from "touched by the other sequence" for no benefit.
+  `orders.token_number` is nullable with a plain (non-partial) unique index
+  on `(tenant_id, outlet_id, token_number)` - Postgres already treats every
+  `NULL` as distinct, so every table order coexists without a `WHERE`
+  clause, identical posture to `bills.bill_number`.
+- **Price channel left as-is, not changed by this story.** `order-lines.
+  service.ts` hardcodes `ORDER_PRICE_CHANNEL = 'dine_in'` for every order
+  regardless of `tableId`, with its own comment anticipating that "QSR/
+  counter mode... picks its own channel when it exists; there is no channel
+  column on Order today to read instead." Adding a real channel column and
+  wiring counter orders to `PriceChannel.takeaway` would touch CAP-3's
+  shared, already-merged endpoint and would need its own price-catalogue
+  decision (does every item have a takeaway price configured?) - out of
+  this story's scope per its "reuse story 4's endpoints unchanged" brief.
+  Documented here as a known, deliberate gap for a future pricing story,
+  not fixed silently.
+
+### Test coverage (`test/pos-counter-orders.e2e-spec.ts`, 6 tests, e2e
+against a real Postgres test DB)
+
+- Creating a counter order returns a `tableId: null` order owned by the
+  caller, with a real token number.
+- Tokens number 1, 2, 3... gapless per outlet, and independently across
+  outlets (a second outlet also starts at 1) - same convention proven for
+  bill numbers in `test/pos-bills.e2e-spec.ts`.
+- Token numbering survives a failed/aborted creation attempt without
+  gapping: a request against a nonexistent outlet fails before the counter
+  is ever touched (no `TokenNumberCounter` row created), and the next real
+  creation still reserves token 1.
+- An outlet belonging to a different tenant is rejected (404).
+- A table (dine-in) order opened via CAP-2's `openOrClaimTable` never
+  carries a token number.
+- The full compose-order -> add-lines -> bill -> finalize sequence
+  completes end to end against the real CAP-3/CAP-7 endpoints: token issued
+  at creation, bill created directly against the still-`open` order (no
+  `sent` transition), finalised with a single cash tender, order closes,
+  and the token number issued at creation is preserved on the closed order
+  (never overwritten by the unrelated bill number).
+
 ## CAP-7 - Bill and settle
 
 - **Intent:** staff finalises an Order into a Bill with a tax breakdown, an
@@ -1075,6 +1185,19 @@ a real Postgres test DB)
   `tenant_isolation` + `operator_read`.
 - Money is `bigint` minor units on all three new CAP-7 tables, same
   workspace convention as every other money-path table.
+- `orders.token_number` (new column, CAP-6) - `Int?`, `null` on every table
+  (dine-in) order, assigned once at creation for a counter order
+  (`tableId: null`) by `OrdersService.createCounterOrder()`. Unique on
+  `(tenantId, outletId, tokenNumber)`, same plain-(non-partial)-index-plus-
+  every-NULL-is-distinct posture as `bills.bill_number`.
+- `token_number_counters` (new, CAP-6) - `{ id, tenantId, outletId (unique),
+  lastNumber }`. One row per outlet, incremented by a plain transactional
+  `UPDATE`/`upsert` inside `createCounterOrder()`'s own transaction -
+  deliberately not a Postgres `SEQUENCE` (see CAP-6's own entry above for
+  why), and a separate table from `bill_number_counters` rather than a
+  second column on it (the two sequences are reserved at different moments
+  by different services). RLS `tenant_isolation` + `operator_read`, same
+  posture as every other tenant-owned table.
 
 ## Integration points for later stories
 
@@ -1096,12 +1219,12 @@ a real Postgres test DB)
 - **pos/CAP-10's own no-sale drawer-open action** (not built by this story)
   is the natural first caller of `ManagerAuthService` from within the shift
   module, once it's dispatched.
-- **For CAP-6 (QSR counter & token, not yet dispatched):** the architecture's
-  own capability map composes it directly over `pos/bills`
-  (`POST /pos/v1/orders/:orderId/bill` + `.../finalize`) - see CAP-7's own
-  entry above for exactly why `open` (not just `sent`) is an accepted order
-  status for bill creation. That story should not need a second bill/settle
-  code path, only its own token-issuing wrapper around these two endpoints.
+- **CAP-6 (QSR counter & token) is now built** (issue #62) - exactly the
+  composition CAP-7's own entry above anticipated: a token-issuing wrapper
+  (`POST /pos/v1/outlets/:outletId/counter-orders`) around the
+  already-existing `POST /pos/v1/orders/:orderId/bill` + `.../finalize`, with
+  no second bill/settle code path added. See CAP-6's own doc entry above for
+  the full call sequence and the token-numbering mechanism.
 - **For CAP-9 (refunds & adjustments, not yet dispatched):** reads a
   finalised `Bill`'s real `subtotalMinor`/`taxMinor`/`discountMinor`/
   `tenders` to compute tax reversal, and is gated by CAP-8's

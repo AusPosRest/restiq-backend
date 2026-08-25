@@ -167,6 +167,7 @@ model Tenant {
   billNumberCounters  BillNumberCounter[]
   creditNotes         CreditNote[]
   creditNoteLines     CreditNoteLine[]
+  tokenNumberCounters TokenNumberCounter[]
 
   // The directory list is served from these: filter columns plus the
   // created_at ordering the default sort and cursor walk.
@@ -259,6 +260,7 @@ model Outlet {
   shifts              Shift[]
   bills               Bill[]
   billNumberCounter   BillNumberCounter?
+  tokenNumberCounter  TokenNumberCounter?
 
   @@index([tenantId])
   @@map("outlets")
@@ -1002,16 +1004,25 @@ enum OrderStatus {
 }
 
 model Order {
-  id        String      @id @default(uuid(7)) @db.Uuid
-  tenantId  String      @map("tenant_id") @db.Uuid
-  outletId  String      @map("outlet_id") @db.Uuid
-  tableId   String?     @map("table_id") @db.Uuid
+  id          String      @id @default(uuid(7)) @db.Uuid
+  tenantId    String      @map("tenant_id") @db.Uuid
+  outletId    String      @map("outlet_id") @db.Uuid
+  tableId     String?     @map("table_id") @db.Uuid
   // Exactly one owning staff member at a time (this story's core mechanic) -
   // reassigned only through the explicit transfer action, never implicitly.
-  ownerId   String      @map("owner_id") @db.Uuid
-  status    OrderStatus @default(open)
-  createdAt DateTime    @default(now()) @map("created_at") @db.Timestamptz(6)
-  updatedAt DateTime    @updatedAt @map("updated_at") @db.Timestamptz(6)
+  ownerId     String      @map("owner_id") @db.Uuid
+  status      OrderStatus @default(open)
+  // pos/CAP-6 QSR counter and token mode (AD-14, story 7). Assigned only at
+  // creation time for a counter order (tableId null) - see
+  // pos/orders/orders.service.ts's createCounterOrder, which reserves the
+  // next number from TokenNumberCounter below in the same transaction that
+  // creates the Order. Null on every table (dine-in) order. Gapless per
+  // (tenant_id, outlet_id), same posture as Bill.billNumber - the unique
+  // index below is a plain index, not partial, since Postgres already
+  // treats every NULL as distinct from every other NULL.
+  tokenNumber Int?        @map("token_number")
+  createdAt   DateTime    @default(now()) @map("created_at") @db.Timestamptz(6)
+  updatedAt   DateTime    @updatedAt @map("updated_at") @db.Timestamptz(6)
 
   tenant Tenant       @relation(fields: [tenantId], references: [id])
   outlet Outlet       @relation(fields: [outletId], references: [id])
@@ -1020,6 +1031,7 @@ model Order {
   lines  OrderLine[]
   bill   Bill?
 
+  @@unique([tenantId, outletId, tokenNumber])
   @@index([tenantId])
   @@index([outletId])
   @@index([tableId])
@@ -1342,4 +1354,26 @@ model CreditNoteLine {
   @@index([creditNoteId])
   @@index([orderLineId])
   @@map("credit_note_lines")
+}
+
+// ---------------------------------------------------------------------------
+// pos/CAP-6 QSR counter and token mode (AD-14, story 7). Same reserve-then-
+// commit discipline as BillNumberCounter above - one row per outlet,
+// incremented by a real UPDATE inside the SAME transaction that creates the
+// counter Order, never a Postgres SEQUENCE (whose nextval() would not roll
+// back with an aborted creation attempt, leaving a real gap). A separate
+// table from BillNumberCounter rather than a second column on it: the two
+// sequences are reserved at different moments (token at Order creation,
+// bill number at Bill finalise) by different services, and an outlet's
+// counter-order count and bill count diverge from the very first order.
+model TokenNumberCounter {
+  id         String @id @default(uuid(7)) @db.Uuid
+  tenantId   String @map("tenant_id") @db.Uuid
+  outletId   String @unique @map("outlet_id") @db.Uuid
+  lastNumber Int    @default(0) @map("last_number")
+
+  tenant Tenant @relation(fields: [tenantId], references: [id])
+  outlet Outlet @relation(fields: [outletId], references: [id])
+
+  @@map("token_number_counters")
 }

@@ -308,3 +308,26 @@
   isolation. See
   [wiki/features/pos-cashier-waiter.md](../features/pos-cashier-waiter.md).
   Issue AusPosRest/restiq-backend#63.
+- **2026-08-25** - POS Cashier & Waiter story 7: QSR counter and token mode
+  (CAP-6). A composition story, not a parallel implementation: the only
+  genuine gap was that no endpoint existed to create a `tableId: null`
+  (counter) order, since story 3's `openOrClaimTable` always requires a
+  table. New `POST /pos/v1/outlets/:outletId/counter-orders` (extends the
+  existing `src/pos/orders/` module) creates that order and reserves the
+  next gapless-per-outlet token number in one transaction, via a new
+  `TokenNumberCounter` model following the exact reserve-then-commit
+  convention story 8's `BillNumberCounter` established (a separate table
+  rather than a second column, since token numbers and bill numbers are
+  reserved at different moments by different services). New nullable
+  `orders.token_number` column, returned on every `OrderView`. The rest of
+  the flow - add lines, create a bill, finalise it - reuses story 4's and
+  story 8's real endpoints completely unchanged; `bills.service.ts`'s
+  `createBill` already accepted an `open` (not just `sent`) order in
+  anticipation of exactly this story, so a counter order never needs a
+  kitchen-fire hop. 6 new e2e tests
+  (`test/pos-counter-orders.e2e-spec.ts`), including gapless-numbering and
+  survives-a-failed-attempt cases mirroring story 8's bill-numbering test,
+  plus a full create -> add-lines -> bill -> finalize sequence against the
+  real endpoints. See
+  [wiki/features/pos-cashier-waiter.md](../features/pos-cashier-waiter.md).
+  Issue AusPosRest/restiq-backend#62.
