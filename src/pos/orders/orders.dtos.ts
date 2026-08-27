@@ -27,6 +27,10 @@ export interface OrderView {
   tableId: string | null
   ownerId: string
   status: OrderStatus
+  // pos/CAP-6 (issue #62): null on every table (dine-in) order; a real,
+  // gapless-per-outlet sequential number on a counter order (tableId null),
+  // assigned at creation - see orders.service.ts's createCounterOrder.
+  tokenNumber: number | null
   createdAt: string
   updatedAt: string
   lines: OrderLineView[]

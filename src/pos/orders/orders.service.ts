@@ -6,7 +6,7 @@
 // separate transfer action reassigns ownership explicitly (never silently).
 import { BadRequestException, ConflictException, ForbiddenException, Injectable, NotFoundException } from '@nestjs/common'
 import type { Order, Prisma } from '../../generated/prisma/client'
-import { PosPrincipal, RegionRegistryService } from '../../platform'
+import { PosPrincipal, RegionRegistryService, uuidv7 } from '../../platform'
 import { OrderLineView, OrderView, TableMapEntry, TransferOrderDto, UpdateOrderStatusDto } from './orders.dtos'
 
 export type Tx = Prisma.TransactionClient
@@ -94,6 +94,7 @@ export async function buildOrderView(tx: Tx, order: Order): Promise<OrderView> {
     tableId: order.tableId,
     ownerId: order.ownerId,
     status: order.status,
+    tokenNumber: order.tokenNumber,
     createdAt: order.createdAt.toISOString(),
     updatedAt: order.updatedAt.toISOString(),
     lines: lines.map(toOrderLineView),
@@ -196,6 +197,44 @@ export class OrdersService {
         }
         throw error
       }
+    })
+  }
+
+  /**
+   * pos/CAP-6 QSR counter and token mode (issue #62). Opens a new
+   * `tableId: null` counter order owned by the calling staff member and
+   * reserves the next gapless-per-outlet token number in the SAME
+   * transaction (reserve-then-commit, same convention as
+   * bills.service.ts's billNumberCounter - see TokenNumberCounter's schema
+   * comment for why a plain row + UPDATE is used instead of a SEQUENCE).
+   * Unlike openOrClaimTable, there is no "existing order" branch to return
+   * instead: every call issues a brand-new order and a brand-new token,
+   * since a counter has no table identity to key an existing-order lookup
+   * on. The rest of the flow (add lines, create bill, finalise) reuses
+   * story 4 and story 8's real endpoints unchanged against the returned
+   * order id - this endpoint only composes the create step.
+   */
+  async createCounterOrder(staff: PosPrincipal, outletId: string): Promise<OrderView> {
+    const plane = this.plane()
+    return plane.$transaction(async (tx) => {
+      await setTenantContext(tx, staff.tenantId)
+      await loadOutlet(tx, staff.tenantId, outletId)
+
+      // Reserved only after the outlet-existence check above has passed -
+      // same discipline as bills.service.ts's finalize: a validation
+      // failure never touches the counter, and if anything below still
+      // fails, the whole transaction (counter increment included) rolls
+      // back with it. Either way, no gap.
+      const counter = await tx.tokenNumberCounter.upsert({
+        where: { outletId },
+        create: { id: uuidv7(), tenantId: staff.tenantId, outletId, lastNumber: 1 },
+        update: { lastNumber: { increment: 1 } },
+      })
+
+      const created = await tx.order.create({
+        data: { tenantId: staff.tenantId, outletId, tableId: null, ownerId: staff.id, status: 'open', tokenNumber: counter.lastNumber },
+      })
+      return buildOrderView(tx, created)
     })
   }
 
