@@ -299,6 +299,19 @@ describe('/pos/v1/menu (e2e)', () => {
     expect(item?.available).toBe(false)
   })
 
+  it("does not apply another outlet's ItemOutletOverride - only the calling staff's own outlet's override applies", async () => {
+    const tenantId = await createTenant(prisma)
+    const outletId = await createOutlet(prisma, tenantId)
+    const otherOutletId = await createOutlet(prisma, tenantId, 'Koramangala')
+    const waiter = await createStaff(prisma, tenantId, outletId, 'Asha')
+    const { itemId } = await createItemWithPrice(prisma, tenantId, 19000, { available: true })
+    await prisma.itemOutletOverride.create({ data: { tenantId, itemId, outletId: otherOutletId, available: false } })
+
+    const res = await authed(request(httpServer).get('/pos/v1/menu'), waiter.token)
+    const item = (res.body as MenuBody).items.find((i) => i.id === itemId)
+    expect(item?.available).toBe(true)
+  })
+
   it("is scoped to the calling staff's own tenant - no cross-tenant items leak in", async () => {
     const tenantId = await createTenant(prisma)
     const otherTenantId = await createTenant(prisma, 'Curry Leaf Kitchens')
