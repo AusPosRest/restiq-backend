@@ -15,6 +15,10 @@
   unavailable - never omitted. **Schema gap** (see Key decisions below): no
   photos, no bilingual (Hindi) names, no veg/non-veg marker exist on
   `MenuItem` today, so this projection can't expose them yet.
+- **CAP-3** Shared group cart - every guest in the session adds to one
+  shared table cart, each item attributed to the guest who added it; any
+  guest can view the whole table's cart grouped by guest with per-guest and
+  combined totals; only the guest who added a line may edit or remove it.
 
 ## What's built
 
@@ -110,6 +114,39 @@
   tenant (never leaks tenant existence).
 - Both routes: 401 `unauthorized` without a valid guest token, or with any
   other realm's token (same guard as every other `/guest` route, AD-17).
+- **CAP-3 shared group cart** (issue #72, `src/guest/cart/`):
+  - Greenfield `CartLine`/`CartLineModifier` models (migration
+    `20260829063149_guest_cart_lines`) - session state, **not** an Order (the
+    real `Order`/`OrderLine` set is only created at placement, CAP-4/story
+    4). `CartLine` snapshots the adding guest's id+name at add-time
+    (`guestId`/`guestName`) so the shape converts cleanly into an `Order`'s
+    per-guest labels later, but deliberately does **not** snapshot price -
+    unlike `OrderLine.unitPriceMinor`, price is resolved live at read time
+    against `item_prices` (AD-11 already makes that table insert-only and
+    re-resolvable; nothing is final until placement snapshots it for real).
+  - `cart/cart.service.ts` (`CartService`) - add/update/remove a line and the
+    combined cart read, all scoped to the caller's `GuestPrincipal.sessionId`
+    inside the session's tenant RLS context. Reuses
+    `admin/menu/pricing.ts`'s `resolveCurrentPrice` (via the admin module's
+    barrel, same reuse `pos/orders/order-lines.service.ts` already
+    established) against the guest-specific `PriceChannel.qr` price channel.
+  - Item-availability and modifier min/max validation **mirror**
+    `pos/orders/order-lines.service.ts`'s rules exactly (same SPEC-mandated
+    server-side check) - duplicated per this workspace's convention of
+    small, module-local helpers rather than a cross-module import of a
+    pos-internal, non-exported function (AD-2). 86'd-item rejection checks
+    both the tenant-wide `MenuItem.available` toggle and this outlet's
+    `ItemOutletOverride`, the same two sources Tenant Admin's
+    `items.service.ts` writes.
+  - Ownership: any guest may view the whole cart; only the guest who added a
+    line (`CartLine.guestId === GuestPrincipal.id`) may `PATCH`/`DELETE` it -
+    403 `forbidden` otherwise.
+  - Closed/settled session -> 410 `session_closed` on every cart call,
+    reusing `sessions.service.ts`'s `isSessionInactive` (exported for this,
+    same guest module, not a cross-module reach).
+  - `cart/cart.controller.ts` - `GET /guest/v1/cart`,
+    `POST /guest/v1/cart/lines`, `PATCH /guest/v1/cart/lines/:id`,
+    `DELETE /guest/v1/cart/lines/:id` (all guest-token authenticated).
 
 ## Endpoint contracts
 
@@ -128,20 +165,46 @@
 - `TableSessionView`: `{ sessionId, status, table: { id, label }, outletId, guests: [{ id, name, joinedAt }], createdAt, expiresAt, closedAt }`.
 - `GuestPrincipal` (JWT payload, `aud: "guest"`):
   `{ id, sessionId, tenantId, outletId, tableId, name }`.
+- `GET /guest/v1/cart` (guest token) -> 200 `TableCartView`; 410
+  `session_closed` once the session is closed/settled/idle-expired.
+- `POST /guest/v1/cart/lines` `{ itemId, variantId?, quantity, modifierIds? }`
+  -> 201 `TableCartView`; 400 `validation_failed` (unknown item/variant/
+  modifier), 400 `modifier_selection_invalid` (min/max violation), 400
+  `item_unavailable` (86'd tenant-wide or for this outlet); 410
+  `session_closed`.
+- `PATCH /guest/v1/cart/lines/:id` `{ quantity?, modifierIds? }` -> 200
+  `TableCartView`; 403 `forbidden` if the caller isn't the line's own guest;
+  404 `not_found`; 410 `session_closed`.
+- `DELETE /guest/v1/cart/lines/:id` -> 200 `TableCartView`; 403 `forbidden`;
+  404 `not_found`; 410 `session_closed`.
+- `TableCartView`: `{ sessionId, guests: GuestCartView[], totalMinor, currency }`.
+- `GuestCartView`: `{ guestId, guestName, lines: CartLineView[], subtotalMinor }`.
+- `CartLineView`: `{ id, guestId, guestName, itemId, itemName, variantId, variantName, quantity, unitPriceMinor, modifiers: [{ id, name, priceMinor }], lineTotalMinor, createdAt }`
+  (`unitPriceMinor`/`modifiers[].priceMinor` are resolved live, never
+  snapshotted; `lineTotalMinor = (unitPriceMinor + sum(modifiers.priceMinor)) * quantity`).
 
 ## Integration points for later stories
 
-- Story 2 (menu browse) and story 3 (shared cart) read `CurrentGuest()`'s
-  `GuestPrincipal` for `tenantId`/`outletId`/`tableId`/`sessionId` scoping -
-  no second guest-identity lookup.
-- Story 4 (order placement) will link the created `Order` to
-  `TableSession.id` and attribute `OrderLine`s to `Guest.id`/`name`.
+- Story 2 (menu browse) reads `CurrentGuest()`'s `GuestPrincipal` for
+  `tenantId`/`outletId`/`tableId`/`sessionId` scoping - no second
+  guest-identity lookup, same as CAP-3's cart does.
+- Story 4 (order placement) converts each `CartLine` into a real `OrderLine`:
+  `CartLine.guestId`/`guestName` map directly onto the per-guest label
+  fields that story adds to `OrderLine`, and `CartLine.itemId`/`variantId`/
+  `quantity`/selected modifier ids carry over as-is - the cart's shape was
+  chosen so this conversion needs no reshaping. Price gets snapshotted for
+  real at that point (`resolveCurrentPrice` read again, same as
+  `pos/orders/order-lines.service.ts` does today).
 - Story 5 (checkout) settles the session (`status: 'settled'`) instead of
   `closed` - a separate terminal state already modeled.
 - Story 3 (shared cart, built concurrently in a sibling worktree/issue) will
   read item/variant/modifier ids and prices off this same `GuestMenuView`
   shape when a guest adds to the cart - no new pricing or availability logic
   needed there, only cart-state bookkeeping.
+  `closed` - a separate terminal state already modeled. Once a session
+  settles or closes, its `CartLine`s are no longer reachable (410 on every
+  cart call) - they are already superseded by the real `Order` created at
+  placement.
 
 ## Key decisions
 
@@ -176,3 +239,17 @@
   underlying pure `pickCurrentPrice` (AD-2: cross-module reach only through
   a module's own barrel). Acceptable for a single-outlet menu's item count;
   revisit only if it becomes a real bottleneck.
+- `CartLine` is greenfield, deliberately not an `Order`/`OrderLine` - the
+  cart is transient session state that may never be placed (a table can
+  close without ordering); an `Order` is created only once, at placement
+  (CAP-4), from the cart's contents.
+- Price is resolved live on every cart read, not snapshotted on add -
+  `item_prices` is already insert-only and cheaply re-resolvable (AD-11), so
+  snapshotting twice (once into the cart, again at placement) would just be
+  a second place for the two numbers to drift apart before there is any
+  reason for either to be authoritative yet.
+- The cart's item-availability/modifier-min-max rules are a deliberate
+  duplication of `pos/orders/order-lines.service.ts`'s private helpers, not
+  a shared import - AD-2 restricts cross-module reach to a module's public
+  barrel, and those helpers aren't (and shouldn't become) part of the pos
+  module's public surface just to serve one other caller.

@@ -173,6 +173,8 @@ model Tenant {
   tickets             Ticket[]
   ticketLines         TicketLine[]
   ticketEvents        TicketEvent[]
+  cartLines           CartLine[]
+  cartLineModifiers   CartLineModifier[]
 
   // The directory list is served from these: filter columns plus the
   // created_at ordering the default sort and cursor walk.
@@ -356,6 +358,7 @@ model MenuItem {
   comboComponents ComboComponent[]
   outletOverrides ItemOutletOverride[]
   orderLines      OrderLine[]
+  cartLines       CartLine[]
 
   // No two items in the same category may share a name (also the natural
   // forced-failure anchor for the menu-import commit atomicity test).
@@ -378,6 +381,7 @@ model ItemVariant {
   item       MenuItem    @relation(fields: [itemId], references: [id])
   prices     ItemPrice[]
   orderLines OrderLine[]
+  cartLines  CartLine[]
 
   @@unique([itemId, name])
   @@map("item_variants")
@@ -455,6 +459,7 @@ model Modifier {
   tenant             Tenant              @relation(fields: [tenantId], references: [id])
   group              ModifierGroup       @relation(fields: [groupId], references: [id])
   orderLineModifiers OrderLineModifier[]
+  cartLineModifiers  CartLineModifier[]
 
   @@unique([groupId, name])
   @@map("modifiers")
@@ -818,10 +823,11 @@ model TableSession {
   // silently renewed.
   expiresAt DateTime @map("expires_at") @db.Timestamptz(6)
 
-  tenant Tenant      @relation(fields: [tenantId], references: [id])
-  outlet Outlet      @relation(fields: [outletId], references: [id])
-  table  DiningTable @relation(fields: [tableId], references: [id])
-  guests Guest[]
+  tenant    Tenant      @relation(fields: [tenantId], references: [id])
+  outlet    Outlet      @relation(fields: [outletId], references: [id])
+  table     DiningTable @relation(fields: [tableId], references: [id])
+  guests    Guest[]
+  cartLines CartLine[]
 
   @@index([tenantId])
   @@index([outletId])
@@ -842,12 +848,66 @@ model Guest {
   phone     String?
   joinedAt  DateTime @default(now()) @map("joined_at") @db.Timestamptz(6)
 
-  tenant  Tenant       @relation(fields: [tenantId], references: [id])
-  session TableSession @relation(fields: [sessionId], references: [id])
+  tenant    Tenant       @relation(fields: [tenantId], references: [id])
+  session   TableSession @relation(fields: [sessionId], references: [id])
+  cartLines CartLine[]
 
   @@index([tenantId])
   @@index([sessionId])
   @@map("guests")
+}
+
+// qr-self-order/CAP-3 (issue #72): the shared table cart - session state, NOT
+// an Order. A real Order/OrderLine set is only created at placement
+// (CAP-4/story 4); this table exists purely so every guest's phone can
+// converge on one shared view before that happens. guestName is a snapshot
+// taken at add-time (same posture as OrderLine's later per-guest label, so
+// the cart's shape converts cleanly into an Order at placement) - it survives
+// even if Guest.name were ever edited, which it currently never is. Price is
+// deliberately NOT snapshotted here (unlike OrderLine.unitPriceMinor): AD-11's
+// insert-only item_prices already gives a stable, re-resolvable read via
+// admin/menu/pricing.ts's resolveCurrentPrice, and nothing is final until
+// placement snapshots it for real.
+model CartLine {
+  id        String   @id @default(uuid(7)) @db.Uuid
+  tenantId  String   @map("tenant_id") @db.Uuid
+  sessionId String   @map("session_id") @db.Uuid
+  guestId   String   @map("guest_id") @db.Uuid
+  guestName String   @map("guest_name")
+  itemId    String   @map("item_id") @db.Uuid
+  variantId String?  @map("variant_id") @db.Uuid
+  quantity  Int
+  createdAt DateTime @default(now()) @map("created_at") @db.Timestamptz(6)
+
+  tenant    Tenant             @relation(fields: [tenantId], references: [id])
+  session   TableSession       @relation(fields: [sessionId], references: [id])
+  guest     Guest              @relation(fields: [guestId], references: [id])
+  item      MenuItem           @relation(fields: [itemId], references: [id])
+  variant   ItemVariant?       @relation(fields: [variantId], references: [id])
+  modifiers CartLineModifier[]
+
+  @@index([tenantId])
+  @@index([sessionId])
+  @@index([guestId])
+  @@map("cart_lines")
+}
+
+// Selected modifier ids for a CartLine - mirrors OrderLineModifier's shape
+// minus the price snapshot (see CartLine's comment on why price waits until
+// placement).
+model CartLineModifier {
+  id         String @id @default(uuid(7)) @db.Uuid
+  tenantId   String @map("tenant_id") @db.Uuid
+  cartLineId String @map("cart_line_id") @db.Uuid
+  modifierId String @map("modifier_id") @db.Uuid
+
+  tenant   Tenant   @relation(fields: [tenantId], references: [id])
+  cartLine CartLine @relation(fields: [cartLineId], references: [id], onDelete: Cascade)
+  modifier Modifier @relation(fields: [modifierId], references: [id])
+
+  @@index([tenantId])
+  @@index([cartLineId])
+  @@map("cart_line_modifiers")
 }
 
 enum PrinterRenderMode {

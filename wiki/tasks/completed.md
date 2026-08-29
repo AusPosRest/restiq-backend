@@ -410,3 +410,21 @@
   enforcement (401 without one, 401 for a pos-realm token - the existing
   `guest-realm.e2e-spec.ts` already proves this generally for every
   `/guest` route). Issue AusPosRest/restiq-backend#71.
+- **2026-08-29** - qr-self-order story 3: shared group cart (CAP-3). New
+  `src/guest/cart/` (`CartService`/`CartController`) under `/guest/v1/cart`
+  - `GET` (combined table cart grouped by guest with per-guest and combined
+  totals, resolved prices), `POST /lines` (add), `PATCH /lines/:id`
+  (quantity/modifiers, owning guest only), `DELETE /lines/:id` (owning
+  guest only). Greenfield `CartLine`/`CartLineModifier` tables (session
+  state, not an `Order` - see the feature doc) with RLS (AD-5). Item
+  availability (tenant-wide 86 + per-outlet override) and modifier min/max
+  validation mirror `pos/orders/order-lines.service.ts`'s real rules
+  exactly. 16 new e2e tests (`test/guest-cart.e2e-spec.ts`): cross-guest
+  attribution and visibility, per-guest/combined totals, ownership
+  enforcement (403 on editing/removing another guest's line), min/max and
+  86'd-item rejection, closed-session 410s, and cross-tenant/cross-realm
+  isolation. `test/rls.e2e-spec.ts` gained a `cart_lines`/
+  `cart_line_modifiers` probe. Every existing e2e spec's `wipe()` helper
+  updated to clear the two new tables. See
+  [wiki/features/qr-self-order.md](../features/qr-self-order.md). Issue
+  AusPosRest/restiq-backend#72.
