@@ -59,7 +59,9 @@ export interface BillView {
   // derived from the three that are.
   totalMinor: number
   status: BillStatus
-  createdByStaffId: string
+  // qr-self-order/CAP-5 (issue #80): null for a guest-checkout Bill (no
+  // staff creator - see Bill.createdByStaffId's schema comment).
+  createdByStaffId: string | null
   createdAt: string
   finalizedByStaffId: string | null
   finalizedAt: string | null
