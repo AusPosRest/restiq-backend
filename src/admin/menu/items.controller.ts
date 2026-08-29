@@ -12,6 +12,7 @@ import {
   ReplaceModifierGroupsDto,
   SetAvailabilityDto,
   SetOutletAvailabilityDto,
+  SetStationDto,
   UpdateItemDto,
 } from './items.dtos'
 import { ItemsService } from './items.service'
@@ -49,6 +50,14 @@ export class AdminMenuItemsController {
   @Patch(':itemId/availability')
   setAvailability(@CurrentOwner() owner: AdminPrincipal, @Param('itemId') itemId: string, @Body() dto: SetAvailabilityDto): Promise<ItemView> {
     return this.items.setAvailability(owner, itemId, dto.available)
+  }
+
+  // kitchen-display/CAP-1 (AD-16): item->kitchen-station routing - the sole
+  // writer of MenuItem.stationId. Omitting/nulling stationId unroutes the
+  // item back to the outlet's default/expo station at fire time.
+  @Patch(':itemId/station')
+  setStation(@CurrentOwner() owner: AdminPrincipal, @Param('itemId') itemId: string, @Body() dto: SetStationDto): Promise<ItemView> {
+    return this.items.setStation(owner, itemId, dto.stationId)
   }
 
   @Post(':itemId/variants')

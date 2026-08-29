@@ -33,6 +33,12 @@ export class CreateItemDto {
 
   @IsOptional() @IsArray() @ArrayUnique() @IsUUID('all', { each: true })
   allergenIds?: string[]
+
+  // kitchen-display/CAP-1 (AD-16): nullable kitchen-station routing, additive
+  // to the already-shipped item shape. Omitted/null = unrouted - the kitchen
+  // fire hook falls back to the outlet's default/expo station at fire time.
+  @IsOptional() @IsUUID()
+  stationId?: string
 }
 
 export class UpdateItemDto {
@@ -44,6 +50,15 @@ export class UpdateItemDto {
 
   @IsOptional() @IsUUID()
   categoryId?: string
+}
+
+// A separate PATCH than UpdateItemDto (mirrors SetAvailabilityDto's own
+// dedicated endpoint below) so routing can be cleared back to null - a plain
+// optional field on UpdateItemDto can only ever set a new value, never null
+// it back out.
+export class SetStationDto {
+  @IsOptional() @IsUUID()
+  stationId?: string
 }
 
 export class SetAvailabilityDto {
@@ -116,6 +131,7 @@ export interface ItemView {
   name: string
   shortName: string
   available: boolean
+  stationId: string | null
   variants: VariantView[]
   modifierGroups: ModifierGroupView[]
   allergens: AllergenView[]

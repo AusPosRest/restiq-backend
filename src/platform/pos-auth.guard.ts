@@ -4,6 +4,11 @@
 // without opting in; non-/pos routes pass through untouched. Note a
 // `pos-pending` token (mid outlet-selection) is a different audience and is
 // never accepted here - only login/select-outlet ever see it, both @Public().
+//
+// kitchen-display/CAP-1 (AD-16, issue #67): /kitchen/* rides this exact same
+// realm - "auth realms separate principal types, not screens" - so the match
+// below is extended to cover it rather than mounting kitchen routes under
+// /pos/v1 or standing up a second guard for the same principal type.
 import { CanActivate, ExecutionContext, Injectable, UnauthorizedException, createParamDecorator } from '@nestjs/common'
 import { Reflector } from '@nestjs/core'
 import type { Request } from 'express'
@@ -28,7 +33,7 @@ export class PosAuthGuard implements CanActivate {
 
   canActivate(context: ExecutionContext): boolean {
     const request = context.switchToHttp().getRequest<PosRequest>()
-    if (!/^\/pos(\/|$)/.test(request.path)) return true
+    if (!/^\/(pos|kitchen)(\/|$)/.test(request.path)) return true
 
     const isPublic = this.reflector.getAllAndOverride<boolean>(IS_PUBLIC, [context.getHandler(), context.getClass()])
     if (isPublic) return true

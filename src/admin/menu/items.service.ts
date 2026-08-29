@@ -31,6 +31,7 @@ function toView(item: ItemWithRelations): ItemView {
     name: item.name,
     shortName: item.shortName,
     available: item.available,
+    stationId: item.stationId,
     variants: item.variants.map((v) => ({ id: v.id, name: v.name, sortOrder: v.sortOrder })),
     modifierGroups: item.modifierGroups.map((link) => ({
       id: link.group.id,
@@ -105,8 +106,11 @@ export class ItemsService {
         if (dto.allergenIds?.length) {
           await assertOwnedByTenant(tx, owner.tenantId, dto.allergenIds, (id) => tx.allergen.findUnique({ where: { id } }), 'validation_failed', 'No such allergen')
         }
+        if (dto.stationId) {
+          await assertOwnedByTenant(tx, owner.tenantId, [dto.stationId], (id) => tx.station.findUnique({ where: { id } }), 'validation_failed', 'No such station')
+        }
 
-        const item = await tx.menuItem.create({ data: { tenantId: owner.tenantId, categoryId: dto.categoryId, name: dto.name, shortName: dto.shortName } })
+        const item = await tx.menuItem.create({ data: { tenantId: owner.tenantId, categoryId: dto.categoryId, name: dto.name, shortName: dto.shortName, stationId: dto.stationId ?? null } })
         await createVariants(tx, owner.tenantId, item.id, dto.variants ?? [])
         for (const groupId of dto.modifierGroupIds ?? []) {
           await tx.itemModifierGroup.create({ data: { tenantId: owner.tenantId, itemId: item.id, groupId, sortOrder: 0 } })
@@ -153,6 +157,22 @@ export class ItemsService {
       await setTenantContext(tx, owner.tenantId)
       await loadItem(tx, owner.tenantId, itemId)
       await tx.menuItem.update({ where: { id: itemId }, data: { available } })
+      return toView(await loadItem(tx, owner.tenantId, itemId))
+    })
+  }
+
+  // kitchen-display/CAP-1 (AD-16): one schema owner - Tenant Admin's menu
+  // editor is the sole writer of item->station routing. stationId undefined
+  // clears the route back to unrouted (see SetStationDto's comment).
+  async setStation(owner: AdminPrincipal, itemId: string, stationId: string | undefined): Promise<ItemView> {
+    const plane = this.registry.planeFor(this.registry.homeRegion())
+    return plane.$transaction(async (tx) => {
+      await setTenantContext(tx, owner.tenantId)
+      await loadItem(tx, owner.tenantId, itemId)
+      if (stationId) {
+        await assertOwnedByTenant(tx, owner.tenantId, [stationId], (id) => tx.station.findUnique({ where: { id } }), 'validation_failed', 'No such station')
+      }
+      await tx.menuItem.update({ where: { id: itemId }, data: { stationId: stationId ?? null } })
       return toView(await loadItem(tx, owner.tenantId, itemId))
     })
   }
