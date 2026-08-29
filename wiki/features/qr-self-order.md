@@ -25,6 +25,10 @@
   through the same transition staff orders use. The placed order appears in
   the POS open-orders list and lands on the KDS as tickets carrying guest
   labels - never a parallel guest-only order model (AD-18).
+- **CAP-6** Order status tracking - a guest polls a server-derived stepper
+  (Placed/Accepted/Preparing/Ready) for one order, or lists every order the
+  table session has placed, each with its own stepper - see "Key decisions"
+  for the honest mapping off the real ticket lifecycle.
 
 ## What's built
 
@@ -181,6 +185,28 @@
     session close). The one piece of `pos/orders`' machinery genuinely
     reused is the kitchen fire hook itself, which has no such dependency.
   - `orders.controller.ts` - `POST /guest/v1/orders` (guest token, no body).
+- **CAP-6 order status tracking** (story 6, issue #81, `src/guest/orders/`,
+  no schema change - pure read off `Order`/`Ticket`):
+  - `orders.service.ts`'s `buildOrderStatusView` is the one place the
+    placed/accepted/preparing/ready mapping lives - see "Key decisions" below
+    for why `accepted` and `preparing` reach at the same instant in this
+    model, and why that is documented rather than papered over with an
+    invented "started cooking" heuristic.
+  - `getOrderStatus(guest, orderId)` - loads the caller's active session
+    (410 `session_closed` if inactive), then the order (404 `not_found` if
+    it doesn't exist, isn't this tenant's, or isn't this session's - the
+    three cases collapse into one response so a guest token can never be
+    used to probe for another table's order ids), reads that order's
+    `Ticket`s, and derives the view.
+  - `listSessionOrders(guest)` - same active-session check, then every
+    `Order` with `sessionId` = the caller's session, each with its own
+    derived view (a table can place more than one order in a session, e.g.
+    a second round after the first is closed - `orders_one_active_per_table`
+    only limits one *open/sent* order per table at a time, not per session).
+  - `orders.controller.ts` (now `@Controller('guest/v1')`, not
+    `guest/v1/orders`, so it can also own the `session/orders` route) -
+    `GET /guest/v1/orders/:orderId/status`, `GET /guest/v1/session/orders`
+    (both guest-token authenticated).
 
 ## Endpoint contracts
 
@@ -224,6 +250,18 @@
 - `CartLineView`: `{ id, guestId, guestName, itemId, itemName, variantId, variantName, quantity, unitPriceMinor, modifiers: [{ id, name, priceMinor }], lineTotalMinor, createdAt }`
   (`unitPriceMinor`/`modifiers[].priceMinor` are resolved live, never
   snapshotted; `lineTotalMinor = (unitPriceMinor + sum(modifiers.priceMinor)) * quantity`).
+- `GET /guest/v1/orders/:orderId/status` (guest token) -> 200
+  `GuestOrderStatusView`; 404 `not_found` (unknown order, another tenant's,
+  or another session's - all three collapse to the same response); 410
+  `session_closed` once the caller's session is closed/settled/idle-expired.
+- `GET /guest/v1/session/orders` (guest token) -> 200
+  `GuestSessionOrdersView`; 410 `session_closed`.
+- `GuestOrderStatusView`: `{ orderId, tableId: string | null, step: GuestOrderStep, steps: GuestOrderStepView[] }`.
+- `GuestSessionOrdersView`: `{ sessionId, orders: GuestOrderStatusView[] }`.
+- `GuestOrderStep`: `'placed' | 'accepted' | 'preparing' | 'ready'`.
+- `GuestOrderStepView`: `{ step: GuestOrderStep, reachedAt: string | null }` -
+  `steps` always lists all four, in order, `reachedAt` null for any not yet
+  reached; `step` is the furthest one reached (what the stepper highlights).
 
 ## Integration points for later stories
 
@@ -336,3 +374,51 @@
   cart that produced it has no further purpose (a guest could, in
   principle, start a fresh cart afterwards for the same still-open session;
   nothing in CAP-4's scope needs to prevent that).
+- **CAP-6's step mapping is deliberately honest about what the real ticket
+  model can and can't distinguish** (story 6, issue #81). The kitchen ticket
+  domain (`src/kitchen`) only tracks `queued -> bumped` - there is no
+  "started cooking" state - so the mapping is:
+  - `placed` - the order exists; reached at `Order.createdAt`. Always
+    reached the moment an order is returned to the guest, since placement
+    (CAP-4) creates the order synchronously.
+  - `accepted` - the kitchen has it; reached once at least one `Ticket` has
+    fired (`fireOnSend`/`fireAddedLine` ran), at the earliest `firedAt`
+    across the order's tickets.
+  - `preparing` - **reaches at the exact same instant as `accepted`** (the
+    same earliest `firedAt`). The ticket model has no independently
+    observable "now actually being cooked" signal separate from "the
+    kitchen has fired it," so a fired ticket IS being prepared in this
+    model - claiming otherwise would require inventing a heuristic (e.g. an
+    elapsed-time guess), which SPEC-qr-self-order's CAP-6 success criterion
+    explicitly forbids ("the stepper never shows a state the ticket data
+    doesn't support"). This was decided over two rejected alternatives: (a)
+    inventing a time-in-queue threshold to fake a "preparing" transition -
+    rejected, it would be product fiction presented as real kitchen state;
+    (b) never reporting `preparing` as reached until `ready` - rejected, it
+    would make the guest-visible stepper regress to only three usable
+    states, which is a worse guest experience than an honestly-documented
+    collapse.
+  - `ready` - reached only once **every** one of the order's tickets is
+    bumped, at the latest `bumpedAt` among them (mirrors CAP-6's own
+    constraint: "Ready = all tickets bumped").
+  - The response's top-level `step` (what the UI highlights as current) is
+    what actually distinguishes `accepted` from `preparing` in practice: it
+    reports `'placed'` with no tickets yet, `'preparing'` once tickets exist
+    but not all are bumped (i.e. strictly further along than merely
+    "accepted"), and `'ready'` once all are bumped - `'accepted'` is
+    reachable as a `steps[]` entry (its `reachedAt`) but is never itself
+    reported as the current `step`, since by the time any ticket exists this
+    model already considers the order "preparing."
+  - Because a guest order is always fired synchronously at placement
+    (CAP-4's `placeOrder` transitions `open -> sent` and fires tickets in
+    the same transaction), a freshly-placed order's very first status read
+    is already `'preparing'`, not `'accepted'` - there is no observable
+    window where a real guest order sits at `'accepted'` only. This is
+    called out explicitly rather than left as a surprising gap: it is a
+    consequence of CAP-4's synchronous-fire design, not a bug in CAP-6's
+    mapping.
+  - `getOrderStatus`/`listSessionOrders` both require the caller's session
+    to be active (410 `session_closed` otherwise) and the order to belong to
+    that same session (never merely the same tenant) - a guest can watch
+    their own table's orders, never another table's, even within the same
+    tenant/outlet.

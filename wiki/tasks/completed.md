@@ -456,3 +456,29 @@
   410, and cross-tenant isolation. See
   [wiki/features/qr-self-order.md](../features/qr-self-order.md). Issue
   AusPosRest/restiq-backend#77.
+- **2026-08-29** - qr-self-order story 6: order status tracking (CAP-6). New
+  `GET /guest/v1/orders/:orderId/status` and `GET /guest/v1/session/orders`
+  (`src/guest/orders/`), pure reads - no schema change. Server-derives a
+  `placed`/`accepted`/`preparing`/`ready` stepper off the real `Order`/
+  `Ticket` rows: `placed` at `Order.createdAt`; `accepted` and `preparing`
+  both reach at the earliest fired `Ticket.firedAt` (the real ticket model
+  has no separate "started cooking" state, so this collapse is documented
+  rather than papered over with an invented time-in-queue heuristic);
+  `ready` only once every one of the order's tickets is bumped, at the
+  latest `bumpedAt`. The top-level `step` reports the furthest reached stage
+  (`'preparing'` once tickets exist but aren't all bumped, `'ready'` once
+  they are) - never a state the ticket data doesn't support, per CAP-6's
+  success criterion. Both endpoints require the caller's session to be
+  active (410 `session_closed`) and the order to belong to that same
+  session, not merely the same tenant (404 `not_found` otherwise, whether
+  the order doesn't exist, belongs to another tenant, or another session -
+  one response for all three). 7 new e2e tests
+  (`test/guest-order-status.e2e-spec.ts`): the full lifecycle walk (placed ->
+  preparing on fire -> still preparing with one of two tickets bumped ->
+  ready once both are, with a real `reachedAt`), the session-orders list
+  across two orders on the same table (closing the first to satisfy
+  `orders_one_active_per_table` before placing the second), another
+  session's order id 404s, a nonexistent order id 404s, a closed session
+  410s both endpoints, no token 401s, and cross-tenant isolation. See
+  [wiki/features/qr-self-order.md](../features/qr-self-order.md) for the
+  full step-mapping write-up. Issue AusPosRest/restiq-backend#81.
