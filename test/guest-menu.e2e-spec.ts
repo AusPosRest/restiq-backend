@@ -22,6 +22,9 @@ interface MenuItemBody {
   categoryId: string
   name: string
   shortName: string
+  photoUrl: string | null
+  nameHindi: string | null
+  vegMarker: string | null
   available: boolean
   priceMinor: number | null
   currency: string | null
@@ -204,6 +207,9 @@ describe('/guest/v1/menu (e2e)', () => {
     expect(butterChicken.available).toBe(true)
     expect(butterChicken.priceMinor).toBe(42000)
     expect(butterChicken.currency).toBe('INR')
+    expect(butterChicken.photoUrl).toBeNull()
+    expect(butterChicken.nameHindi).toBeNull()
+    expect(butterChicken.vegMarker).toBeNull()
     expect(butterChicken.allergens).toEqual([{ id: allergen.id, name: 'Dairy' }])
     expect(butterChicken.modifierGroups).toEqual([
       { id: group.id, name: 'Spice Level', minSelections: 1, maxSelections: 1, modifiers: [{ id: modifier.id, name: 'Extra Hot', priceMinor: 0 }] },
@@ -317,5 +323,41 @@ describe('/guest/v1/menu (e2e)', () => {
     const res = await request(httpServer).get(`/guest/v1/menu/items/${itemB.id}`).set('Authorization', `Bearer ${token}`)
     expect(res.status).toBe(404)
     expect((res.body as ErrorBody).error.code).toBe('not_found')
+  })
+
+  it('projects photoUrl, nameHindi, and vegMarker to the guest menu and single item endpoints', async () => {
+    const tenantId = await createTenant(prisma)
+    const outletId = await createOutlet(prisma, tenantId)
+    const tableId = await createTable(prisma, tenantId, outletId)
+
+    const category = await prisma.menuCategory.create({ data: { tenantId, name: 'Starters', sortOrder: 0 } })
+    const item = await prisma.menuItem.create({
+      data: {
+        tenantId,
+        categoryId: category.id,
+        name: 'Paneer Tikka',
+        shortName: 'PT',
+        photoUrl: 'https://cdn.example.com/paneer.jpg',
+        nameHindi: 'पनीर टिक्का',
+        vegMarker: 'veg',
+      },
+    })
+    await prisma.itemPrice.create({ data: { tenantId, itemId: item.id, priceMinor: 28000n, currency: 'INR', channel: 'qr' } })
+
+    const { token } = guestTokenFor(tenantId, outletId, tableId)
+    const menuRes = await request(httpServer).get('/guest/v1/menu').set('Authorization', `Bearer ${token}`)
+    expect(menuRes.status).toBe(200)
+
+    const guestItem = (menuRes.body as GuestMenuBody).categories[0]?.items.find((i) => i.id === item.id)
+    expect(guestItem?.photoUrl).toBe('https://cdn.example.com/paneer.jpg')
+    expect(guestItem?.nameHindi).toBe('पनीर टिक्का')
+    expect(guestItem?.vegMarker).toBe('veg')
+
+    const itemRes = await request(httpServer).get(`/guest/v1/menu/items/${item.id}`).set('Authorization', `Bearer ${token}`)
+    expect(itemRes.status).toBe(200)
+    const singleItem = itemRes.body as MenuItemBody
+    expect(singleItem.photoUrl).toBe('https://cdn.example.com/paneer.jpg')
+    expect(singleItem.nameHindi).toBe('पनीर टिक्का')
+    expect(singleItem.vegMarker).toBe('veg')
   })
 })

@@ -39,7 +39,11 @@ interface ItemBody {
   categoryId: string
   name: string
   shortName: string
+  photoUrl: string | null
+  nameHindi: string | null
+  vegMarker: string | null
   available: boolean
+  stationId: string | null
   variants: VariantBody[]
   modifierGroups: ModifierGroupBody[]
   allergens: AllergenBody[]
@@ -325,6 +329,64 @@ describe('/admin/v1/menu (e2e)', () => {
       const item = await createItem(owner1.token, category.id)
       const res = await authed(request(httpServer).get(`/admin/v1/menu/items/${item.id}`), owner2.token)
       expect(res.status).toBe(404)
+    })
+
+    it('creates an item with photoUrl, nameHindi, and vegMarker, and reads them back', async () => {
+      const { token } = await createOwner(prisma)
+      const category = await createCategory(token)
+
+      const created = await createItem(token, category.id, {
+        photoUrl: 'https://cdn.example.com/photos/butter-chicken.jpg',
+        nameHindi: 'बटर चिकन',
+        vegMarker: 'non_veg',
+      })
+
+      expect(created.photoUrl).toBe('https://cdn.example.com/photos/butter-chicken.jpg')
+      expect(created.nameHindi).toBe('बटर चिकन')
+      expect(created.vegMarker).toBe('non_veg')
+
+      const res = await authed(request(httpServer).get(`/admin/v1/menu/items/${created.id}`), token)
+      expect(res.status).toBe(200)
+      const fetched = res.body as ItemBody
+      expect(fetched.photoUrl).toBe('https://cdn.example.com/photos/butter-chicken.jpg')
+      expect(fetched.nameHindi).toBe('बटर चिकन')
+      expect(fetched.vegMarker).toBe('non_veg')
+    })
+
+    it('updates photoUrl, nameHindi, and vegMarker via PATCH', async () => {
+      const { token } = await createOwner(prisma)
+      const category = await createCategory(token)
+      const created = await createItem(token, category.id)
+      expect(created.photoUrl).toBeNull()
+      expect(created.nameHindi).toBeNull()
+      expect(created.vegMarker).toBeNull()
+
+      const updated = await authed(request(httpServer).patch(`/admin/v1/menu/items/${created.id}`), token).send({
+        photoUrl: 'https://cdn.example.com/photos/paneer.jpg',
+        nameHindi: 'पनीर बटर मसाला',
+        vegMarker: 'veg',
+      })
+      expect(updated.status).toBe(200)
+      const body = updated.body as ItemBody
+      expect(body.photoUrl).toBe('https://cdn.example.com/photos/paneer.jpg')
+      expect(body.nameHindi).toBe('पनीर बटर मसाला')
+      expect(body.vegMarker).toBe('veg')
+
+      const fetched = await authed(request(httpServer).get(`/admin/v1/menu/items/${created.id}`), token)
+      expect((fetched.body as ItemBody).vegMarker).toBe('veg')
+    })
+
+    it('rejects an invalid vegMarker on create', async () => {
+      const { token } = await createOwner(prisma)
+      const category = await createCategory(token)
+      const res = await authed(request(httpServer).post('/admin/v1/menu/items'), token).send({
+        categoryId: category.id,
+        name: 'Dal',
+        shortName: 'Dal',
+        vegMarker: 'vegan_friendly',
+      })
+      expect(res.status).toBe(400)
+      expect((res.body as ErrorBody).error.code).toBe('validation_failed')
     })
 
     describe('allergen tags CRUD on an item', () => {

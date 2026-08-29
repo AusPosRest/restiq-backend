@@ -1,8 +1,8 @@
-// qr-self-order/CAP-2 (stories.yaml story 2): the guest-readable projection
-// shape. Deliberately mirrors only what the real catalogue (admin/menu)
-// actually models - see menu.service.ts's header comment for the schema
-// gaps (no photo, no bilingual name, no veg/non-veg field) the SPEC wants
-// but the data can't supply yet.
+// qr-self-order/CAP-2 (stories.yaml story 2, issue #78): the guest-readable projection
+// shape. Mirrors the real catalogue (admin/menu) including guest-facing fields:
+// photoUrl, nameHindi, and vegMarker.
+import type { VegMarker } from '../../generated/prisma/client'
+
 export interface MenuModifierView {
   id: string
   name: string
@@ -37,6 +37,9 @@ export interface MenuItemView {
   categoryId: string
   name: string
   shortName: string
+  photoUrl: string | null
+  nameHindi: string | null
+  vegMarker: VegMarker | null
   // Tenant-wide 86 toggle combined with this outlet's override row, if any
   // (CAP-2 success criterion: an 86'd item is included, marked unavailable).
   available: boolean

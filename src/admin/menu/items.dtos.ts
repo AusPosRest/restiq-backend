@@ -1,11 +1,11 @@
 import { Type } from 'class-transformer'
-import { ArrayUnique, IsArray, IsBoolean, IsDateString, IsInt, IsOptional, IsString, IsUUID, Length, Min, MinLength, ValidateNested } from 'class-validator'
-import { IsEnum } from 'class-validator'
-import type { PriceChannel } from '../../generated/prisma/client'
+import { ArrayUnique, IsArray, IsBoolean, IsDateString, IsEnum, IsInt, IsOptional, IsString, IsUUID, Length, MaxLength, Min, MinLength, ValidateNested } from 'class-validator'
+import type { PriceChannel, VegMarker } from '../../generated/prisma/client'
 import { AllergenView } from './allergens.dtos'
 import { ModifierGroupView } from './modifier-groups.dtos'
 
 const PRICE_CHANNELS = ['dine_in', 'takeaway', 'delivery', 'qr', 'aggregator'] as const
+const VEG_MARKERS = ['veg', 'non_veg'] as const
 
 export class CreateVariantDto {
   @IsString() @MinLength(1)
@@ -24,6 +24,15 @@ export class CreateItemDto {
 
   @IsString() @MinLength(1)
   shortName!: string
+
+  @IsOptional() @IsString() @MaxLength(2048)
+  photoUrl?: string
+
+  @IsOptional() @IsString() @MinLength(1)
+  nameHindi?: string
+
+  @IsOptional() @IsEnum(VEG_MARKERS)
+  vegMarker?: VegMarker
 
   @IsOptional() @IsArray() @ValidateNested({ each: true }) @Type(() => CreateVariantDto)
   variants?: CreateVariantDto[]
@@ -50,6 +59,15 @@ export class UpdateItemDto {
 
   @IsOptional() @IsUUID()
   categoryId?: string
+
+  @IsOptional() @IsString() @MaxLength(2048)
+  photoUrl?: string
+
+  @IsOptional() @IsString() @MinLength(1)
+  nameHindi?: string
+
+  @IsOptional() @IsEnum(VEG_MARKERS)
+  vegMarker?: VegMarker
 }
 
 // A separate PATCH than UpdateItemDto (mirrors SetAvailabilityDto's own
@@ -130,6 +148,9 @@ export interface ItemView {
   categoryId: string
   name: string
   shortName: string
+  photoUrl: string | null
+  nameHindi: string | null
+  vegMarker: VegMarker | null
   available: boolean
   stationId: string | null
   variants: VariantView[]
