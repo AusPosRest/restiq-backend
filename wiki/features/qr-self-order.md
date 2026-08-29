@@ -25,6 +25,13 @@
   through the same transition staff orders use. The placed order appears in
   the POS open-orders list and lands on the KDS as tickets carrying guest
   labels - never a parallel guest-only order model (AD-18).
+- **CAP-5** Guest checkout and split payment (simulated) - the table settles
+  as one payment or a per-guest split over a REAL `Bill`/`Tender` (AD-18: one
+  money path, reusing `pos/bills` - never a parallel guest settlement
+  model), through an explicitly demo-marked simulated payment step. A failed
+  simulated payment leaves every other guest's already-paid share intact and
+  only that share outstanding; the bill cannot finalise while any share is
+  outstanding. Completing it settles the table session.
 - **CAP-6** Order status tracking - a guest polls a server-derived stepper
   (Placed/Accepted/Preparing/Ready) for one order, or lists every order the
   table session has placed, each with its own stepper - see "Key decisions"
@@ -185,6 +192,62 @@
     session close). The one piece of `pos/orders`' machinery genuinely
     reused is the kitchen fire hook itself, which has no such dependency.
   - `orders.controller.ts` - `POST /guest/v1/orders` (guest token, no body).
+- **CAP-5 guest checkout and split payment** (story 5, issue #80,
+  `src/guest/bills/`) - `GuestBillsService`/`GuestBillsController`,
+  registered in `GuestModule`:
+  - Bill creation and finalisation reuse `pos/bills`' exact money-path code -
+    extracted, not reimplemented, into `src/pos/bills/bill-core.ts`
+    (framework-free: no `PosPrincipal`, no NestJS decorators) and exposed
+    through a new, narrowly-scoped second barrel, `src/pos/bills/index.ts`
+    (the module's main barrel, `src/pos/index.ts`, still exports only
+    `PosModule`). `guest/bills` imports `createBillRecord`/`commitFinalize`/
+    `createTenderRecord`/`loadBill`/`toBillView` from that barrel as plain
+    functions - not a NestJS-injected `BillsService` - because `PosModule`
+    already imports `GuestModule` (for the staff-side session close), so a
+    real DI reuse would cycle the module graph exactly like CAP-4's order
+    placement already reasoned through for `pos/orders`. `eslint.config.mjs`
+    gained one exception line (`!**/pos/bills`) alongside the existing
+    `!**/pos/index` to let this scoped barrel be imported cross-module.
+    `pos/bills/bills.service.ts` (the staff path) now calls into the same
+    `bill-core.ts` functions itself, so there is exactly one implementation
+    of bill creation and finalisation for both callers.
+  - `POST /guest/v1/orders/:orderId/bill` - creates the Bill
+    (`createdByStaffId: null`, see the schema note below) via
+    `createBillRecord`, then splits its subtotal+tax into one `BillShare` per
+    distinct guest attributed on the order's lines (`OrderLine.guestId`),
+    proportional to each guest's own line total. Amounts sum **exactly** to
+    the bill total - integer division's rounding remainder (if any) is
+    folded entirely into the last guest's share (by line order), never
+    dropped or double-counted.
+  - `GET /guest/v1/orders/:orderId/bill` - the bill plus its live
+    `BillShare` breakdown; any guest in the session may read it (shared-table
+    view, same posture as the cart).
+  - `POST /guest/v1/bills/:id/shares/:guestId/pay` -
+    `{ simulatedOutcome: 'success' | 'failure', payerPhone? }` - the
+    simulated payment step (SPEC's explicit non-goal: no real payment
+    gateway). `success` writes a real `Tender` (`upi_manual`) for exactly
+    that share's amount and marks it paid (`payerPhone`, FR-42, captured
+    here - nullable, no validation theater); `failure` writes **nothing at
+    all** - the share simply stays `outstanding` (UJ-5's invariant: every
+    other guest's already-paid share, and its real `Tender` row, is
+    completely untouched). Once every share reaches paid, the bill finalises
+    itself through `commitFinalize` (same reserve-then-commit gapless
+    numbering `pos/bills`' staff finalize uses) and the table session
+    settles (`status: 'settled'`).
+  - `POST /guest/v1/bills/:id/pay-all` - one-payment mode: the same simulated
+    outcome, but for the bill's full total in a single `Tender`, marking
+    every share paid together. Rejected (`partial_payment_exists`, 409) if
+    any share was already paid individually - a whole-bill choice, not a
+    way to mop up a partial per-share flow.
+  - A share cannot be paid twice (`share_already_paid`, 409); a
+    already-finalised bill rejects every further payment attempt
+    (`already_finalized`, 409); a staff-side session close 410s both bill
+    creation and any payment attempt still in flight
+    (`assertSessionActive`, same `isSessionInactive` convention as every
+    other guest endpoint) - checked only *after* the finalized short-circuit
+    on the payment endpoints, so a session that legitimately reached
+    `'settled'` via this exact bill's own completion is never misreported as
+    an abort.
 - **CAP-6 order status tracking** (story 6, issue #81, `src/guest/orders/`,
   no schema change - pure read off `Order`/`Ticket`):
   - `orders.service.ts`'s `buildOrderStatusView` is the one place the
@@ -250,6 +313,29 @@
 - `CartLineView`: `{ id, guestId, guestName, itemId, itemName, variantId, variantName, quantity, unitPriceMinor, modifiers: [{ id, name, priceMinor }], lineTotalMinor, createdAt }`
   (`unitPriceMinor`/`modifiers[].priceMinor` are resolved live, never
   snapshotted; `lineTotalMinor = (unitPriceMinor + sum(modifiers.priceMinor)) * quantity`).
+- `POST /guest/v1/orders/:orderId/bill` (guest token) -> 201 `GuestBillView`;
+  409 `bill_already_exists`; 409 `conflict` if the order is already closed;
+  410 `session_closed`; 404 `not_found` for an order outside the caller's
+  own session/tenant.
+- `GET /guest/v1/orders/:orderId/bill` (guest token) -> 200 `GuestBillView`;
+  404 `not_found` (no bill yet, or the order isn't the caller's own).
+- `POST /guest/v1/bills/:id/shares/:guestId/pay`
+  `{ simulatedOutcome: 'success' | 'failure', payerPhone? }` (guest token) ->
+  200 `GuestBillView` for both outcomes (a simulated failure is not an HTTP
+  error - it's a valid, demo-marked result); 404 `not_found` (bad bill/share
+  id, or a bill outside the caller's tenant); 409 `share_already_paid`; 409
+  `already_finalized`; 410 `session_closed`.
+- `POST /guest/v1/bills/:id/pay-all` `{ simulatedOutcome, payerPhone? }`
+  (guest token) -> 200 `GuestBillView`; 409 `partial_payment_exists` (a share
+  was already paid individually); 409 `already_finalized`; 410
+  `session_closed`.
+- `GuestBillView`: `BillView` (`pos/bills`' shape - `id, tenantId, outletId,
+  orderId, billNumber, subtotalMinor, taxMinor, discountMinor,
+  discountReason, totalMinor, status, createdByStaffId, createdAt,
+  finalizedByStaffId, finalizedAt, tenders`) **plus** `shares:
+  BillShareView[]`. `createdByStaffId`/`finalizedByStaffId` are always
+  `null` on a guest-checkout bill.
+- `BillShareView`: `{ guestId, guestName, amountMinor, status: 'outstanding' | 'paid', payerPhone, paidAt }`.
 - `GET /guest/v1/orders/:orderId/status` (guest token) -> 200
   `GuestOrderStatusView`; 404 `not_found` (unknown order, another tenant's,
   or another session's - all three collapse to the same response); 410
@@ -275,8 +361,9 @@
   cart's shape needed no reshaping, exactly as planned. Price is
   re-resolved and snapshotted for real at that point (`resolveCurrentPrice`
   read again, same as `pos/orders/order-lines.service.ts` does today).
-- Story 5 (checkout) settles the session (`status: 'settled'`) instead of
-  `closed` - a separate terminal state already modeled.
+- Story 5 (checkout, **done**) settles the session (`status: 'settled'`)
+  exactly when the bill finalises - a separate terminal state from staff's
+  `closed`, already modeled since story 1.
 - Story 3 (shared cart, built concurrently in a sibling worktree/issue) will
   read item/variant/modifier ids and prices off this same `GuestMenuView`
   shape when a guest adds to the cart - no new pricing or availability logic
@@ -374,6 +461,72 @@
   cart that produced it has no further purpose (a guest could, in
   principle, start a fresh cart afterwards for the same still-open session;
   nothing in CAP-4's scope needs to prevent that).
+- **`Bill.createdByStaffId` is now nullable** (story 5, issue #80) - a
+  guest-checkout Bill genuinely has no staff creator, the exact same
+  reasoning that made `Order.ownerId` nullable for story 4. A pos-created
+  Bill still always sets it.
+- **Greenfield `BillShare` table** (migration
+  `20260829080000_guest_checkout_split_payment`) - the per-guest settlement
+  breakdown over a guest-checkout `Bill`. Deliberately *not* a parallel
+  money model: the actual payment is still a real `Tender` row (AD-14); this
+  table only tracks which guest owes what and whether their share is
+  settled. One row per distinct guest on the order, unique on
+  `(billId, guestId)`. `status` is only ever `outstanding` or `paid` - there
+  is no `'failed'` status, because UJ-5's invariant is that a failed
+  simulated payment has **zero** effect on any row: the share simply never
+  leaves `outstanding`. `tenderId` (nullable, `ON DELETE SET NULL`) links a
+  paid share to the `Tender` that settled it - shared by every share when
+  `pay-all`'s single Tender settles them all at once. RLS follows the
+  standard `tenant_isolation`/`operator_read` pattern (AD-5). Every existing
+  e2e spec's `wipe()` helper updated to clear this new table (before
+  `tender.deleteMany()`, since `billShare.billId`/`guestId` are `RESTRICT`
+  FKs).
+- **Bill-creation/finalisation code has exactly one implementation, reused
+  by two callers** (AD-18, generalizing AD-15's "one shared service, not six
+  reimplementations" to a non-staff caller for the first time): the
+  framework-free core (`createBillRecord`, `commitFinalize`,
+  `createTenderRecord`, `loadBill`, `toBillView`, the tax-placeholder
+  constant) now lives in `src/pos/bills/bill-core.ts`, with NO dependency on
+  `PosPrincipal` or any staff-ownership concept. `pos/bills/bills.service.ts`
+  (the staff path: owner-only creation, discount/manager-auth gating on
+  finalise, refunds) and `guest/bills/bills.service.ts` (the guest path: no
+  ownership, no discount, a `BillShare` breakdown, a simulated-payment step)
+  both call into it. A second, narrowly-scoped barrel,
+  `src/pos/bills/index.ts`, exports only this framework-free surface (never
+  `BillsService`/`PosBillsController`) - `guest/bills` imports through it as
+  plain functions, not a NestJS provider, specifically to avoid a DI cycle:
+  `PosModule` already imports `GuestModule` (for the staff-side session
+  close), so `GuestModule` importing a real `PosModule` provider back would
+  cycle the module graph, the same reasoning CAP-4's order placement already
+  worked through for `pos/orders`. `eslint.config.mjs`'s module-boundary
+  rule for `pos` gained one exception (`!**/pos/bills`) alongside the
+  pre-existing `!**/pos/index`.
+- **Per-guest tax allocation is proportional, with the remainder on the last
+  guest** - `BillShare.amountMinor` = that guest's line-total share of the
+  bill's subtotal, plus a proportional slice of `taxMinor`
+  (`lineTotal * taxMinor / subtotalMinor`, integer division). The very last
+  guest (by line order) instead gets `taxMinor` minus whatever was already
+  allocated to everyone else, so the shares always sum to **exactly**
+  `bill.totalMinor` - never short by a rounding cent, never over by one
+  double-counted.
+- **The simulated payment step is a 200, not an HTTP error, for a simulated
+  failure** - `simulatedOutcome: 'failure'` is a valid, expected demo
+  outcome (SPEC's own explicit non-goal: no real payment gateway), not a
+  server error; the response body's `BillShareView.status` staying
+  `'outstanding'` is how the caller learns the simulated payment "failed."
+  Same demo-marked-honesty posture as pos/CAP-11's printer status.
+- **One-payment mode refuses to run over a partially-paid bill** - rejecting
+  `pay-all` once any share is individually `paid` (`partial_payment_exists`,
+  409) keeps the two payment modes from silently mixing into an
+  inconsistent state (e.g. a `pay-all` Tender double-covering an
+  already-paid guest's share); a guest who wants one-payment mode chooses it
+  before any per-share payment begins.
+- **The staff-closed-session 410 check runs only after the
+  already-finalized check** on `payShare`/`payAll` - a session that
+  legitimately reached `'settled'` via this exact bill's own completion (the
+  normal happy path) must never be misreported as an aborted/closed session;
+  only a genuine staff close (or idle expiry) still open at the time of a
+  later payment attempt reaches the 410.
 - **CAP-6's step mapping is deliberately honest about what the real ticket
   model can and can't distinguish** (story 6, issue #81). The kitchen ticket
   domain (`src/kitchen`) only tracks `queued -> bumped` - there is no

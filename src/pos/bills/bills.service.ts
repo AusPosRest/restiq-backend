@@ -5,6 +5,13 @@
 // comment block for the insert-only-past-finalisation and reserve-then-
 // commit numbering invariants this service must uphold.
 //
+// The actual bill-creation/finalisation mechanics live in ./bill-core.ts
+// (framework-free, no PosPrincipal) - qr-self-order/CAP-5 (issue #80)
+// reuses that exact code from guest/bills for guest checkout, through
+// bill-core's own scoped barrel (./index.ts). This file stays the
+// staff-facing shell: owner-only creation, discount/manager-auth gating on
+// finalise, refunds.
+//
 // Split types (SPEC CAP-7: seat/item/N-way/amount/percent): this story
 // implements the backend as "finalise against an arbitrary list of tenders".
 // N-way and amount/percent splits are structurally just multiple Tender rows
@@ -21,8 +28,7 @@
 // MenuCategory and Tenant/TenantTaxRegistration - the latter carries a
 // registration profile string, not a rate). Per this story's brief, a flat
 // placeholder rate is applied instead of inventing a fake per-item tax
-// field: see TAX_RATE_PLACEHOLDER below. A future tax-configuration story
-// owns making this a real, tenant-configurable rate.
+// field: see bill-core.ts's TAX_RATE_PLACEHOLDER_PERCENT.
 //
 // Discount-above-threshold: routes through platform/manager-auth
 // (ManagerAuthService), per stories.yaml's explicit instruction, rather than
@@ -30,69 +36,19 @@
 // concrete default threshold value (still an open question there); this
 // story picks 20% of the bill's subtotal, the example the spec's own memlog
 // floated ("any discount over 20%") - see DISCOUNT_THRESHOLD_FRACTION.
-import { BadRequestException, ConflictException, Injectable, NotFoundException } from '@nestjs/common'
-import type { Prisma } from '../../generated/prisma/client'
+import { BadRequestException, ConflictException, Injectable } from '@nestjs/common'
 import { ManagerApproval, ManagerAuthService, PosPrincipal, RegionRegistryService, uuidv7 } from '../../platform'
 import { setTenantContext } from '../tenant-context'
 import { assertOwner, loadOrder } from '../orders/orders.service'
-import { FinalizeBillDto, BillView, CreditNoteLineView, CreditNoteView, RefundBillDto, TenderView } from './bills.dtos'
-
-type Tx = Prisma.TransactionClient
-
-// TODO(tax-configuration story): replace with a real per-tenant/per-item tax
-// rate once one exists anywhere in the schema. 5% is a documented, flat
-// placeholder - not a real GST/VAT figure for any jurisdiction - chosen only
-// so bills carry a non-zero, deterministic tax breakdown until that story
-// lands. Exported (not module-private) so pos/CAP-9's refund() below reverses
-// tax at this exact rate rather than re-deriving or re-guessing one.
-export const TAX_RATE_PLACEHOLDER_PERCENT = 5n
+import { commitFinalize, createBillRecord, createTenderRecord, isUniqueViolation, loadBill, TAX_RATE_PLACEHOLDER_PERCENT, toBillView } from './bill-core'
+import { BillView, CreditNoteLineView, CreditNoteView, FinalizeBillDto, RefundBillDto } from './bills.dtos'
+import type { Prisma } from '../../generated/prisma/client'
 
 // SPEC.md's Assumptions section defers the actual discount-above-threshold
 // value to "a sane default...pending a real settings field" - this story's
 // memlog names "any discount over 20%" as that default. TODO(tenant
 // settings story): make this a real per-tenant configurable value.
 const DISCOUNT_THRESHOLD_PERCENT = 20n
-
-function isUniqueViolation(error: unknown): boolean {
-  return typeof error === 'object' && error !== null && (error as { code?: unknown }).code === 'P2002'
-}
-
-const BILL_INCLUDE = { tenders: { orderBy: { createdAt: 'asc' as const } } } satisfies Prisma.BillInclude
-type BillWithTenders = Prisma.BillGetPayload<{ include: typeof BILL_INCLUDE }>
-
-function toTenderView(t: BillWithTenders['tenders'][number]): TenderView {
-  return { id: t.id, method: t.method, amountMinor: Number(t.amountMinor), createdAt: t.createdAt.toISOString() }
-}
-
-function toBillView(bill: BillWithTenders): BillView {
-  const discountMinor = bill.discountMinor ?? 0n
-  return {
-    id: bill.id,
-    tenantId: bill.tenantId,
-    outletId: bill.outletId,
-    orderId: bill.orderId,
-    billNumber: bill.billNumber,
-    subtotalMinor: Number(bill.subtotalMinor),
-    taxMinor: Number(bill.taxMinor),
-    discountMinor: bill.discountMinor === null ? null : Number(bill.discountMinor),
-    discountReason: bill.discountReason,
-    totalMinor: Number(bill.subtotalMinor + bill.taxMinor - discountMinor),
-    status: bill.status,
-    createdByStaffId: bill.createdByStaffId,
-    createdAt: bill.createdAt.toISOString(),
-    finalizedByStaffId: bill.finalizedByStaffId,
-    finalizedAt: bill.finalizedAt?.toISOString() ?? null,
-    tenders: bill.tenders.map(toTenderView),
-  }
-}
-
-async function loadBill(tx: Tx, tenantId: string, billId: string): Promise<BillWithTenders> {
-  const bill = await tx.bill.findUnique({ where: { id: billId }, include: BILL_INCLUDE })
-  if (!bill || bill.tenantId !== tenantId) {
-    throw new NotFoundException({ code: 'not_found', message: 'No such bill' })
-  }
-  return bill
-}
 
 const CREDIT_NOTE_INCLUDE = { lines: { orderBy: { id: 'asc' as const } } } satisfies Prisma.CreditNoteInclude
 type CreditNoteWithLines = Prisma.CreditNoteGetPayload<{ include: typeof CREDIT_NOTE_INCLUDE }>
@@ -117,17 +73,6 @@ function toCreditNoteView(note: CreditNoteWithLines): CreditNoteView {
   }
 }
 
-/** Sums a bill's snapshotted lines (unit price + selected modifiers, times quantity) into subtotalMinor. */
-async function computeSubtotal(tx: Tx, orderId: string): Promise<bigint> {
-  const lines = await tx.orderLine.findMany({ where: { orderId }, include: { modifiers: true } })
-  let subtotal = 0n
-  for (const line of lines) {
-    const modifiersTotal = line.modifiers.reduce((sum, m) => sum + m.priceMinor, 0n)
-    subtotal += BigInt(line.quantity) * (line.unitPriceMinor + modifiersTotal)
-  }
-  return subtotal
-}
-
 @Injectable()
 export class BillsService {
   constructor(
@@ -145,10 +90,7 @@ export class BillsService {
    * already be closed: "sent" is the usual dine-in path (fired to the
    * kitchen already), but "open" is accepted too so a future QSR/counter
    * flow (pos/CAP-6, which the architecture map composes directly over this
-   * module) can bill an order that never needed a kitchen-fire step. Only
-   * one Bill may ever exist per order (schema-enforced, unique orderId) -
-   * recomputing an open Bill after further order edits is out of scope for
-   * this story; a second create attempt is rejected, not merged.
+   * module) can bill an order that never needed a kitchen-fire step.
    */
   async createBill(staff: PosPrincipal, orderId: string): Promise<BillView> {
     const plane = this.plane()
@@ -162,25 +104,11 @@ export class BillsService {
           throw new ConflictException({ code: 'conflict', message: 'This order is already closed' })
         }
 
-        const existing = await tx.bill.findUnique({ where: { orderId } })
-        if (existing) {
-          throw new ConflictException({ code: 'bill_already_exists', message: 'A bill already exists for this order' })
-        }
-
-        const subtotalMinor = await computeSubtotal(tx, orderId)
-        const taxMinor = (subtotalMinor * TAX_RATE_PLACEHOLDER_PERCENT) / 100n
-
-        const bill = await tx.bill.create({
-          data: {
-            id: uuidv7(),
-            tenantId: staff.tenantId,
-            outletId: order.outletId,
-            orderId,
-            subtotalMinor,
-            taxMinor,
-            createdByStaffId: staff.id,
-          },
-          include: BILL_INCLUDE,
+        const bill = await createBillRecord(tx, {
+          tenantId: staff.tenantId,
+          outletId: order.outletId,
+          orderId,
+          createdByStaffId: staff.id,
         })
         return toBillView(bill)
       })
@@ -204,10 +132,10 @@ export class BillsService {
   /**
    * Validates discount/tender inputs, routes a discount above
    * DISCOUNT_THRESHOLD_PERCENT through platform/manager-auth (AD-15),
-   * reserves the next gapless bill number, and writes everything (Bill,
-   * Tenders, the manager-auth audit row, and the Order's closed status) in
-   * one transaction. Not owner-only, unlike createBill: a cashier settling
-   * at a register is frequently not the waiter who owns the order, and
+   * writes the tenders, then hands off to bill-core's commitFinalize for the
+   * reserve-then-commit numbering and the CAS status flip - all in one
+   * transaction. Not owner-only, unlike createBill: a cashier settling at a
+   * register is frequently not the waiter who owns the order, and
    * SPEC-CAP-7 names no ownership restriction for this step.
    */
   async finalize(staff: PosPrincipal, billId: string, dto: FinalizeBillDto): Promise<BillView> {
@@ -237,62 +165,22 @@ export class BillsService {
         }
       }
 
-      const totalMinor = bill.subtotalMinor + bill.taxMinor - (discountMinor ?? 0n)
-      const tenderTotal = dto.tenders.reduce((sum, t) => sum + BigInt(t.amountMinor), 0n)
-      if (tenderTotal !== totalMinor) {
-        throw new BadRequestException({
-          code: 'tender_mismatch',
-          message: `Tenders sum to ${tenderTotal} but the bill total is ${totalMinor}`,
-        })
-      }
-
-      // Reserve-then-commit (AD-14): the counter is touched only now, after
-      // every validation above has already passed, and only inside this same
-      // transaction - a validation failure earlier never reserves a number,
-      // and if anything below still fails, the whole transaction (counter
-      // increment included) rolls back with it. Either way, no gap.
-      const counter = await tx.billNumberCounter.upsert({
-        where: { outletId: bill.outletId },
-        create: { id: uuidv7(), tenantId: staff.tenantId, outletId: bill.outletId, lastNumber: 1 },
-        update: { lastNumber: { increment: 1 } },
-      })
-
-      // Compare-and-swap on status, not a plain update-by-id: if a concurrent
-      // request already finalised this bill between the read above and here,
-      // this affects zero rows instead of silently double-finalising it.
-      const updated = await tx.bill.updateMany({
-        where: { id: billId, status: 'open' },
-        data: {
-          billNumber: counter.lastNumber,
-          discountMinor,
-          discountReason,
-          status: 'finalized',
-          finalizedByStaffId: staff.id,
-          finalizedAt: new Date(),
-        },
-      })
-      if (updated.count === 0) {
-        throw new ConflictException({ code: 'already_finalized', message: 'This bill has already been finalised' })
-      }
-
       for (const tender of dto.tenders) {
-        await tx.tender.create({
-          data: { id: uuidv7(), tenantId: staff.tenantId, billId, method: tender.method, amountMinor: BigInt(tender.amountMinor) },
-        })
+        await createTenderRecord(tx, { tenantId: staff.tenantId, billId, method: tender.method, amountMinor: BigInt(tender.amountMinor) })
       }
 
-      // pos/CAP-2's comment on Order.status calls this out explicitly:
-      // "closed" was a placeholder ahead of this exact story - finalising a
-      // Bill is what actually closes the order, written directly (not
-      // through orders.service.ts's FORWARD_TRANSITIONS-checked updateStatus)
-      // since that guard is for staff-driven transitions, not this one.
-      await tx.order.update({ where: { id: bill.orderId }, data: { status: 'closed' } })
+      const final = await commitFinalize(tx, {
+        tenantId: staff.tenantId,
+        bill,
+        discountMinor,
+        discountReason,
+        finalizedByStaffId: staff.id,
+      })
 
       if (approval) {
         await this.managerAuth.recordApproval(tx, approval, { actorId: staff.id, actorEmail: staff.name, occurredAt: new Date() })
       }
 
-      const final = await loadBill(tx, staff.tenantId, billId)
       return toBillView(final)
     })
   }
@@ -353,8 +241,8 @@ export class BillsService {
           })
         }
 
-        // Same per-unit figure computeSubtotal() above folds into a Bill's
-        // subtotal: unit price plus every selected modifier's price.
+        // Same per-unit figure bill-core's computeSubtotal() folds into a
+        // Bill's subtotal: unit price plus every selected modifier's price.
         const modifiersTotal = line.modifiers.reduce((sum, m) => sum + m.priceMinor, 0n)
         const unitPriceMinor = line.unitPriceMinor + modifiersTotal
         const amountMinor = unitPriceMinor * BigInt(target.quantity)
@@ -364,7 +252,7 @@ export class BillsService {
 
       // Correct tax reversal (CAP-9): the original bill's tax was
       // subtotal * TAX_RATE_PLACEHOLDER_PERCENT, computed independently of
-      // any discount (bills.service.ts's createBill()) - reversing the
+      // any discount (bill-core's createBillRecord) - reversing the
       // refunded subtotal at that exact same rate is therefore the correct
       // inverse, not a re-guessed figure.
       const taxMinor = (subtotalMinor * TAX_RATE_PLACEHOLDER_PERCENT) / 100n

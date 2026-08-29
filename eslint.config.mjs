@@ -43,8 +43,13 @@ export default tseslint.config(
               message: 'Import the admin module through its barrel (src/admin)',
             },
             {
-              group: ['**/pos/*', '!**/pos/index'],
-              message: 'Import the pos module through its barrel (src/pos)',
+              // pos/bills has its own scoped barrel (src/pos/bills/index.ts)
+              // exporting only the framework-free bill-creation/finalisation
+              // core - qr-self-order/CAP-5 (guest/bills) imports through it
+              // to reuse the real Bill/Tender money path (AD-18) without a
+              // NestJS module cycle (PosModule already imports GuestModule).
+              group: ['**/pos/*', '!**/pos/index', '!**/pos/bills'],
+              message: 'Import the pos module through its barrel (src/pos), or pos/bills through its own scoped barrel (src/pos/bills)',
             },
             {
               group: ['**/guest/*', '!**/guest/index'],

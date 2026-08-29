@@ -456,6 +456,47 @@
   410, and cross-tenant isolation. See
   [wiki/features/qr-self-order.md](../features/qr-self-order.md). Issue
   AusPosRest/restiq-backend#77.
+- **2026-08-29** - qr-self-order story 5: guest checkout and split payment,
+  simulated (CAP-5), the last money-path story of the build. New
+  `src/guest/bills/` (`GuestBillsService`/`GuestBillsController`):
+  `POST /guest/v1/orders/:orderId/bill` (creates the REAL Bill and splits it
+  into one `BillShare` per distinct guest, proportional to their own
+  `OrderLine` attribution, summing exactly to the total), `GET .../bill`
+  (bill + live share breakdown), `POST /guest/v1/bills/:id/shares/:guestId/pay`
+  `{ simulatedOutcome: 'success' | 'failure', payerPhone? }` (the
+  demo-marked simulated payment step - a failure writes nothing at all, so
+  UJ-5's invariant holds structurally: every other guest's paid share is
+  untouched and only the failed one stays outstanding), and
+  `POST /guest/v1/bills/:id/pay-all` (one-payment mode, one Tender for the
+  total). The bill finalises itself - same gapless reserve-then-commit
+  numbering pos/bills' staff finalize uses - exactly when the last
+  outstanding share is paid, and the table session settles
+  (`status: 'settled'`) in the same transaction. Bill creation/finalisation
+  is ONE implementation, not two: extracted into framework-free
+  `src/pos/bills/bill-core.ts` and exposed through a second, narrowly-scoped
+  barrel (`src/pos/bills/index.ts`, exporting only that core - never
+  `BillsService`); both the staff path (`pos/bills/bills.service.ts`,
+  refactored to call the same functions) and the guest path call into it, as
+  plain functions rather than a NestJS-injected provider, specifically to
+  avoid the `pos`<->`guest` module DI cycle CAP-4's placement story already
+  reasoned through. `eslint.config.mjs` gained one boundary exception
+  (`!**/pos/bills`) for this scoped barrel. Schema: `Bill.createdByStaffId`
+  became nullable (a guest bill has no staff creator, same posture as
+  `Order.ownerId`'s story-4 change), and a new greenfield `BillShare` table
+  (migration `20260829080000_guest_checkout_split_payment`) tracks the
+  per-guest breakdown - deliberately no `'failed'` status, since a failed
+  simulated payment has zero effect on any row. 9 new e2e tests
+  (`test/guest-checkout.e2e-spec.ts`): the UJ-5 five-guest scenario end to
+  end (four successes, one simulated failure leaving exactly that share
+  outstanding with the other four Tenders intact, a rejected double-pay, a
+  successful retry that finalises the bill/closes the order/settles the
+  session with a gapless bill number), one-payment mode (success, simulated
+  failure, and refusing to run over a bill with a share already paid
+  individually), a staff close 410ing bill creation, missing-token 401s, and
+  cross-tenant isolation. Every existing e2e spec's `wipe()` helper updated
+  for the new `bill_shares` table. See
+  [wiki/features/qr-self-order.md](../features/qr-self-order.md). Issue
+  AusPosRest/restiq-backend#80.
 - **2026-08-29** - qr-self-order story 6: order status tracking (CAP-6). New
   `GET /guest/v1/orders/:orderId/status` and `GET /guest/v1/session/orders`
   (`src/guest/orders/`), pure reads - no schema change. Server-derives a

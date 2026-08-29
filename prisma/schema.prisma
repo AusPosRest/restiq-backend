@@ -164,6 +164,7 @@ model Tenant {
   cashMovements       CashMovement[]
   bills               Bill[]
   tenders             Tender[]
+  billShares          BillShare[]
   billNumberCounters  BillNumberCounter[]
   creditNotes         CreditNote[]
   creditNoteLines     CreditNoteLine[]
@@ -865,6 +866,9 @@ model Guest {
   // qr-self-order/CAP-4 (issue #77): the real OrderLine rows created from
   // this guest's CartLines at placement - see OrderLine.guestId.
   orderLines OrderLine[]
+  // qr-self-order/CAP-5 (issue #80): this guest's per-share settlement row on
+  // whichever Bill was raised for their table's order - see BillShare below.
+  billShares BillShare[]
 
   @@index([tenantId])
   @@index([sessionId])
@@ -1420,18 +1424,28 @@ model Bill {
   discountMinor      BigInt?    @map("discount_minor")
   discountReason     String?    @map("discount_reason")
   status             BillStatus @default(open)
-  createdByStaffId   String     @map("created_by_staff_id") @db.Uuid
+  // qr-self-order/CAP-5 (issue #80): nullable as of this story - a
+  // guest-checkout Bill (src/guest/bills) has no staff creator, same posture
+  // as Order.ownerId going nullable for a guest-placed order (issue #77). A
+  // pos-created Bill still always sets this (pos/bills's createBill).
+  createdByStaffId   String?    @map("created_by_staff_id") @db.Uuid
   createdAt          DateTime   @default(now()) @map("created_at") @db.Timestamptz(6)
   finalizedByStaffId String?    @map("finalized_by_staff_id") @db.Uuid
   finalizedAt        DateTime?  @map("finalized_at") @db.Timestamptz(6)
 
-  tenant           Tenant     @relation(fields: [tenantId], references: [id])
-  outlet           Outlet     @relation(fields: [outletId], references: [id])
-  order            Order      @relation(fields: [orderId], references: [id])
-  createdByStaff   StaffUser  @relation("BillCreatedBy", fields: [createdByStaffId], references: [id])
-  finalizedByStaff StaffUser? @relation("BillFinalizedBy", fields: [finalizedByStaffId], references: [id])
+  tenant           Tenant       @relation(fields: [tenantId], references: [id])
+  outlet           Outlet       @relation(fields: [outletId], references: [id])
+  order            Order        @relation(fields: [orderId], references: [id])
+  createdByStaff   StaffUser?   @relation("BillCreatedBy", fields: [createdByStaffId], references: [id])
+  finalizedByStaff StaffUser?   @relation("BillFinalizedBy", fields: [finalizedByStaffId], references: [id])
   tenders          Tender[]
   creditNotes      CreditNote[]
+  // qr-self-order/CAP-5 (issue #80): per-guest settlement breakdown - present
+  // only for a guest-checkout Bill (src/guest/bills computes one BillShare
+  // per distinct guest on the order at bill-creation time); empty for a
+  // pos-created Bill, which settles as a single Tender list with no
+  // per-guest split. See BillShare below.
+  shares           BillShare[]
 
   // Gapless numbering's uniqueness guarantee. A plain (non-partial) unique
   // index is enough here - Postgres treats every NULL as distinct from every
@@ -1461,12 +1475,68 @@ model Tender {
   amountMinor BigInt       @map("amount_minor")
   createdAt   DateTime     @default(now()) @map("created_at") @db.Timestamptz(6)
 
-  tenant Tenant @relation(fields: [tenantId], references: [id])
-  bill   Bill   @relation(fields: [billId], references: [id])
+  tenant Tenant      @relation(fields: [tenantId], references: [id])
+  bill   Bill        @relation(fields: [billId], references: [id])
+  // qr-self-order/CAP-5 (issue #80): the BillShare(s) this Tender settles -
+  // one for a per-guest share payment, or every outstanding share at once for
+  // the one-payment ("pay-all") mode. Empty for every pos-created Tender.
+  shares BillShare[]
 
   @@index([tenantId])
   @@index([billId])
   @@map("tenders")
+}
+
+enum BillShareStatus {
+  outstanding
+  paid
+}
+
+// qr-self-order/CAP-5 (issue #80, AD-18): the per-guest settlement breakdown
+// over a guest-checkout Bill - greenfield, but NOT a parallel money model:
+// the actual payment is still a real Tender row (AD-14's one money path),
+// this table only tracks which guest owes what and whether their share has
+// been settled yet. One row per distinct guest on the order, computed once
+// at bill-creation time (src/guest/bills) by splitting the Bill's
+// subtotal+tax across guests in proportion to their own OrderLine
+// attribution (OrderLine.guestId) - amounts sum exactly to the Bill's total
+// (any rounding remainder lands on one guest, never dropped or duplicated).
+//
+// UJ-5's failed-split invariant (SPEC CAP-5's acceptance narrative) is why
+// a failed simulated payment writes nothing here at all: this row simply
+// stays `outstanding` - there is no "failed" status to model, because a
+// failure has zero effect on any row, guest or Bill, until a retry succeeds.
+// A successful pay writes payerPhone (FR-42: phone captured at payment only)
+// and links the Tender it created; `tenderId` is shared by every share
+// settled by the same one-payment ("pay-all") Tender.
+model BillShare {
+  id          String          @id @default(uuid(7)) @db.Uuid
+  tenantId    String          @map("tenant_id") @db.Uuid
+  billId      String          @map("bill_id") @db.Uuid
+  guestId     String          @map("guest_id") @db.Uuid
+  // Snapshot of Guest.name at bill-creation time - same posture as
+  // OrderLine.guestName and CartLine.guestName (never re-read from Guest,
+  // which currently never changes anyway).
+  guestName   String          @map("guest_name")
+  amountMinor BigInt          @map("amount_minor")
+  status      BillShareStatus @default(outstanding)
+  payerPhone  String?         @map("payer_phone")
+  tenderId    String?         @map("tender_id") @db.Uuid
+  paidAt      DateTime?       @map("paid_at") @db.Timestamptz(6)
+  createdAt   DateTime        @default(now()) @map("created_at") @db.Timestamptz(6)
+
+  tenant Tenant  @relation(fields: [tenantId], references: [id])
+  bill   Bill    @relation(fields: [billId], references: [id])
+  guest  Guest   @relation(fields: [guestId], references: [id])
+  tender Tender? @relation(fields: [tenderId], references: [id])
+
+  // One share per guest per bill - a guest cannot appear twice on the same
+  // bill's breakdown.
+  @@unique([billId, guestId])
+  @@index([tenantId])
+  @@index([billId])
+  @@index([guestId])
+  @@map("bill_shares")
 }
 
 // The reserve-then-commit counter AD-14 calls for: one row per outlet,
