@@ -20,12 +20,12 @@
 // injected the same way pos/orders does.
 import { BadRequestException, GoneException, Injectable, NotFoundException } from '@nestjs/common'
 import { resolveCurrentPrice } from '../../admin'
-import type { Prisma, PriceChannel, TableSession } from '../../generated/prisma/client'
+import type { Order, Prisma, PriceChannel, TableSession, Ticket } from '../../generated/prisma/client'
 import { KitchenTicketsService } from '../../kitchen'
 import { GuestPrincipal, RegionRegistryService } from '../../platform'
 import { isSessionInactive } from '../sessions/sessions.service'
 import { setTenantContext } from '../tenant-context'
-import { PlacedOrderLineModifierView, PlacedOrderLineView, PlacedOrderView } from './orders.dtos'
+import { GuestOrderStatusView, GuestOrderStep, GuestOrderStepView, GuestSessionOrdersView, PlacedOrderLineModifierView, PlacedOrderLineView, PlacedOrderView } from './orders.dtos'
 
 type Tx = Prisma.TransactionClient
 
@@ -54,6 +54,61 @@ async function loadActiveSession(tx: Tx, guest: GuestPrincipal): Promise<TableSe
     throw new GoneException({ code: 'session_closed', message: 'This table session has ended' })
   }
   return session
+}
+
+async function loadOrderInSession(tx: Tx, guest: GuestPrincipal, session: TableSession, orderId: string): Promise<Order> {
+  const order = await tx.order.findUnique({ where: { id: orderId } })
+  // Not this tenant's order, or not this session's order (a guest can only
+  // watch orders from the table session their token belongs to - CAP-6
+  // issue #81's realm/session isolation) - both collapse to a plain 404, same
+  // "never reveal what exists" posture as loadActiveSession above.
+  if (!order || order.tenantId !== guest.tenantId || order.sessionId !== session.id) {
+    throw new NotFoundException({ code: 'not_found', message: 'No such order' })
+  }
+  return order
+}
+
+// qr-self-order/CAP-6 (issue #81): the honest placed/accepted/preparing/ready
+// mapping off the REAL ticket model - kitchen/tickets.service.ts's Ticket has
+// only queued->bumped, no "started"/"in progress" state (see SPEC-qr-
+// self-order's constraint: "Accepted/Preparing = tickets queued; Ready = all
+// tickets bumped").
+//
+//  - placed:    the order exists - reached the instant it was created.
+//  - accepted:  the kitchen has it - reached once at least one ticket has
+//               fired (fireOnSend/fireAddedLine ran), at the earliest
+//               firedAt across the order's tickets.
+//  - preparing: the ticket model has no separate "started cooking" state, so
+//               a fired ticket IS being prepared here - 'accepted' and
+//               'preparing' reach at the same instant (the same earliest
+//               firedAt). They are never claimed as independently observable
+//               - see wiki/features/qr-self-order.md for the write-up of
+//               this deliberate collapse.
+//  - ready:     reached only once EVERY one of the order's tickets is
+//               bumped, at the latest bumpedAt among them.
+//
+// `step` (the stepper's current highlighted stage) reports the FURTHEST
+// reached step: 'placed' with no tickets yet, 'preparing' once tickets exist
+// but not all are bumped (this is what makes 'preparing' distinguishable
+// from 'accepted' in the UI, despite sharing a reachedAt), 'ready' once all
+// are bumped. The stepper never claims a step the ticket data doesn't
+// support (SPEC CAP-6 success criterion).
+function buildOrderStatusView(order: Pick<Order, 'id' | 'tableId' | 'createdAt'>, tickets: Pick<Ticket, 'status' | 'firedAt' | 'bumpedAt'>[]): GuestOrderStatusView {
+  const hasTickets = tickets.length > 0
+  const allBumped = hasTickets && tickets.every((t) => t.status === 'bumped')
+  const acceptedAt = hasTickets ? new Date(Math.min(...tickets.map((t) => t.firedAt.getTime()))).toISOString() : null
+  const readyAt = allBumped ? new Date(Math.max(...tickets.map((t) => t.bumpedAt!.getTime()))).toISOString() : null
+
+  const step: GuestOrderStep = !hasTickets ? 'placed' : allBumped ? 'ready' : 'preparing'
+
+  const steps: GuestOrderStepView[] = [
+    { step: 'placed', reachedAt: order.createdAt.toISOString() },
+    { step: 'accepted', reachedAt: acceptedAt },
+    { step: 'preparing', reachedAt: acceptedAt },
+    { step: 'ready', reachedAt: readyAt },
+  ]
+
+  return { orderId: order.id, tableId: order.tableId, step, steps }
 }
 
 @Injectable()
@@ -190,6 +245,35 @@ export class GuestOrdersService {
         sessionId: session.id,
         lines: lineViews,
       }
+    })
+  }
+
+  /** CAP-6 (issue #81): the one order's status stepper - see buildOrderStatusView for the mapping. */
+  async getOrderStatus(guest: GuestPrincipal, orderId: string): Promise<GuestOrderStatusView> {
+    const plane = this.plane()
+    return plane.$transaction(async (tx) => {
+      await setTenantContext(tx, guest.tenantId)
+      const session = await loadActiveSession(tx, guest)
+      const order = await loadOrderInSession(tx, guest, session, orderId)
+      const tickets = await tx.ticket.findMany({ where: { tenantId: guest.tenantId, orderId: order.id } })
+      return buildOrderStatusView(order, tickets)
+    })
+  }
+
+  /** CAP-6 (issue #81): every order the table's session has placed, each with its status stepper, so the status page can show all of them. */
+  async listSessionOrders(guest: GuestPrincipal): Promise<GuestSessionOrdersView> {
+    const plane = this.plane()
+    return plane.$transaction(async (tx) => {
+      await setTenantContext(tx, guest.tenantId)
+      const session = await loadActiveSession(tx, guest)
+      const orders = await tx.order.findMany({ where: { tenantId: guest.tenantId, sessionId: session.id }, orderBy: { createdAt: 'asc' } })
+      const views = await Promise.all(
+        orders.map(async (order) => {
+          const tickets = await tx.ticket.findMany({ where: { tenantId: guest.tenantId, orderId: order.id } })
+          return buildOrderStatusView(order, tickets)
+        }),
+      )
+      return { sessionId: session.id, orders: views }
     })
   }
 }
