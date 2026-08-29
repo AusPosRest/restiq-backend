@@ -6,6 +6,7 @@
 // separate transfer action reassigns ownership explicitly (never silently).
 import { BadRequestException, ConflictException, ForbiddenException, Injectable, NotFoundException } from '@nestjs/common'
 import type { Order, Prisma } from '../../generated/prisma/client'
+import { KitchenTicketsService } from '../../kitchen'
 import { PosPrincipal, RegionRegistryService, uuidv7 } from '../../platform'
 import { OrderLineView, OrderView, TableMapEntry, TransferOrderDto, UpdateOrderStatusDto } from './orders.dtos'
 
@@ -128,7 +129,10 @@ async function assertAllLinesSeated(tx: Tx, orderId: string): Promise<void> {
 
 @Injectable()
 export class OrdersService {
-  constructor(private readonly registry: RegionRegistryService) {}
+  constructor(
+    private readonly registry: RegionRegistryService,
+    private readonly tickets: KitchenTicketsService,
+  ) {}
 
   private plane() {
     return this.registry.planeFor(this.registry.homeRegion())
@@ -291,6 +295,15 @@ export class OrdersService {
       }
 
       const updated = await tx.order.update({ where: { id: orderId }, data: { status: dto.status } })
+
+      // kitchen-display/CAP-1 (AD-16, issue #67): fire the order's tickets in
+      // the SAME transaction as this status flip, replacing what used to be
+      // an acknowledged stub - a real kitchen consumer now exists on the
+      // other side of "sent".
+      if (dto.status === 'sent') {
+        await this.tickets.fireOnSend(tx, updated)
+      }
+
       return buildOrderView(tx, updated)
     })
   }

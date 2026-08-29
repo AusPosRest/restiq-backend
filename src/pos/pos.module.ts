@@ -1,5 +1,6 @@
 import { Module } from '@nestjs/common'
 import { GuestModule } from '../guest'
+import { KitchenModule } from '../kitchen'
 import { PlatformModule } from '../platform'
 import { PosAttendanceController } from './clock/attendance.controller'
 import { AttendanceService } from './clock/attendance.service'
@@ -17,7 +18,7 @@ import { ShiftsService } from './shifts/shifts.service'
 import { PosTablesController } from './tables/tables.controller'
 
 @Module({
-  imports: [PlatformModule, GuestModule],
+  imports: [PlatformModule, GuestModule, KitchenModule],
   controllers: [
     PosAuthController,
     PosClockController,

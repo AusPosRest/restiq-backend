@@ -17,6 +17,7 @@
 import { BadRequestException, ConflictException, Injectable, NotFoundException } from '@nestjs/common'
 import { resolveCurrentPrice } from '../../admin'
 import type { Order, PriceChannel, Prisma } from '../../generated/prisma/client'
+import { KitchenTicketsService } from '../../kitchen'
 import { PosPrincipal, RegionRegistryService } from '../../platform'
 import { setTenantContext } from '../tenant-context'
 import { AddOrderLineDto, OrderView, UpdateOrderLineDto } from './orders.dtos'
@@ -114,7 +115,10 @@ async function loadOrderLine(tx: Tx, tenantId: string, orderId: string, lineId: 
 
 @Injectable()
 export class OrderLinesService {
-  constructor(private readonly registry: RegionRegistryService) {}
+  constructor(
+    private readonly registry: RegionRegistryService,
+    private readonly tickets: KitchenTicketsService,
+  ) {}
 
   private plane() {
     return this.registry.planeFor(this.registry.homeRegion())
@@ -161,6 +165,15 @@ export class OrderLinesService {
         await tx.orderLineModifier.create({
           data: { tenantId: staff.tenantId, orderLineId: line.id, modifierId, priceMinor: modifierPrices.get(modifierId) ?? 0n },
         })
+      }
+
+      // kitchen-display/CAP-1 (AD-16, issue #67): a line added to an order
+      // that's already "sent" needs to land on the kitchen the same way the
+      // rest of the order did at fire time - lines added while still "open"
+      // are covered later, in one pass, by fireOnSend at the open->sent
+      // transition (orders.service.ts's updateStatus).
+      if (order.status === 'sent') {
+        await this.tickets.fireAddedLine(tx, order, { id: line.id, quantity: line.quantity, item: { stationId: item.stationId } })
       }
 
       return buildOrderView(tx, order)

@@ -354,3 +354,31 @@
   (`src/guest/sessions/join-lockout.spec.ts`). See
   [wiki/features/qr-self-order.md](../features/qr-self-order.md). Issue
   AusPosRest/restiq-backend#68.
+- **2026-08-29** - Kitchen Display story 1: ticket domain, item-station
+  routing, and fire-on-send (CAP-1, the KDS surface's keystone story - every
+  other KDS screen story and two QR self-order stories consume this API).
+  Nullable `menu_items.station_id` (additive, `PATCH
+  /admin/v1/menu/items/:itemId/station`, one schema owner). Greenfield
+  `Ticket`/`TicketLine`/`TicketEvent` tables (insert-only past bump, RLS per
+  AD-5). The `open -> sent` transition
+  (`pos/orders/orders.service.ts#updateStatus`) now fires real tickets in
+  the same transaction, grouped per resolved station (unrouted items fall
+  back to the outlet's oldest station, or a synthetic "unrouted" grouping
+  if the outlet has none); adding a line to an already-"sent" order
+  (`pos/order-lines/order-lines.service.ts#addLine`) appends an ADD-ON
+  batch to the target station's existing queued ticket, or opens a new one
+  only if the prior ticket there was already bumped. New `src/kitchen`
+  module (`KitchenTicketsService`, exported for pos/orders and
+  pos/order-lines to call into) serving `bump`/`recall`/`refire` actions
+  (no actor attribution, shared station screen) and the station-queue/expo/
+  bumped/all-day-summary/stations-picker reads, all under `/kitchen/v1`,
+  riding the existing `pos` realm unchanged (`PosAuthGuard`'s route match
+  extended to `^/(pos|kitchen)(/|$)`). 13 new e2e tests
+  (`test/kitchen.e2e-spec.ts`): two-station fire, unrouted-item fallback
+  (both with and without an outlet default station), add-on batching on
+  re-fire, new-ticket-after-bump edge, bump/recall/conflict cases, expo
+  consolidation with partial-bump waiting-on, all-day summary decrementing
+  on bump, and cross-tenant isolation. Every existing e2e spec's `wipe()`
+  helper updated to clear the three new tables. See
+  [wiki/features/kitchen-display.md](../features/kitchen-display.md). Issue
+  AusPosRest/restiq-backend#67.

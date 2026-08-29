@@ -170,6 +170,9 @@ model Tenant {
   tokenNumberCounters TokenNumberCounter[]
   tableSessions       TableSession[]
   guests              Guest[]
+  tickets             Ticket[]
+  ticketLines         TicketLine[]
+  ticketEvents        TicketEvent[]
 
   // The directory list is served from these: filter columns plus the
   // created_at ordering the default sort and cursor walk.
@@ -264,6 +267,7 @@ model Outlet {
   billNumberCounter   BillNumberCounter?
   tokenNumberCounter  TokenNumberCounter?
   tableSessions       TableSession[]
+  tickets             Ticket[]
 
   @@index([tenantId])
   @@map("outlets")
@@ -334,10 +338,17 @@ model MenuItem {
   // The 86 toggle (CAP-4): tenant-wide, immediate, not versioned - price
   // history is the only thing AD-11 requires append-only, not availability.
   available  Boolean  @default(true)
+  // kitchen-display/CAP-1 (AD-16): nullable item->station routing, additive
+  // to the already-shipped menu schema (one schema owner - the Tenant Admin
+  // menu editor writes it, see admin/menu/items.dtos.ts/items.service.ts).
+  // Null means "unrouted" - the kitchen fire hook (src/kitchen) falls back to
+  // the outlet's designated default/expo station at fire time, not here.
+  stationId  String?  @map("station_id") @db.Uuid
   createdAt  DateTime @default(now()) @map("created_at") @db.Timestamptz(6)
 
   tenant          Tenant               @relation(fields: [tenantId], references: [id])
   category        MenuCategory         @relation(fields: [categoryId], references: [id])
+  station         Station?             @relation(fields: [stationId], references: [id])
   variants        ItemVariant[]
   prices          ItemPrice[]
   modifierGroups  ItemModifierGroup[]
@@ -879,10 +890,12 @@ model Station {
   updatedAt              DateTime  @updatedAt @map("updated_at") @db.Timestamptz(6)
   deletedAt              DateTime? @map("deleted_at") @db.Timestamptz(6)
 
-  tenant          Tenant   @relation(fields: [tenantId], references: [id])
-  outlet          Outlet   @relation(fields: [outletId], references: [id])
-  primaryPrinter  Printer? @relation("StationPrimaryPrinter", fields: [primaryPrinterId], references: [id])
-  fallbackPrinter Printer? @relation("StationFallbackPrinter", fields: [fallbackPrinterId], references: [id])
+  tenant          Tenant     @relation(fields: [tenantId], references: [id])
+  outlet          Outlet     @relation(fields: [outletId], references: [id])
+  primaryPrinter  Printer?   @relation("StationPrimaryPrinter", fields: [primaryPrinterId], references: [id])
+  fallbackPrinter Printer?   @relation("StationFallbackPrinter", fields: [fallbackPrinterId], references: [id])
+  menuItems       MenuItem[]
+  tickets         Ticket[]
 
   @@unique([outletId, name])
   @@index([tenantId])
@@ -1099,12 +1112,13 @@ model Order {
   createdAt   DateTime    @default(now()) @map("created_at") @db.Timestamptz(6)
   updatedAt   DateTime    @updatedAt @map("updated_at") @db.Timestamptz(6)
 
-  tenant Tenant       @relation(fields: [tenantId], references: [id])
-  outlet Outlet       @relation(fields: [outletId], references: [id])
-  table  DiningTable? @relation(fields: [tableId], references: [id])
-  owner  StaffUser    @relation(fields: [ownerId], references: [id])
-  lines  OrderLine[]
-  bill   Bill?
+  tenant  Tenant       @relation(fields: [tenantId], references: [id])
+  outlet  Outlet       @relation(fields: [outletId], references: [id])
+  table   DiningTable? @relation(fields: [tableId], references: [id])
+  owner   StaffUser    @relation(fields: [ownerId], references: [id])
+  lines   OrderLine[]
+  bill    Bill?
+  tickets Ticket[]
 
   @@unique([tenantId, outletId, tokenNumber])
   @@index([tenantId])
@@ -1154,6 +1168,11 @@ model OrderLine {
   // (Bill carries only whole-bill subtotal/tax aggregates, no lines of its
   // own).
   creditNoteLines CreditNoteLine[]
+  // kitchen-display/CAP-1 (AD-16): each OrderLine is ticketed at most once -
+  // at whole-order fire time if the order was already "sent" when it was
+  // added (see src/kitchen's fire hook, invoked from orders.service.ts and
+  // order-lines.service.ts).
+  ticketLines     TicketLine[]
 
   @@index([tenantId])
   @@index([orderId])
@@ -1451,4 +1470,109 @@ model TokenNumberCounter {
   outlet Outlet @relation(fields: [outletId], references: [id])
 
   @@map("token_number_counters")
+}
+
+// ---------------------------------------------------------------------------
+// kitchen-display/CAP-1 (issue #67, AD-16): the greenfield ticket domain.
+// Firing an order (pos/orders' open->sent transition, and any line added to
+// an already-"sent" order) creates/extends these rows in the SAME
+// transaction, replacing the acknowledged status-flip-only stub - see
+// src/kitchen for the fire hook and every read/mutation this surface serves.
+// ---------------------------------------------------------------------------
+
+enum TicketStatus {
+  queued
+  bumped
+}
+
+// One ticket per (order, resolved station) - never one row per fire event.
+// Insert-only past bump per AD-16: bump/recall/refire update this row's
+// state in place (status/bumpedAt/recallCount/recalledAt) but never delete
+// it; the append-only TicketEvent log below is what actually never gets
+// updated, only inserted to, and is what "recall history" reads from.
+// stationId null = the synthetic "unrouted" grouping (only possible when the
+// outlet has zero stations at fire time - see kitchen/tickets.service.ts's
+// resolveDefaultStationId).
+model Ticket {
+  id          String       @id @default(uuid(7)) @db.Uuid
+  tenantId    String       @map("tenant_id") @db.Uuid
+  outletId    String       @map("outlet_id") @db.Uuid
+  orderId     String       @map("order_id") @db.Uuid
+  stationId   String?      @map("station_id") @db.Uuid
+  status      TicketStatus @default(queued)
+  // Total number of times this ticket has been recalled - kept alongside the
+  // TicketEvent log (not derived from it on every read) since every station-
+  // queue poll needs it and the log is append-only anyway.
+  recallCount Int          @default(0) @map("recall_count")
+  firedAt     DateTime     @default(now()) @map("fired_at") @db.Timestamptz(6)
+  bumpedAt    DateTime?    @map("bumped_at") @db.Timestamptz(6)
+  recalledAt  DateTime?    @map("recalled_at") @db.Timestamptz(6)
+
+  tenant  Tenant       @relation(fields: [tenantId], references: [id])
+  outlet  Outlet       @relation(fields: [outletId], references: [id])
+  order   Order        @relation(fields: [orderId], references: [id])
+  station Station?     @relation(fields: [stationId], references: [id])
+  lines   TicketLine[]
+  events  TicketEvent[]
+
+  @@index([tenantId])
+  @@index([outletId, stationId, status])
+  @@index([orderId])
+  @@map("tickets")
+}
+
+// One row per OrderLine ever ticketed - never deleted, never re-pointed to a
+// different ticket. addOnBatch groups lines fired together so the UI can
+// render an ADD-ON section: 0 is the order's original fire, 1+ is the Nth
+// batch appended to this same ticket afterwards (see
+// kitchen/tickets.service.ts's fireAddedLine). voided marks a fired line
+// struck-through without deleting the row (AD-16) - no current POS caller
+// sets this yet: order-lines.service.ts only allows removing a line while
+// the order is still "open" (assertOrderOpenForEdit), and manager-auth's
+// 'void_after_fire' gated action is defined but not wired to any endpoint
+// yet, so this column exists for that future story to write to.
+model TicketLine {
+  id          String   @id @default(uuid(7)) @db.Uuid
+  tenantId    String   @map("tenant_id") @db.Uuid
+  ticketId    String   @map("ticket_id") @db.Uuid
+  orderLineId String   @map("order_line_id") @db.Uuid
+  quantity    Int
+  addOnBatch  Int      @default(0) @map("add_on_batch")
+  voided      Boolean  @default(false)
+  createdAt   DateTime @default(now()) @map("created_at") @db.Timestamptz(6)
+
+  tenant    Tenant    @relation(fields: [tenantId], references: [id])
+  ticket    Ticket    @relation(fields: [ticketId], references: [id])
+  orderLine OrderLine @relation(fields: [orderLineId], references: [id])
+
+  @@unique([ticketId, orderLineId])
+  @@index([tenantId])
+  @@index([ticketId])
+  @@map("ticket_lines")
+}
+
+enum TicketEventType {
+  bumped
+  recalled
+  refired
+  add_on_fired
+}
+
+// Append-only recall/bump/refire history (CAP-4's "bumped view retains it
+// with its recall history") - Ticket carries only the current derived state
+// for fast queue reads, this is where the actual event-by-event history
+// lives. Never updated, never deleted.
+model TicketEvent {
+  id         String          @id @default(uuid(7)) @db.Uuid
+  tenantId   String          @map("tenant_id") @db.Uuid
+  ticketId   String          @map("ticket_id") @db.Uuid
+  type       TicketEventType
+  occurredAt DateTime        @default(now()) @map("occurred_at") @db.Timestamptz(6)
+
+  tenant Tenant @relation(fields: [tenantId], references: [id])
+  ticket Ticket @relation(fields: [ticketId], references: [id])
+
+  @@index([tenantId])
+  @@index([ticketId])
+  @@map("ticket_events")
 }

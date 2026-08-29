@@ -23,6 +23,12 @@ the task entry to `tasks/completed.md` after every feature or bug fix.
   CAP-1 guest realm (fifth disjoint auth realm, AD-17), greenfield
   `TableSession`/`Guest` models, session start/join/close, and the
   `qr_ordering` capability gate.
+- [Kitchen Display (KDS) - backend](features/kitchen-display.md) - CAP-1
+  ticket domain, item->station routing, and fire-on-send: the `open ->
+  sent` transition now creates real `Ticket`/`TicketLine` rows (greenfield,
+  insert-only past bump), grouped per resolved station, with bump/recall/
+  refire actions and the station-queue/expo/bumped/all-day read
+  projections every KDS screen story consumes.
 
 ## Tasks
 

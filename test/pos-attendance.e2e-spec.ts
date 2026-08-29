@@ -26,6 +26,7 @@ async function wipe(prisma: PrismaClient): Promise<void> {
   // bill/order_line/staff_user deletes below never hit a live FK.
   await prisma.creditNote.deleteMany()
   await prisma.orderLineModifier.deleteMany()
+  await prisma.ticketLine.deleteMany()
   await prisma.orderLine.deleteMany()
   await prisma.invoice.deleteMany()
   await prisma.subscription.deleteMany()
@@ -50,6 +51,8 @@ async function wipe(prisma: PrismaClient): Promise<void> {
   await prisma.bill.deleteMany()
   await prisma.billNumberCounter.deleteMany()
   await prisma.tokenNumberCounter.deleteMany()
+  await prisma.ticketEvent.deleteMany()
+  await prisma.ticket.deleteMany()
   await prisma.order.deleteMany()
   await prisma.clockEvent.deleteMany()
   await prisma.staffUser.deleteMany()
