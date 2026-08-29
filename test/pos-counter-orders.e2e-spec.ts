@@ -47,6 +47,8 @@ interface BillBody {
 }
 
 async function wipe(prisma: PrismaClient): Promise<void> {
+  await prisma.cartLineModifier.deleteMany()
+  await prisma.cartLine.deleteMany()
   await prisma.orderLineModifier.deleteMany()
   await prisma.ticketLine.deleteMany()
   await prisma.orderLine.deleteMany()

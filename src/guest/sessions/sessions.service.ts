@@ -74,8 +74,13 @@ function toSessionView(session: TableSession, table: Pick<DiningTable, 'id' | 'l
   }
 }
 
-/** True once a session has moved past "open" (staff-closed, settled, or idle-expired). */
-function isSessionInactive(session: TableSession): boolean {
+/**
+ * True once a session has moved past "open" (staff-closed, settled, or
+ * idle-expired). Exported for cart/cart.service.ts (same guest module, not a
+ * cross-module reach under AD-2) - the cart's closed/settled-session 410
+ * convention must match this session view's exactly.
+ */
+export function isSessionInactive(session: TableSession): boolean {
   return session.status !== 'open' || session.expiresAt.getTime() <= Date.now()
 }
 

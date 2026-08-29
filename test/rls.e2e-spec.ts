@@ -177,6 +177,62 @@ describe('row-level security on region-plane tables (e2e)', () => {
     await admin.brand.deleteMany({ where: { tenantId } })
   })
 
+  it('cart_lines/cart_line_modifiers: fail closed under the wrong tenant, visible under the correct one (qr-self-order/CAP-3, issue #72)', async () => {
+    const brand = await admin.brand.create({ data: { tenantId, name: 'Cart RLS Probe Brand' } })
+    const outlet = await admin.outlet.create({
+      data: { tenantId, brandId: brand.id, name: 'Cart RLS Probe Outlet', address: 'x', type: 'dine_in', timezone: 'Asia/Kolkata' },
+    })
+    const floor = await admin.floor.create({ data: { tenantId, outletId: outlet.id, name: 'Ground' } })
+    const table = await admin.diningTable.create({
+      data: { tenantId, floorId: floor.id, label: 'T1', x: 0, y: 0, width: 1, height: 1, shape: 'square', seatCapacity: 2 },
+    })
+    const session = await admin.tableSession.create({
+      data: {
+        tenantId,
+        outletId: outlet.id,
+        tableId: table.id,
+        sessionPin: '1234',
+        startedByGuestName: 'Probe Guest',
+        startedByGuestPhone: 'x',
+        expiresAt: new Date(Date.now() + 3_600_000),
+      },
+    })
+    const guest = await admin.guest.create({ data: { tenantId, sessionId: session.id, name: 'Probe Guest' } })
+    const category = await admin.menuCategory.create({ data: { tenantId, name: 'Mains', sortOrder: 0 } })
+    const item = await admin.menuItem.create({ data: { tenantId, categoryId: category.id, name: 'Probe Item', shortName: 'PI' } })
+    const group = await admin.modifierGroup.create({ data: { tenantId, name: 'Probe Group', minSelections: 0, maxSelections: 1 } })
+    const modifier = await admin.modifier.create({ data: { tenantId, groupId: group.id, name: 'Probe Mod', sortOrder: 0 } })
+    const cartLine = await admin.cartLine.create({
+      data: { tenantId, sessionId: session.id, guestId: guest.id, guestName: guest.name, itemId: item.id, quantity: 1 },
+    })
+    await admin.cartLineModifier.create({ data: { tenantId, cartLineId: cartLine.id, modifierId: modifier.id } })
+
+    const underWrongTenant = await probe.$transaction(async (tx) => {
+      await tx.$executeRaw`SELECT set_config('app.tenant_id', ${randomUUID()}, true)`
+      return { lines: await tx.cartLine.count(), modifiers: await tx.cartLineModifier.count() }
+    })
+    expect(underWrongTenant).toEqual({ lines: 0, modifiers: 0 })
+
+    const underCorrectTenant = await probe.$transaction(async (tx) => {
+      await tx.$executeRaw`SELECT set_config('app.tenant_id', ${tenantId}, true)`
+      return { lines: await tx.cartLine.count({ where: { tenantId } }), modifiers: await tx.cartLineModifier.count({ where: { tenantId } }) }
+    })
+    expect(underCorrectTenant).toEqual({ lines: 1, modifiers: 1 })
+
+    await admin.cartLineModifier.deleteMany({ where: { tenantId } })
+    await admin.cartLine.deleteMany({ where: { tenantId } })
+    await admin.modifier.deleteMany({ where: { tenantId } })
+    await admin.modifierGroup.deleteMany({ where: { tenantId } })
+    await admin.menuItem.deleteMany({ where: { tenantId } })
+    await admin.menuCategory.deleteMany({ where: { tenantId } })
+    await admin.guest.deleteMany({ where: { tenantId } })
+    await admin.tableSession.deleteMany({ where: { tenantId } })
+    await admin.diningTable.deleteMany({ where: { tenantId } })
+    await admin.floor.deleteMany({ where: { tenantId } })
+    await admin.outlet.deleteMany({ where: { tenantId } })
+    await admin.brand.deleteMany({ where: { tenantId } })
+  })
+
   it('guest entry (AD-17): outlets/dining_tables fail closed under tenant context, read under the guest-entry context, but the added policy never widens writes', async () => {
     const brand = await admin.brand.create({ data: { tenantId, name: 'Guest Entry Probe Brand' } })
     const outlet = await admin.outlet.create({

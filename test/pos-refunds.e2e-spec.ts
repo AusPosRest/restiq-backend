@@ -67,6 +67,8 @@ interface CreditNoteBody {
 }
 
 async function wipe(prisma: PrismaClient): Promise<void> {
+  await prisma.cartLineModifier.deleteMany()
+  await prisma.cartLine.deleteMany()
   await prisma.creditNoteLine.deleteMany()
   await prisma.creditNote.deleteMany()
   await prisma.orderLineModifier.deleteMany()
