@@ -828,6 +828,9 @@ model TableSession {
   table     DiningTable @relation(fields: [tableId], references: [id])
   guests    Guest[]
   cartLines CartLine[]
+  // qr-self-order/CAP-4 (issue #77): the real Order(s) placed from this
+  // session's cart - see Order.sessionId.
+  orders    Order[]
 
   @@index([tenantId])
   @@index([outletId])
@@ -848,9 +851,12 @@ model Guest {
   phone     String?
   joinedAt  DateTime @default(now()) @map("joined_at") @db.Timestamptz(6)
 
-  tenant    Tenant       @relation(fields: [tenantId], references: [id])
-  session   TableSession @relation(fields: [sessionId], references: [id])
-  cartLines CartLine[]
+  tenant     Tenant       @relation(fields: [tenantId], references: [id])
+  session    TableSession @relation(fields: [sessionId], references: [id])
+  cartLines  CartLine[]
+  // qr-self-order/CAP-4 (issue #77): the real OrderLine rows created from
+  // this guest's CartLines at placement - see OrderLine.guestId.
+  orderLines OrderLine[]
 
   @@index([tenantId])
   @@index([sessionId])
@@ -1151,6 +1157,16 @@ enum OrderStatus {
   closed
 }
 
+// qr-self-order/CAP-4 (issue #77, AD-18): "one order pipeline, many writers" -
+// pos is the default writer, qr is the guest self-order surface converting a
+// session's CartLine set into a real Order at placement (see
+// guest/orders/orders.service.ts). Never a third value without a matching
+// writer.
+enum OrderSource {
+  pos
+  qr
+}
+
 model Order {
   id          String      @id @default(uuid(7)) @db.Uuid
   tenantId    String      @map("tenant_id") @db.Uuid
@@ -1158,7 +1174,16 @@ model Order {
   tableId     String?     @map("table_id") @db.Uuid
   // Exactly one owning staff member at a time (this story's core mechanic) -
   // reassigned only through the explicit transfer action, never implicitly.
-  ownerId     String      @map("owner_id") @db.Uuid
+  // Nullable as of qr-self-order/CAP-4 (issue #77): a guest-placed order has
+  // no staff owner at creation - faking one (e.g. the outlet's first staff
+  // row) would misrepresent who actually opened the order, so a qr-source
+  // order is genuinely unowned until a staff member transfers it to
+  // themselves (the existing transfer() action already supports taking over
+  // any order regardless of its current owner). Every pos-source order still
+  // always sets this at creation (openOrClaimTable/createCounterOrder) - only
+  // qr orders ever leave it null. assertOwner() in orders.service.ts treats a
+  // null owner as unclaimed and lets any staff act on it.
+  ownerId     String?     @map("owner_id") @db.Uuid
   status      OrderStatus @default(open)
   // pos/CAP-6 QSR counter and token mode (AD-14, story 7). Assigned only at
   // creation time for a counter order (tableId null) - see
@@ -1169,13 +1194,23 @@ model Order {
   // index below is a plain index, not partial, since Postgres already
   // treats every NULL as distinct from every other NULL.
   tokenNumber Int?        @map("token_number")
+  // qr-self-order/CAP-4 (AD-18): discriminates who created this order -
+  // never a parallel model, only a marker on the same Order/OrderLine rows
+  // every pos order already uses. Defaults to 'pos' so every pre-existing
+  // and staff-created row needs no backfill.
+  source      OrderSource @default(pos)
+  // Set only for source='qr' orders - the TableSession this order was placed
+  // from (see guest/orders/orders.service.ts's placeOrder). Null for every
+  // pos-source order, which has no guest session.
+  sessionId   String?     @map("session_id") @db.Uuid
   createdAt   DateTime    @default(now()) @map("created_at") @db.Timestamptz(6)
   updatedAt   DateTime    @updatedAt @map("updated_at") @db.Timestamptz(6)
 
-  tenant  Tenant       @relation(fields: [tenantId], references: [id])
-  outlet  Outlet       @relation(fields: [outletId], references: [id])
-  table   DiningTable? @relation(fields: [tableId], references: [id])
-  owner   StaffUser    @relation(fields: [ownerId], references: [id])
+  tenant  Tenant        @relation(fields: [tenantId], references: [id])
+  outlet  Outlet        @relation(fields: [outletId], references: [id])
+  table   DiningTable?  @relation(fields: [tableId], references: [id])
+  owner   StaffUser?    @relation(fields: [ownerId], references: [id])
+  session TableSession? @relation(fields: [sessionId], references: [id])
   lines   OrderLine[]
   bill    Bill?
   tickets Ticket[]
@@ -1184,6 +1219,7 @@ model Order {
   @@index([tenantId])
   @@index([outletId])
   @@index([tableId])
+  @@index([sessionId])
   @@map("orders")
 }
 
@@ -1213,14 +1249,27 @@ model OrderLine {
   quantity       Int
   unitPriceMinor BigInt   @map("unit_price_minor")
   seatNumber     Int?     @map("seat_number")
-  addedByStaffId String   @map("added_by_staff_id") @db.Uuid
+  // Nullable as of qr-self-order/CAP-4 (issue #77): a guest-placed line has
+  // no staff adder - see guestId/guestName below for its attribution
+  // instead. Every pos-created line still always sets this.
+  addedByStaffId String?  @map("added_by_staff_id") @db.Uuid
+  // qr-self-order/CAP-4 (AD-18): per-guest label on a guest-placed line,
+  // carried straight over from CartLine.guestId/guestName at placement (see
+  // guest/orders/orders.service.ts's placeOrder) - null for every pos-source
+  // line. guestName is a snapshot (same posture as CartLine.guestName and
+  // OrderLine.unitPriceMinor) so it survives regardless of any later Guest
+  // row change, and so KDS/POS reads never need a join back to Guest just to
+  // render a label.
+  guestId        String?  @map("guest_id") @db.Uuid
+  guestName      String?  @map("guest_name")
   createdAt      DateTime @default(now()) @map("created_at") @db.Timestamptz(6)
 
   tenant       Tenant              @relation(fields: [tenantId], references: [id])
   order        Order               @relation(fields: [orderId], references: [id])
   item         MenuItem            @relation(fields: [itemId], references: [id])
   variant      ItemVariant?        @relation(fields: [variantId], references: [id])
-  addedByStaff StaffUser           @relation(fields: [addedByStaffId], references: [id])
+  addedByStaff StaffUser?          @relation(fields: [addedByStaffId], references: [id])
+  guest        Guest?              @relation(fields: [guestId], references: [id])
   modifiers    OrderLineModifier[]
   // pos/CAP-9 refunds (AD-14): a CreditNoteLine reverses this exact line's
   // unit price/modifiers snapshot, quantity at a time - see CreditNoteLine's
@@ -1236,6 +1285,7 @@ model OrderLine {
 
   @@index([tenantId])
   @@index([orderId])
+  @@index([guestId])
   @@map("order_lines")
 }
 

@@ -52,9 +52,16 @@ export async function loadOrder(tx: Tx, tenantId: string, orderId: string): Prom
  * Owner-only mutation guard, shared by every order/order-line mutation
  * (pos/CAP-2's core rule, reused as-is by pos/CAP-3's order-line endpoints -
  * not reimplemented per module boundary).
+ *
+ * qr-self-order/CAP-4 (issue #77): a guest-placed order's ownerId is null
+ * until a staff member explicitly takes it over (see Order.ownerId's schema
+ * comment) - treated here as unclaimed, so any staff may act on it, same as
+ * they could take over any other order via transfer(). This is the only
+ * branch null ownerId needs; every other check below already assumes a real
+ * staff id, which null-vs-unclaimed never reaches.
  */
 export async function assertOwner(tx: Tx, order: Order, staff: PosPrincipal): Promise<void> {
-  if (order.ownerId === staff.id) return
+  if (order.ownerId === null || order.ownerId === staff.id) return
   const owner = await tx.staffUser.findUnique({ where: { id: order.ownerId } })
   const ownerName = owner?.name ?? order.ownerId
   throw new ForbiddenException({
@@ -80,6 +87,8 @@ function toOrderLineView(line: OrderLineWithModifiers): OrderLineView {
     unitPriceMinor: Number(line.unitPriceMinor),
     seatNumber: line.seatNumber,
     addedByStaffId: line.addedByStaffId,
+    guestId: line.guestId,
+    guestName: line.guestName,
     createdAt: line.createdAt.toISOString(),
     modifiers: line.modifiers.map((m) => ({ id: m.id, modifierId: m.modifierId, name: m.modifier.name, priceMinor: Number(m.priceMinor) })),
   }
@@ -96,6 +105,8 @@ export async function buildOrderView(tx: Tx, order: Order): Promise<OrderView> {
     ownerId: order.ownerId,
     status: order.status,
     tokenNumber: order.tokenNumber,
+    source: order.source,
+    sessionId: order.sessionId,
     createdAt: order.createdAt.toISOString(),
     updatedAt: order.updatedAt.toISOString(),
     lines: lines.map(toOrderLineView),

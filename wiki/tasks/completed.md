@@ -428,3 +428,31 @@
   updated to clear the two new tables. See
   [wiki/features/qr-self-order.md](../features/qr-self-order.md). Issue
   AusPosRest/restiq-backend#72.
+- **2026-08-29** - qr-self-order story 4: order placement into the real
+  pipeline (CAP-4). New `POST /guest/v1/orders` (`src/guest/orders/`)
+  atomically converts the caller's session cart into a real `Order`/
+  `OrderLine` set - source `'qr'`, `sessionId` set, no staff owner (see
+  below) - and fires it through the exact same open->sent kitchen
+  transition (`KitchenTicketsService.fireOnSend`, AD-16) a staff order uses,
+  in the same transaction, so real `Ticket`/`TicketLine` rows exist,
+  correctly station-routed. The cart is deleted on success. Purely additive
+  schema (no new tables): `Order` gains `source` (`OrderSource` enum,
+  default `pos`) and nullable `sessionId`; `Order.ownerId` and
+  `OrderLine.addedByStaffId` both became **nullable** (a guest order/line
+  has no staff owner/adder - a documented decision against faking one, see
+  the feature doc); `OrderLine` gains nullable `guestId`/`guestName`,
+  carried straight from `CartLine`. `pos/orders`'s `assertOwner` now treats
+  a null `ownerId` as unclaimed (any staff may act, or take it over via the
+  existing `transfer()` action); `OrderView`/`OrderLineView` and kitchen's
+  `TicketLineView` extended additively with the new fields so POS and KDS
+  render guest orders/tickets with their labels, zero other special-casing
+  (AD-18). Each distinct guest in the session is auto-assigned a seat
+  number by join order so the existing all-lines-seated fire gate is
+  satisfied by construction - documented in `guest/orders/orders.service.ts`
+  rather than re-deriving or bypassing that gate. 7 new e2e tests
+  (`test/guest-order-placement.e2e-spec.ts`): guest-attributed lines with
+  correct station-routed tickets, the order appearing in the POS
+  open-orders list, cart consumption, empty-cart rejection, closed-session
+  410, and cross-tenant isolation. See
+  [wiki/features/qr-self-order.md](../features/qr-self-order.md). Issue
+  AusPosRest/restiq-backend#77.

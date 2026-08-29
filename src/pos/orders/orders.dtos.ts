@@ -1,5 +1,5 @@
 import { ArrayUnique, IsArray, IsEnum, IsInt, IsOptional, IsString, IsUUID, Min, MinLength } from 'class-validator'
-import type { OrderStatus } from '../../generated/prisma/client'
+import type { OrderSource, OrderStatus } from '../../generated/prisma/client'
 
 const ORDER_STATUSES = ['open', 'sent', 'closed'] as const
 
@@ -25,12 +25,24 @@ export interface OrderView {
   tenantId: string
   outletId: string
   tableId: string | null
-  ownerId: string
+  // Nullable as of qr-self-order/CAP-4 (issue #77): null only for a
+  // guest-placed (source 'qr') order that no staff member has yet taken over
+  // via transfer() - see Order.ownerId's schema comment.
+  ownerId: string | null
   status: OrderStatus
   // pos/CAP-6 (issue #62): null on every table (dine-in) order; a real,
   // gapless-per-outlet sequential number on a counter order (tableId null),
   // assigned at creation - see orders.service.ts's createCounterOrder.
   tokenNumber: number | null
+  // qr-self-order/CAP-4 (AD-18): 'pos' for every staff-created order (the
+  // default), 'qr' for one placed from a guest table session - see
+  // guest/orders/orders.service.ts's placeOrder. Consumers render both alike,
+  // this field is display-only (AD-18: "zero special-casing beyond
+  // displaying the labels").
+  source: OrderSource
+  // The guest TableSession this order was placed from - null for every
+  // pos-source order.
+  sessionId: string | null
   createdAt: string
   updatedAt: string
   lines: OrderLineView[]
@@ -98,7 +110,15 @@ export interface OrderLineView {
   // seat/cover. Every line on an order must carry one before that order can
   // move to "sent" - see orders.service.ts's updateStatus.
   seatNumber: number | null
-  addedByStaffId: string
+  // Nullable as of qr-self-order/CAP-4 (issue #77): null for a guest-placed
+  // line, which has no staff adder - see guestId/guestName instead.
+  addedByStaffId: string | null
+  // qr-self-order/CAP-4 (AD-18): the guest who added this line via the
+  // shared cart, carried over at placement - null for every pos-added line.
+  // guestName is a snapshot (same posture as CartLineView's), not a live
+  // Guest lookup.
+  guestId: string | null
+  guestName: string | null
   createdAt: string
   modifiers: OrderLineModifierView[]
 }

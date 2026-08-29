@@ -19,6 +19,12 @@
   shared table cart, each item attributed to the guest who added it; any
   guest can view the whole table's cart grouped by guest with per-guest and
   combined totals; only the guest who added a line may edit or remove it.
+- **CAP-4** Order placement into the real pipeline - placing the table order
+  converts the session's shared cart into a real `Order`/`OrderLine` set,
+  marked with its `qr` source and per-guest labels, fired to the kitchen
+  through the same transition staff orders use. The placed order appears in
+  the POS open-orders list and lands on the KDS as tickets carrying guest
+  labels - never a parallel guest-only order model (AD-18).
 
 ## What's built
 
@@ -147,6 +153,34 @@
   - `cart/cart.controller.ts` - `GET /guest/v1/cart`,
     `POST /guest/v1/cart/lines`, `PATCH /guest/v1/cart/lines/:id`,
     `DELETE /guest/v1/cart/lines/:id` (all guest-token authenticated).
+- **CAP-4 order placement** (story 4, issue #77, `src/guest/orders/`) -
+  `GuestOrdersService`/`GuestOrdersController`, registered in `GuestModule`
+  (which now also imports `KitchenModule` for the fire hook - no cycle,
+  since `KitchenModule` itself only imports `PlatformModule`):
+  - `orders.service.ts`'s `placeOrder` runs one transaction: loads the
+    active session (410 `session_closed` if inactive), reads the session's
+    `CartLine`s (400 `empty_cart` if none), auto-assigns a seat number per
+    distinct guest by join order (guest 1 = seat 1, guest 2 = seat 2, ...) so
+    every created `OrderLine` satisfies pos/CAP-4's all-lines-seated fire
+    gate by construction, creates the `Order` (`source: 'qr'`, `sessionId`
+    set, `ownerId: null`) and each `OrderLine` (price re-resolved via the
+    same `resolveCurrentPrice`/`qr`-channel read the cart uses, `guestId`/
+    `guestName` carried straight from the `CartLine`, `addedByStaffId:
+    null`), transitions the order `open -> sent`, and calls
+    `KitchenTicketsService.fireOnSend` - the exact function
+    `pos/orders/orders.service.ts`'s `updateStatus` calls for a staff order,
+    in the same transaction (AD-16/AD-18: one fire implementation, one
+    ticket domain). Deletes the session's `CartLine`s on success
+    (`CartLineModifier` rows cascade at the DB level).
+  - Builds the `Order`/`OrderLine` rows directly against Prisma rather than
+    calling into `pos/orders`'s `OrdersService`/`OrderLinesService`: those
+    are staff-gated (`PosPrincipal`, `assertOwner`), and `pos`'s own barrel
+    (`src/pos/index.ts`) exports only `PosModule` - reaching their internals
+    would mean either a faked staff principal or a `pos`<->`guest` module
+    cycle (`pos.module.ts` already imports `GuestModule` for the staff-side
+    session close). The one piece of `pos/orders`' machinery genuinely
+    reused is the kitchen fire hook itself, which has no such dependency.
+  - `orders.controller.ts` - `POST /guest/v1/orders` (guest token, no body).
 
 ## Endpoint contracts
 
@@ -179,6 +213,14 @@
   404 `not_found`; 410 `session_closed`.
 - `TableCartView`: `{ sessionId, guests: GuestCartView[], totalMinor, currency }`.
 - `GuestCartView`: `{ guestId, guestName, lines: CartLineView[], subtotalMinor }`.
+- `POST /guest/v1/orders` (guest token, no body) -> 201 `PlacedOrderView`;
+  400 `empty_cart` (nothing in the session's cart); 400 `no_price` (an
+  item's price disappeared between cart-add and placement); 410
+  `session_closed`.
+- `PlacedOrderView`: `{ orderId, tableId, status: 'sent', source: 'qr', sessionId, lines: PlacedOrderLineView[] }`.
+- `PlacedOrderLineView`: `{ id, itemId, itemName, variantId, variantName, quantity, unitPriceMinor, seatNumber, guestId, guestName, modifiers: [{ id, name, priceMinor }] }`
+  (`unitPriceMinor`/`modifiers[].priceMinor` are real snapshots now, taken at
+  placement - unlike `CartLineView`'s live-resolved figures).
 - `CartLineView`: `{ id, guestId, guestName, itemId, itemName, variantId, variantName, quantity, unitPriceMinor, modifiers: [{ id, name, priceMinor }], lineTotalMinor, createdAt }`
   (`unitPriceMinor`/`modifiers[].priceMinor` are resolved live, never
   snapshotted; `lineTotalMinor = (unitPriceMinor + sum(modifiers.priceMinor)) * quantity`).
@@ -188,13 +230,13 @@
 - Story 2 (menu browse) reads `CurrentGuest()`'s `GuestPrincipal` for
   `tenantId`/`outletId`/`tableId`/`sessionId` scoping - no second
   guest-identity lookup, same as CAP-3's cart does.
-- Story 4 (order placement) converts each `CartLine` into a real `OrderLine`:
-  `CartLine.guestId`/`guestName` map directly onto the per-guest label
-  fields that story adds to `OrderLine`, and `CartLine.itemId`/`variantId`/
-  `quantity`/selected modifier ids carry over as-is - the cart's shape was
-  chosen so this conversion needs no reshaping. Price gets snapshotted for
-  real at that point (`resolveCurrentPrice` read again, same as
-  `pos/orders/order-lines.service.ts` does today).
+- Story 4 (order placement, **done**) converts each `CartLine` into a real
+  `OrderLine`: `CartLine.guestId`/`guestName` mapped directly onto the
+  per-guest label fields added to `OrderLine`, `CartLine.itemId`/
+  `variantId`/`quantity`/selected modifier ids carried over as-is - the
+  cart's shape needed no reshaping, exactly as planned. Price is
+  re-resolved and snapshotted for real at that point (`resolveCurrentPrice`
+  read again, same as `pos/orders/order-lines.service.ts` does today).
 - Story 5 (checkout) settles the session (`status: 'settled'`) instead of
   `closed` - a separate terminal state already modeled.
 - Story 3 (shared cart, built concurrently in a sibling worktree/issue) will
@@ -253,3 +295,44 @@
   a shared import - AD-2 restricts cross-module reach to a module's public
   barrel, and those helpers aren't (and shouldn't become) part of the pos
   module's public surface just to serve one other caller.
+- **`Order.ownerId` and `OrderLine.addedByStaffId` are now nullable**
+  (story 4, issue #77) - a guest-placed order genuinely has no staff owner
+  or adder at creation. The alternative (assigning the outlet's first/any
+  staff row as a placeholder owner) would misrepresent who opened the
+  order and was rejected explicitly. `assertOwner()`
+  (`pos/orders/orders.service.ts`) treats `null` as unclaimed: any staff may
+  mutate the order, or take explicit ownership via the existing `transfer()`
+  action - no new mechanic, no PIN/reason requirement beyond what
+  `transfer()` already has. Every pre-existing and staff-created row is
+  unaffected (`ON DELETE`/`NOT NULL` semantics for real staff ids are
+  unchanged; only the column itself became optional).
+- **Seat numbers are auto-assigned by guest join order, not a real
+  "seat"** - pos/CAP-4's all-lines-seated fire gate
+  (`orders.service.ts`'s `assertAllLinesSeated`) blocks the open->sent
+  transition while any `OrderLine.seatNumber` is null. A guest table order
+  has no staff-driven seat-assignment step, so `placeOrder` assigns each
+  distinct guest in the session one seat number, in `joinedAt` order (first
+  guest = seat 1, second = seat 2, ...), and every line inherits its adding
+  guest's seat. This satisfies the gate by construction; "seat" here reads
+  as "which guest ordered this," not a physical chair number - a documented
+  scope decision, not a re-derivation of the pos concept.
+- Placement builds the `Order`/`OrderLine` rows directly against Prisma
+  rather than calling `pos/orders`'s `OrdersService`/`OrderLinesService` -
+  those are staff-gated (`PosPrincipal`, `assertOwner`) and `pos`'s barrel
+  (`src/pos/index.ts`) exports only `PosModule`, not those services.
+  Reusing them would mean either faking a staff principal (rejected above)
+  or a `pos`<->`guest` module cycle, since `pos.module.ts` already imports
+  `GuestModule` for the staff-side session close. The genuinely shared piece
+  - the kitchen fire hook - has no such dependency and is injected the same
+  way `pos/orders` does, so AD-16/AD-18's "one fire implementation" holds
+  without a cycle.
+- `KitchenTicketsService.TicketLineView` gained a `guestName` field
+  (`kitchen/tickets.dtos.ts`), populated straight from
+  `OrderLine.guestName` - additive, so every existing KDS consumer is
+  unaffected; K1's QR-group-order variant reads it to render per-guest
+  labels on a shared-table ticket.
+- Placing an order deletes the session's `CartLine`s rather than adding a
+  "consumed" flag - no schema exists for one, and once an `Order` exists the
+  cart that produced it has no further purpose (a guest could, in
+  principle, start a fresh cart afterwards for the same still-open session;
+  nothing in CAP-4's scope needs to prevent that).
