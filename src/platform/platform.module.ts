@@ -4,6 +4,7 @@ import { ValidationPipe } from '@nestjs/common'
 import { AdminAuthGuard } from './admin-auth.guard'
 import { ApiErrorFilter } from './api-error.filter'
 import { ControlPlaneAuditService } from './audit.service'
+import { GuestAuthGuard } from './guest-auth.guard'
 import { ManagerAuthService } from './manager-auth.service'
 import { OpsAuthGuard } from './ops-auth.guard'
 import { PosAuthGuard } from './pos-auth.guard'
@@ -23,6 +24,9 @@ import { RegionRegistryService } from './region-registry.service'
     // AD-13: a third, disjoint global guard for /pos/* - same early-return
     // shape, so all three combine without interfering.
     { provide: APP_GUARD, useClass: PosAuthGuard },
+    // AD-17: a fourth, disjoint global guard for /guest/* - same early-return
+    // shape, so all four combine without interfering.
+    { provide: APP_GUARD, useClass: GuestAuthGuard },
     { provide: APP_FILTER, useClass: ApiErrorFilter },
     { provide: APP_PIPE, useValue: new ValidationPipe({ whitelist: true }) },
   ],

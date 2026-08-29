@@ -1,27 +1,18 @@
-// AD-13 success criterion, end to end: a pos-realm JWT presented to any
-// /admin or /ops route is rejected, and vice versa, whichever secret signed
-// it - the same disjoint-realm proof AD-3/AD-10's realm specs already
-// established, extended to the fourth realm. Also proves the intermediate
-// `pos-pending` outlet-selection token (a different audience, same secret)
-// can never satisfy the real pos guard.
+// AD-17 success criterion, end to end: a guest-realm JWT presented to any
+// /pos, /admin, or /ops route is rejected, and vice versa, whichever secret
+// signed it - the same disjoint-realm proof AD-3/AD-10/AD-13's realm specs
+// already established (see pos-realm.e2e-spec.ts), extended to the fifth
+// realm and the first whose principal is not staff.
 import { INestApplication } from '@nestjs/common'
 import { Test } from '@nestjs/testing'
-import * as argon2 from 'argon2'
 import jwt from 'jsonwebtoken'
 import request from 'supertest'
 import { afterAll, beforeAll, describe, expect, it } from 'vitest'
 import { AppModule } from '../src/app.module'
 import { createPrismaClient, PrismaClient } from '../src/db/client'
-import { signAdminToken, signOpsToken, signPosToken, uuidv7 } from '../src/platform'
+import { signAdminToken, signGuestToken, signOpsToken, signPosToken, uuidv7 } from '../src/platform'
 
-// Full table list (not just this file's own tables): the e2e suite shares
-// one database and file execution order is not guaranteed, so every wipe()
-// must be safe regardless of what another file left behind (same rationale
-// as admin-realm.e2e-spec.ts's wipe()).
 async function wipe(prisma: PrismaClient): Promise<void> {
-  // pos/CAP-9 refunds: CreditNote FKs to bills/staff_users (RESTRICT) and
-  // cascades to its own CreditNoteLine rows - deleted first so later
-  // bill/order_line/staff_user deletes below never hit a live FK.
   await prisma.creditNote.deleteMany()
   await prisma.orderLineModifier.deleteMany()
   await prisma.orderLine.deleteMany()
@@ -55,9 +46,6 @@ async function wipe(prisma: PrismaClient): Promise<void> {
   await prisma.outletCapability.deleteMany()
   await prisma.station.deleteMany()
   await prisma.printer.deleteMany()
-  // qr-self-order/CAP-1 (guest realm, issue #68): Guest FKs to table_sessions
-  // (RESTRICT), and table_sessions FKs to dining_tables/outlets - both wiped
-  // before diningTable.deleteMany() below for the same reason.
   await prisma.guest.deleteMany()
   await prisma.tableSession.deleteMany()
   await prisma.diningTable.deleteMany()
@@ -75,9 +63,9 @@ async function wipe(prisma: PrismaClient): Promise<void> {
   await prisma.onboardingDraft.deleteMany()
 }
 
-function posSecret(): string {
-  const secret = process.env.POS_JWT_SECRET
-  if (!secret) throw new Error('POS_JWT_SECRET missing in e2e env')
+function guestSecret(): string {
+  const secret = process.env.GUEST_JWT_SECRET
+  if (!secret) throw new Error('GUEST_JWT_SECRET missing in e2e env')
   return secret
 }
 
@@ -87,14 +75,16 @@ function adminSecret(): string {
   return secret
 }
 
-describe('/pos realm separation (e2e)', () => {
+describe('/guest realm separation (e2e)', () => {
   let app: INestApplication
   let prisma: PrismaClient
   let httpServer: Parameters<typeof request>[0]
   let tenantId: string
-  let staffId: string
   let outletId: string
-  let posToken: string
+  let tableId: string
+  let sessionId: string
+  let guestId: string
+  let guestToken: string
 
   beforeAll(async () => {
     prisma = createPrismaClient()
@@ -105,7 +95,7 @@ describe('/pos realm separation (e2e)', () => {
     await prisma.tenant.create({
       data: {
         id: tenantId,
-        name: 'Realm Test Co',
+        name: 'Guest Realm Test Co',
         registeredAddress: '1 Test Street',
         contactName: 'Test Contact',
         contactEmail: 'contact@test.example',
@@ -116,21 +106,32 @@ describe('/pos realm separation (e2e)', () => {
         billingPeriod: 'monthly',
       },
     })
-    const brand = await prisma.brand.create({ data: { tenantId, name: 'Realm Test Brand' } })
+    const brand = await prisma.brand.create({ data: { tenantId, name: 'Guest Realm Test Brand' } })
     const outlet = await prisma.outlet.create({
       data: { tenantId, brandId: brand.id, name: 'Main', address: 'A1', type: 'dine_in', timezone: 'Asia/Kolkata' },
     })
     outletId = outlet.id
-    const role = await prisma.role.create({ data: { tenantId, name: 'Cashier', isSystem: true } })
-    const staff = await prisma.staffUser.create({
-      data: { tenantId, roleId: role.id, name: 'Realm Staff', pinHash: await argon2.hash('4242'), pinIssuedAt: new Date() },
+    const floor = await prisma.floor.create({ data: { tenantId, outletId, name: 'Ground Floor' } })
+    const table = await prisma.diningTable.create({
+      data: { tenantId, floorId: floor.id, label: 'T1', x: 0, y: 0, width: 10, height: 10, shape: 'square', seatCapacity: 4 },
     })
-    staffId = staff.id
-    // Already clocked in today so a /pos/v1/clock/out call below can prove
-    // the guard accepted the token (200), not just "didn't 401".
-    await prisma.clockEvent.create({ data: { tenantId, staffId, outletId, type: 'clock_in', occurredAt: new Date() } })
+    tableId = table.id
+    const session = await prisma.tableSession.create({
+      data: {
+        tenantId,
+        outletId,
+        tableId,
+        sessionPin: '1234',
+        startedByGuestName: 'Realm Guest',
+        startedByGuestPhone: '+91 90000 00000',
+        expiresAt: new Date(Date.now() + 3_600_000),
+      },
+    })
+    sessionId = session.id
+    const guest = await prisma.guest.create({ data: { tenantId, sessionId, name: 'Realm Guest', phone: '+91 90000 00000' } })
+    guestId = guest.id
 
-    posToken = signPosToken({ id: staffId, tenantId, outletId, name: 'Realm Staff' })
+    guestToken = signGuestToken({ id: guestId, sessionId, tenantId, outletId, tableId, name: 'Realm Guest' })
 
     const moduleRef = await Test.createTestingModule({ imports: [AppModule] }).compile()
     app = moduleRef.createNestApplication()
@@ -143,63 +144,83 @@ describe('/pos realm separation (e2e)', () => {
     await prisma.$disconnect()
   })
 
-  it('accepts a valid pos session on a /pos route', async () => {
-    const res = await request(httpServer).post('/pos/v1/clock/out').set('Authorization', `Bearer ${posToken}`)
+  it('accepts a valid guest session on a /guest route', async () => {
+    const res = await request(httpServer).get('/guest/v1/session').set('Authorization', `Bearer ${guestToken}`)
     expect(res.status).toBe(200)
   })
 
-  it('rejects /pos without a token', async () => {
-    const res = await request(httpServer).post('/pos/v1/clock/out')
+  it('rejects /guest without a token', async () => {
+    const res = await request(httpServer).get('/guest/v1/session')
     expect(res.status).toBe(401)
     expect((res.body as { error: { code: string } }).error.code).toBe('unauthorized')
   })
 
-  it('rejects an admin-audience token on /pos, even signed with the pos secret', async () => {
-    const token = jwt.sign({ email: 'owner@test.example', tenantId }, posSecret(), {
+  it('rejects an admin-audience token on /guest, even signed with the guest secret', async () => {
+    const token = jwt.sign({ email: 'owner@test.example', tenantId }, guestSecret(), {
       subject: uuidv7(),
       audience: 'admin',
       expiresIn: '1h',
     })
-    const res = await request(httpServer).post('/pos/v1/clock/out').set('Authorization', `Bearer ${token}`)
+    const res = await request(httpServer).get('/guest/v1/session').set('Authorization', `Bearer ${token}`)
     expect(res.status).toBe(401)
   })
 
-  it('rejects a real admin session token on /pos', async () => {
+  it('rejects a real admin session token on /guest', async () => {
     const adminToken = signAdminToken({ id: uuidv7(), tenantId, email: 'owner@test.example' })
-    const res = await request(httpServer).post('/pos/v1/clock/out').set('Authorization', `Bearer ${adminToken}`)
+    const res = await request(httpServer).get('/guest/v1/session').set('Authorization', `Bearer ${adminToken}`)
     expect(res.status).toBe(401)
   })
 
-  it('rejects a real ops session token on /pos', async () => {
+  it('rejects a real ops session token on /guest', async () => {
     const opsToken = signOpsToken({ id: uuidv7(), email: 'operator@test.example' })
-    const res = await request(httpServer).post('/pos/v1/clock/out').set('Authorization', `Bearer ${opsToken}`)
+    const res = await request(httpServer).get('/guest/v1/session').set('Authorization', `Bearer ${opsToken}`)
     expect(res.status).toBe(401)
   })
 
-  it('rejects a pos-pending (outlet-selection) token on a real /pos route - a different audience, not a session', async () => {
-    const pendingToken = jwt.sign({ tenantId }, posSecret(), { subject: staffId, audience: 'pos-pending', expiresIn: '5m' })
-    const res = await request(httpServer).post('/pos/v1/clock/out').set('Authorization', `Bearer ${pendingToken}`)
+  it('rejects a real pos session token on /guest', async () => {
+    const posToken = signPosToken({ id: uuidv7(), tenantId, outletId, name: 'Realm Staff' })
+    const res = await request(httpServer).get('/guest/v1/session').set('Authorization', `Bearer ${posToken}`)
     expect(res.status).toBe(401)
   })
 
-  it('rejects a pos-audience token on /admin, even signed with the admin secret', async () => {
-    const token = jwt.sign({ tenantId, outletId }, adminSecret(), { subject: staffId, audience: 'pos', expiresIn: '1h' })
+  it('rejects a guest-audience token on /admin, even signed with the admin secret', async () => {
+    const token = jwt.sign({ tenantId, outletId, tableId, sessionId, name: 'Realm Guest' }, adminSecret(), {
+      subject: guestId,
+      audience: 'guest',
+      expiresIn: '1h',
+    })
     const res = await request(httpServer).get('/admin/v1/checklist').set('Authorization', `Bearer ${token}`)
     expect(res.status).toBe(401)
   })
 
-  it('rejects a real pos session token on /admin', async () => {
-    const res = await request(httpServer).get('/admin/v1/checklist').set('Authorization', `Bearer ${posToken}`)
+  it('rejects a real guest session token on /admin', async () => {
+    const res = await request(httpServer).get('/admin/v1/checklist').set('Authorization', `Bearer ${guestToken}`)
     expect(res.status).toBe(401)
   })
 
-  it('rejects a real pos session token on /ops', async () => {
-    const res = await request(httpServer).get('/ops/v1/auth/session').set('Authorization', `Bearer ${posToken}`)
+  it('rejects a real guest session token on /ops', async () => {
+    const res = await request(httpServer).get('/ops/v1/auth/session').set('Authorization', `Bearer ${guestToken}`)
     expect(res.status).toBe(401)
   })
 
-  it('leaves non-pos routes (health) untouched by the pos guard', async () => {
+  it('rejects a real guest session token on /pos', async () => {
+    const res = await request(httpServer).post('/pos/v1/clock/out').set('Authorization', `Bearer ${guestToken}`)
+    expect(res.status).toBe(401)
+  })
+
+  it("rejects a pos session token on /guest's own routes", async () => {
+    const posToken = signPosToken({ id: uuidv7(), tenantId, outletId, name: 'Realm Staff' })
+    const res = await request(httpServer).get('/guest/v1/session').set('Authorization', `Bearer ${posToken}`)
+    expect(res.status).toBe(401)
+  })
+
+  it('leaves non-guest routes (health) untouched by the guest guard', async () => {
     const res = await request(httpServer).get('/health')
+    expect(res.status).toBe(200)
+  })
+
+  it('leaves public /guest routes reachable without any token (start/join/availability)', async () => {
+    const res = await request(httpServer).get(`/guest/v1/outlets/${outletId}/availability`)
     expect(res.status).toBe(200)
   })
 })

@@ -135,6 +135,89 @@ describe('row-level security on region-plane tables (e2e)', () => {
     await admin.ownerInvite.deleteMany({ where: { tenantId } })
   })
 
+  it('table_sessions/guests: fail closed under the wrong tenant, visible under the correct one (AD-17/CAP-1)', async () => {
+    const brand = await admin.brand.create({ data: { tenantId, name: 'RLS Probe Brand' } })
+    const outlet = await admin.outlet.create({
+      data: { tenantId, brandId: brand.id, name: 'RLS Probe Outlet', address: 'x', type: 'dine_in', timezone: 'Asia/Kolkata' },
+    })
+    const floor = await admin.floor.create({ data: { tenantId, outletId: outlet.id, name: 'Ground' } })
+    const table = await admin.diningTable.create({
+      data: { tenantId, floorId: floor.id, label: 'T1', x: 0, y: 0, width: 1, height: 1, shape: 'square', seatCapacity: 2 },
+    })
+    const session = await admin.tableSession.create({
+      data: {
+        tenantId,
+        outletId: outlet.id,
+        tableId: table.id,
+        sessionPin: '1234',
+        startedByGuestName: 'Probe Guest',
+        startedByGuestPhone: 'x',
+        expiresAt: new Date(Date.now() + 3_600_000),
+      },
+    })
+    await admin.guest.create({ data: { tenantId, sessionId: session.id, name: 'Probe Guest' } })
+
+    const underWrongTenant = await probe.$transaction(async (tx) => {
+      await tx.$executeRaw`SELECT set_config('app.tenant_id', ${randomUUID()}, true)`
+      return { sessions: await tx.tableSession.count(), guests: await tx.guest.count() }
+    })
+    expect(underWrongTenant).toEqual({ sessions: 0, guests: 0 })
+
+    const underCorrectTenant = await probe.$transaction(async (tx) => {
+      await tx.$executeRaw`SELECT set_config('app.tenant_id', ${tenantId}, true)`
+      return { sessions: await tx.tableSession.count({ where: { tenantId } }), guests: await tx.guest.count({ where: { tenantId } }) }
+    })
+    expect(underCorrectTenant).toEqual({ sessions: 1, guests: 1 })
+
+    await admin.guest.deleteMany({ where: { tenantId } })
+    await admin.tableSession.deleteMany({ where: { tenantId } })
+    await admin.diningTable.deleteMany({ where: { tenantId } })
+    await admin.floor.deleteMany({ where: { tenantId } })
+    await admin.outlet.deleteMany({ where: { tenantId } })
+    await admin.brand.deleteMany({ where: { tenantId } })
+  })
+
+  it('guest entry (AD-17): outlets/dining_tables fail closed under tenant context, read under the guest-entry context, but the added policy never widens writes', async () => {
+    const brand = await admin.brand.create({ data: { tenantId, name: 'Guest Entry Probe Brand' } })
+    const outlet = await admin.outlet.create({
+      data: { tenantId, brandId: brand.id, name: 'Guest Entry Probe Outlet', address: 'x', type: 'dine_in', timezone: 'Asia/Kolkata' },
+    })
+    const floor = await admin.floor.create({ data: { tenantId, outletId: outlet.id, name: 'Ground' } })
+    const table = await admin.diningTable.create({
+      data: { tenantId, floorId: floor.id, label: 'T1', x: 0, y: 0, width: 1, height: 1, shape: 'square', seatCapacity: 2 },
+    })
+
+    const underNoContext = await probe.$transaction(async (tx) => ({
+      outlets: await tx.outlet.count({ where: { id: outlet.id } }),
+      tables: await tx.diningTable.count({ where: { id: table.id } }),
+    }))
+    expect(underNoContext).toEqual({ outlets: 0, tables: 0 })
+
+    const underGuestEntryContext = await probe.$transaction(async (tx) => {
+      await tx.$executeRaw`SELECT set_config('app.guest_entry_context', 'guest', true)`
+      return {
+        outlets: await tx.outlet.count({ where: { id: outlet.id } }),
+        tables: await tx.diningTable.count({ where: { id: table.id } }),
+      }
+    })
+    expect(underGuestEntryContext).toEqual({ outlets: 1, tables: 1 })
+
+    // The guest-entry policy is SELECT-only (see the migration comment) - it
+    // must never let a write through without the real tenant context.
+    await expect(
+      probe.$transaction(async (tx) => {
+        await tx.$executeRaw`SELECT set_config('app.guest_entry_context', 'guest', true)`
+        await tx.diningTable.update({ where: { id: table.id }, data: { label: 'Smuggled Label' } })
+      }),
+    ).rejects.toThrow()
+    expect((await admin.diningTable.findUniqueOrThrow({ where: { id: table.id } })).label).toBe('T1')
+
+    await admin.diningTable.deleteMany({ where: { tenantId } })
+    await admin.floor.deleteMany({ where: { tenantId } })
+    await admin.outlet.deleteMany({ where: { tenantId } })
+    await admin.brand.deleteMany({ where: { tenantId } })
+  })
+
   it('keeps audit_events append-only: UPDATE and DELETE touch zero rows even in-context', async () => {
     const updated = await probe.$transaction(async (tx) => {
       await tx.$executeRaw`SELECT set_config('app.tenant_id', ${tenantId}, true)`

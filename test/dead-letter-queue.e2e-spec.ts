@@ -70,6 +70,11 @@ async function wipe(prisma: PrismaClient): Promise<void> {
   await prisma.outletCapability.deleteMany()
   await prisma.station.deleteMany()
   await prisma.printer.deleteMany()
+  // qr-self-order/CAP-1 (guest realm, issue #68): Guest FKs to table_sessions
+  // (RESTRICT), and table_sessions FKs to dining_tables/outlets - both wiped
+  // before diningTable.deleteMany() below for the same reason.
+  await prisma.guest.deleteMany()
+  await prisma.tableSession.deleteMany()
   await prisma.diningTable.deleteMany()
   await prisma.floor.deleteMany()
   await prisma.outlet.deleteMany()

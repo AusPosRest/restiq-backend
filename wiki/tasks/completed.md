@@ -331,3 +331,26 @@
   real endpoints. See
   [wiki/features/pos-cashier-waiter.md](../features/pos-cashier-waiter.md).
   Issue AusPosRest/restiq-backend#62.
+- **2026-08-29** - Customer QR Self-Order story 1: guest realm, table
+  session, and QR entry gate (CAP-1). The fifth disjoint auth realm
+  (AD-17, `aud:"guest"`, `GUEST_JWT_SECRET`) - the first whose principal is
+  not staff, minted only from a `TableSession` join. Greenfield
+  `TableSession`/`Guest` models (one open session per table via a partial
+  unique index, same convention as `shifts_one_open_per_outlet`); the
+  4-digit `sessionPin` is deliberately plain-stored and rate-limited, not
+  argon2-hashed (SPEC/AD-17: it gates a shared cart, not money or an
+  account). New public `POST /guest/v1/sessions` (start),
+  `POST /guest/v1/sessions/join` (PIN join, rate-limited 5/30s), and
+  `GET /guest/v1/outlets/:outletId/availability`, plus authenticated
+  `GET /guest/v1/session` and staff-side
+  `POST /pos/v1/tables/:tableId/close-session`. The `qr_ordering`
+  `OutletCapability` gate is enforced server-side on every entry point, not
+  just the availability check. A new `guest_entry_read` RLS policy on
+  `outlets`/`dining_tables` lets a pre-auth guest request resolve its
+  tenant from a scanned outlet+table pair, mirroring
+  `owner_invites`' `invite_accept_read`. 22 new e2e tests
+  (`test/guest-session.e2e-spec.ts`, `test/guest-realm.e2e-spec.ts`, plus
+  RLS coverage added to `test/rls.e2e-spec.ts`) and 5 new unit tests
+  (`src/guest/sessions/join-lockout.spec.ts`). See
+  [wiki/features/qr-self-order.md](../features/qr-self-order.md). Issue
+  AusPosRest/restiq-backend#68.
