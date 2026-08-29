@@ -1,17 +1,12 @@
-// qr-self-order/CAP-2 (stories.yaml story 2): a read-only projection of the
+// qr-self-order/CAP-2 (stories.yaml story 2, issue #78): a read-only projection of the
 // real catalogue (admin/menu's MenuCategory/MenuItem/ItemVariant/
 // ModifierGroup/Allergen/ItemOutletOverride - see restiq-backend/src/
 // admin/menu for the already-shipped models) scoped to the guest's own
 // outlet, via the outlet dimension already present on pricing/availability -
 // never a guest-side copy of the catalogue.
 //
-// Schema-vs-SPEC gap (report honestly, don't invent): the SPEC (CAP-2) and
-// stories.yaml story 2 want photos, veg/non-veg markers, and bilingual
-// (English/Hindi) names on every item. The real MenuItem model (see
-// prisma/schema.prisma) has none of those columns today - only
-// id/name/shortName/available/stationId. This projection exposes exactly
-// what exists and omits the rest; adding those fields is a menu-schema
-// change for a future story, not something to fabricate here.
+// Guest fields (photoUrl, nameHindi, vegMarker) are exposed directly from
+// MenuItem (issue #78).
 //
 // Pricing reuses admin/menu/pricing's resolveCurrentPrice verbatim through
 // the admin barrel (never re-derived) with channel 'qr' - the same
@@ -83,6 +78,9 @@ async function toItemView(tx: Tx, tenantId: string, outletId: string, item: Item
     categoryId: item.categoryId,
     name: item.name,
     shortName: item.shortName,
+    photoUrl: item.photoUrl,
+    nameHindi: item.nameHindi,
+    vegMarker: item.vegMarker,
     available: resolveAvailability(item, outletId),
     priceMinor,
     currency,

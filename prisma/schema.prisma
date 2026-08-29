@@ -328,25 +328,33 @@ model MenuCategory {
   @@map("menu_categories")
 }
 
+enum VegMarker {
+  veg
+  non_veg
+}
+
 // AD-11: price lives in item_prices, not here - this table never carries a
 // price column so no future writer is tempted to UPDATE one in place.
 model MenuItem {
-  id         String   @id @default(uuid(7)) @db.Uuid
-  tenantId   String   @map("tenant_id") @db.Uuid
-  categoryId String   @map("category_id") @db.Uuid
+  id         String     @id @default(uuid(7)) @db.Uuid
+  tenantId   String     @map("tenant_id") @db.Uuid
+  categoryId String     @map("category_id") @db.Uuid
   name       String
   // Short label for kitchen order tickets (PRD FR-10).
-  shortName  String   @map("short_name")
+  shortName  String     @map("short_name")
+  photoUrl   String?    @map("photo_url")
+  nameHindi  String?    @map("name_hindi")
+  vegMarker  VegMarker? @map("veg_marker")
   // The 86 toggle (CAP-4): tenant-wide, immediate, not versioned - price
   // history is the only thing AD-11 requires append-only, not availability.
-  available  Boolean  @default(true)
+  available  Boolean    @default(true)
   // kitchen-display/CAP-1 (AD-16): nullable item->station routing, additive
   // to the already-shipped menu schema (one schema owner - the Tenant Admin
   // menu editor writes it, see admin/menu/items.dtos.ts/items.service.ts).
   // Null means "unrouted" - the kitchen fire hook (src/kitchen) falls back to
   // the outlet's designated default/expo station at fire time, not here.
-  stationId  String?  @map("station_id") @db.Uuid
-  createdAt  DateTime @default(now()) @map("created_at") @db.Timestamptz(6)
+  stationId  String?    @map("station_id") @db.Uuid
+  createdAt  DateTime   @default(now()) @map("created_at") @db.Timestamptz(6)
 
   tenant          Tenant               @relation(fields: [tenantId], references: [id])
   category        MenuCategory         @relation(fields: [categoryId], references: [id])

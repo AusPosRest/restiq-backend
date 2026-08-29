@@ -30,6 +30,9 @@ function toView(item: ItemWithRelations): ItemView {
     categoryId: item.categoryId,
     name: item.name,
     shortName: item.shortName,
+    photoUrl: item.photoUrl,
+    nameHindi: item.nameHindi,
+    vegMarker: item.vegMarker,
     available: item.available,
     stationId: item.stationId,
     variants: item.variants.map((v) => ({ id: v.id, name: v.name, sortOrder: v.sortOrder })),
@@ -110,7 +113,18 @@ export class ItemsService {
           await assertOwnedByTenant(tx, owner.tenantId, [dto.stationId], (id) => tx.station.findUnique({ where: { id } }), 'validation_failed', 'No such station')
         }
 
-        const item = await tx.menuItem.create({ data: { tenantId: owner.tenantId, categoryId: dto.categoryId, name: dto.name, shortName: dto.shortName, stationId: dto.stationId ?? null } })
+        const item = await tx.menuItem.create({
+          data: {
+            tenantId: owner.tenantId,
+            categoryId: dto.categoryId,
+            name: dto.name,
+            shortName: dto.shortName,
+            photoUrl: dto.photoUrl ?? null,
+            nameHindi: dto.nameHindi ?? null,
+            vegMarker: dto.vegMarker ?? null,
+            stationId: dto.stationId ?? null,
+          },
+        })
         await createVariants(tx, owner.tenantId, item.id, dto.variants ?? [])
         for (const groupId of dto.modifierGroupIds ?? []) {
           await tx.itemModifierGroup.create({ data: { tenantId: owner.tenantId, itemId: item.id, groupId, sortOrder: 0 } })
@@ -142,7 +156,14 @@ export class ItemsService {
       }
       await tx.menuItem.update({
         where: { id: itemId },
-        data: { name: dto.name ?? existing.name, shortName: dto.shortName ?? existing.shortName, categoryId: dto.categoryId ?? existing.categoryId },
+        data: {
+          name: dto.name ?? existing.name,
+          shortName: dto.shortName ?? existing.shortName,
+          categoryId: dto.categoryId ?? existing.categoryId,
+          photoUrl: dto.photoUrl !== undefined ? dto.photoUrl : existing.photoUrl,
+          nameHindi: dto.nameHindi !== undefined ? dto.nameHindi : existing.nameHindi,
+          vegMarker: dto.vegMarker !== undefined ? dto.vegMarker : existing.vegMarker,
+        },
       })
       return toView(await loadItem(tx, owner.tenantId, itemId))
     })
