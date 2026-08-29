@@ -46,6 +46,10 @@ export default tseslint.config(
               group: ['**/pos/*', '!**/pos/index'],
               message: 'Import the pos module through its barrel (src/pos)',
             },
+            {
+              group: ['**/guest/*', '!**/guest/index'],
+              message: 'Import the guest module through its barrel (src/guest)',
+            },
           ],
         },
       ],

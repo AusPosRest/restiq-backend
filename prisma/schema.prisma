@@ -168,6 +168,8 @@ model Tenant {
   creditNotes         CreditNote[]
   creditNoteLines     CreditNoteLine[]
   tokenNumberCounters TokenNumberCounter[]
+  tableSessions       TableSession[]
+  guests              Guest[]
 
   // The directory list is served from these: filter columns plus the
   // created_at ordering the default sort and cursor walk.
@@ -261,6 +263,7 @@ model Outlet {
   bills               Bill[]
   billNumberCounter   BillNumberCounter?
   tokenNumberCounter  TokenNumberCounter?
+  tableSessions       TableSession[]
 
   @@index([tenantId])
   @@map("outlets")
@@ -755,13 +758,85 @@ model DiningTable {
   createdAt    DateTime   @default(now()) @map("created_at") @db.Timestamptz(6)
   updatedAt    DateTime   @updatedAt @map("updated_at") @db.Timestamptz(6)
 
-  tenant Tenant  @relation(fields: [tenantId], references: [id])
-  floor  Floor   @relation(fields: [floorId], references: [id])
-  orders Order[]
+  tenant        Tenant         @relation(fields: [tenantId], references: [id])
+  floor         Floor          @relation(fields: [floorId], references: [id])
+  orders        Order[]
+  tableSessions TableSession[]
 
   @@index([tenantId])
   @@index([floorId])
   @@map("dining_tables")
+}
+
+// ---------------------------------------------------------------------------
+// qr-self-order/CAP-1 guest realm (AD-17, issue #68): greenfield, bound to one
+// table+outlet, started by the first guest (name+phone), joined by later
+// guests via the 4-digit sessionPin below. Lifecycle: open -> settled (bill
+// paid, later story) or open -> closed (staff close, or the idle-TTL backstop
+// expiring it). Exactly one open session per table at a time - enforced by
+// the table_sessions_one_open_per_table partial unique index in this
+// migration's hand-written SQL (same convention as shifts_one_open_per_outlet
+// in 20260825000000_shift_cash_management).
+enum TableSessionStatus {
+  open
+  settled
+  closed
+}
+
+model TableSession {
+  id       String              @id @default(uuid(7)) @db.Uuid
+  tenantId String              @map("tenant_id") @db.Uuid
+  outletId String              @map("outlet_id") @db.Uuid
+  tableId  String              @map("table_id") @db.Uuid
+  status   TableSessionStatus  @default(open)
+  // 4-digit PIN gating who can join this table's shared cart - deliberately
+  // NOT credential-grade (SPEC qr-self-order Constraints; AD-17). It protects
+  // against a stranger joining the wrong table's order, not money or an
+  // account, so it is plain-stored and rate-limited (see
+  // guest/sessions/join-lockout.ts) rather than argon2-hashed like a
+  // StaffUser PIN (contrast pos/CAP-1's PosLoginDto). Do not "fix" this to
+  // argon2 - that would misapply a credential-grade convention to a
+  // cart-joining code.
+  sessionPin          String    @map("session_pin")
+  startedByGuestName  String    @map("started_by_guest_name")
+  startedByGuestPhone String    @map("started_by_guest_phone")
+  createdAt           DateTime  @default(now()) @map("created_at") @db.Timestamptz(6)
+  closedAt            DateTime? @map("closed_at") @db.Timestamptz(6)
+  // Idle-TTL backstop (~4h, SPEC Assumptions) - a prototype safety net, not a
+  // product-designed timeout. Checked on every guest-facing read; never
+  // silently renewed.
+  expiresAt DateTime @map("expires_at") @db.Timestamptz(6)
+
+  tenant Tenant      @relation(fields: [tenantId], references: [id])
+  outlet Outlet      @relation(fields: [outletId], references: [id])
+  table  DiningTable @relation(fields: [tableId], references: [id])
+  guests Guest[]
+
+  @@index([tenantId])
+  @@index([outletId])
+  @@index([tableId])
+  @@map("table_sessions")
+}
+
+// One row per guest who joined a TableSession - the first guest's row is
+// created by session start (name+phone captured there); every later joiner
+// gives name only (phone is captured at payment per SPEC CAP-5, a later
+// story). This is the entity a GuestPrincipal is minted from - never an
+// account.
+model Guest {
+  id        String   @id @default(uuid(7)) @db.Uuid
+  tenantId  String   @map("tenant_id") @db.Uuid
+  sessionId String   @map("session_id") @db.Uuid
+  name      String
+  phone     String?
+  joinedAt  DateTime @default(now()) @map("joined_at") @db.Timestamptz(6)
+
+  tenant  Tenant       @relation(fields: [tenantId], references: [id])
+  session TableSession @relation(fields: [sessionId], references: [id])
+
+  @@index([tenantId])
+  @@index([sessionId])
+  @@map("guests")
 }
 
 enum PrinterRenderMode {

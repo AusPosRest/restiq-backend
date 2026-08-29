@@ -19,6 +19,10 @@ the task entry to `tasks/completed.md` after every feature or bug fix.
   add-time); CAP-8 manager authorisation gate (`platform/manager-auth`,
   shared infrastructure for the void/discount/refund/no-sale stories still
   to come); CAP-10 shift open, cash management, and blind-count close.
+- [Customer QR Self-Order (Guest Mobile Web) - backend](features/qr-self-order.md) -
+  CAP-1 guest realm (fifth disjoint auth realm, AD-17), greenfield
+  `TableSession`/`Guest` models, session start/join/close, and the
+  `qr_ordering` capability gate.
 
 ## Tasks
 
