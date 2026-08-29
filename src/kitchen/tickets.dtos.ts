@@ -26,6 +26,11 @@ export interface TicketLineView {
   variantName: string | null
   quantity: number
   seatNumber: number | null
+  // qr-self-order/CAP-4 (issue #77, AD-18): the guest who added this line via
+  // the shared cart, carried straight from OrderLine.guestName - null for
+  // every staff-added (pos-source) line. K1's QR-group-order variant renders
+  // this per line so a shared-table ticket shows who ordered what.
+  guestName: string | null
   modifiers: TicketLineModifierView[]
   addOnBatch: number
   voided: boolean

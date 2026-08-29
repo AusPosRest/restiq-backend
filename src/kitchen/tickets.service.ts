@@ -84,6 +84,7 @@ function toTicketLineView(line: TicketLineWithOrderLine): TicketLineView {
     variantName: line.orderLine.variant?.name ?? null,
     quantity: line.quantity,
     seatNumber: line.orderLine.seatNumber,
+    guestName: line.orderLine.guestName,
     modifiers: line.orderLine.modifiers.map((m) => ({ id: m.id, name: m.modifier.name })),
     addOnBatch: line.addOnBatch,
     voided: line.voided,
