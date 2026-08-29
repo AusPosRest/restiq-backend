@@ -50,6 +50,10 @@ export default tseslint.config(
               group: ['**/guest/*', '!**/guest/index'],
               message: 'Import the guest module through its barrel (src/guest)',
             },
+            {
+              group: ['**/kitchen/*', '!**/kitchen/index'],
+              message: 'Import the kitchen module through its barrel (src/kitchen)',
+            },
           ],
         },
       ],
