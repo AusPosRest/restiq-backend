@@ -7,6 +7,14 @@
   the session (name+phone), later guests join with its 4-digit PIN. A
   session binds to exactly one table; a wrong PIN cannot join; an outlet
   with `qr_ordering` disabled is refused server-side.
+- **CAP-2** Menu browse and item detail - a guest reads a projection of the
+  real catalogue scoped to their own outlet: categories, items, current
+  prices (real pricing resolution), variants, modifier groups (min/max),
+  allergens, and an `available` flag that reflects the tenant-wide 86 toggle
+  plus any per-outlet override. An 86'd item is included, marked
+  unavailable - never omitted. **Schema gap** (see Key decisions below): no
+  photos, no bilingual (Hindi) names, no veg/non-veg marker exist on
+  `MenuItem` today, so this projection can't expose them yet.
 
 ## What's built
 
@@ -61,6 +69,47 @@
   close per lifecycle, delegating to `GuestSessionsService.closeSessionForStaff`
   through the guest module's barrel (AD-2: no second close-a-session
   implementation).
+- `src/guest/menu/` (story 2, issue #71) - `GuestMenuService`/
+  `GuestMenuController`, both registered in `GuestModule`:
+  - `menu.service.ts` - reads the real catalogue
+    (`MenuCategory`/`MenuItem`/`ItemVariant`/`ModifierGroup`/`Modifier`/
+    `Allergen`/`ItemOutletOverride`, all from `admin/menu`) scoped to
+    `guest.tenantId`, with per-item/variant price resolved through
+    `resolveCurrentPrice` (imported from the `admin` barrel, channel `qr`,
+    outlet = `guest.outletId`) - the exact same resolution
+    `pos/orders/order-lines.service.ts` uses for POS lines, never
+    re-derived. Availability = the outlet's `ItemOutletOverride` row if one
+    exists (authoritative), else the item's tenant-wide `available` flag.
+  - `menu.controller.ts` - both routes require a guest token (no
+    `@Public()` - the outlet comes from the principal, not a client param).
+
+## Endpoint contracts (story 2, guest menu)
+
+- `GET /guest/v1/menu` (guest token) -> 200 `GuestMenuView`:
+  ```ts
+  interface GuestMenuView {
+    outletId: string
+    categories: {
+      id: string; name: string; sortOrder: number
+      items: {
+        id: string; categoryId: string; name: string; shortName: string
+        available: boolean          // tenant `available` AND/OR outlet override, override wins if present
+        priceMinor: number | null   // null when the item has variants (price lives on each variant instead) or is genuinely unpriced
+        currency: string | null
+        variants: { id: string; name: string; sortOrder: number; priceMinor: number | null; currency: string | null }[]
+        modifierGroups: { id: string; name: string; minSelections: number; maxSelections: number; modifiers: { id: string; name: string; priceMinor: number }[] }[]
+        allergens: { id: string; name: string }[]
+      }[]
+    }[]
+  }
+  ```
+- `GET /guest/v1/menu/items/:itemId` (guest token) -> 200, one `MenuItemView`
+  (the same item shape as above, addressed directly - added so the Q4 Item
+  Detail screen doesn't have to re-fetch the whole menu just to open one
+  item). 404 `not_found` for a missing item or one belonging to another
+  tenant (never leaks tenant existence).
+- Both routes: 401 `unauthorized` without a valid guest token, or with any
+  other realm's token (same guard as every other `/guest` route, AD-17).
 
 ## Endpoint contracts
 
@@ -89,6 +138,10 @@
   `TableSession.id` and attribute `OrderLine`s to `Guest.id`/`name`.
 - Story 5 (checkout) settles the session (`status: 'settled'`) instead of
   `closed` - a separate terminal state already modeled.
+- Story 3 (shared cart, built concurrently in a sibling worktree/issue) will
+  read item/variant/modifier ids and prices off this same `GuestMenuView`
+  shape when a guest adds to the cart - no new pricing or availability logic
+  needed there, only cart-state bookkeeping.
 
 ## Key decisions
 
@@ -104,3 +157,22 @@
   ORs multiple permissive policies together) - it only ever widens SELECT on
   `outlets`/`dining_tables`, proven in `test/rls.e2e-spec.ts` against a
   restricted, non-superuser probe role.
+- **Schema-vs-SPEC gap, reported honestly (story 2):** SPEC-qr-self-order's
+  CAP-2 and stories.yaml story 2 both want photos, veg/non-veg markers, and
+  bilingual (English/Hindi) item names on the guest menu. The real
+  `MenuItem` model (`prisma/schema.prisma`) carries none of those columns -
+  only `id`/`name`/`shortName`/`available`/`stationId`. `GuestMenuView`
+  exposes exactly what the schema has and omits the rest rather than
+  inventing fields; adding photo/bilingual-name/veg columns is a menu-schema
+  change for a future story (would touch `admin/menu` first, since that's
+  the one schema owner), not something story 2 fabricates.
+- Combos (`Combo`/`ComboComponent`) are out of scope for this projection -
+  neither the SPEC's CAP-2 text nor stories.yaml story 2 mention them, so
+  the ponytail ladder says skip until a story actually asks for them.
+- The guest menu deliberately makes one `resolveCurrentPrice` call per
+  item/variant inside the same transaction (N+1, not batched) - it mirrors
+  the exact per-line resolution `pos/orders/order-lines.service.ts` already
+  uses, and the admin barrel exports only the tx-scoped function, not the
+  underlying pure `pickCurrentPrice` (AD-2: cross-module reach only through
+  a module's own barrel). Acceptable for a single-outlet menu's item count;
+  revisit only if it becomes a real bottleneck.

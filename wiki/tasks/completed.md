@@ -382,3 +382,31 @@
   helper updated to clear the three new tables. See
   [wiki/features/kitchen-display.md](../features/kitchen-display.md). Issue
   AusPosRest/restiq-backend#67.
+- **2026-08-29** - Customer QR Self-Order story 2: guest menu browse and
+  item detail (CAP-2). A read-only projection of the real catalogue
+  (`admin/menu`'s `MenuCategory`/`MenuItem`/`ItemVariant`/`ModifierGroup`/
+  `Modifier`/`Allergen`/`ItemOutletOverride`) scoped to the authenticated
+  guest's own outlet - never a copy. New `GET /guest/v1/menu` (categories
+  with items, each carrying its current `qr`-channel price resolved through
+  `admin/menu/pricing`'s `resolveCurrentPrice`, reused verbatim through the
+  admin barrel; variants and modifier groups with min/max; allergen tags;
+  an `available` flag combining the item's tenant-wide 86 toggle with any
+  per-outlet `ItemOutletOverride`, override winning when present) and
+  `GET /guest/v1/menu/items/:itemId` for the Q4 item-detail screen. Both
+  routes require a guest token - no capability check needed beyond the
+  existing guard, since the outlet is read from the principal, not a
+  client-supplied param. **Schema gap found and reported, not
+  fabricated:** the SPEC and stories.yaml both want photos, veg/non-veg
+  markers, and bilingual (Hindi) names on menu items; `MenuItem` has none
+  of those columns today, so this projection omits them rather than
+  inventing data - flagged in
+  [wiki/features/qr-self-order.md](../features/qr-self-order.md) for a
+  future menu-schema story. 9 new e2e tests
+  (`test/guest-menu.e2e-spec.ts`): outlet scoping, price resolution
+  matching the real resolver (including an outlet-specific override
+  beating the unscoped price), a tenant-wide 86'd item included but marked
+  unavailable, a per-outlet override marking an item unavailable at one
+  outlet only, cross-tenant isolation, item-detail read, and guest-token
+  enforcement (401 without one, 401 for a pos-realm token - the existing
+  `guest-realm.e2e-spec.ts` already proves this generally for every
+  `/guest` route). Issue AusPosRest/restiq-backend#71.
