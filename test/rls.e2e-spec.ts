@@ -1,0 +1,292 @@
+// AD-5 / NFR-8: forced RLS on tenant-owned tables, proven through a
+// NON-superuser connection (the app's own superuser bypasses RLS locally, so
+// this suite provisions a restricted probe role and connects as it).
+// The wrong-tenant-context test asserts zero rows.
+import { randomUUID } from 'node:crypto'
+import { afterAll, beforeAll, describe, expect, it } from 'vitest'
+import { createPrismaClient, PrismaClient } from '../src/db/client'
+import { uuidv7 } from '../src/platform'
+
+const PROBE_ROLE = 'restiq_rls_probe'
+const PROBE_PASSWORD = 'rls-probe-only'
+
+function probeUrl(): string {
+  const url = new URL(process.env.DATABASE_URL as string)
+  url.username = PROBE_ROLE
+  url.password = PROBE_PASSWORD
+  return url.toString()
+}
+
+describe('row-level security on region-plane tables (e2e)', () => {
+  let admin: PrismaClient
+  let probe: PrismaClient
+  let tenantId: string
+
+  beforeAll(async () => {
+    admin = createPrismaClient()
+    await admin.$executeRawUnsafe(`
+      DO $$ BEGIN
+        CREATE ROLE ${PROBE_ROLE} LOGIN PASSWORD '${PROBE_PASSWORD}';
+      EXCEPTION WHEN duplicate_object THEN NULL; END $$;
+    `)
+    await admin.$executeRawUnsafe(`GRANT USAGE ON SCHEMA public TO ${PROBE_ROLE}`)
+    await admin.$executeRawUnsafe(`GRANT SELECT, INSERT, UPDATE, DELETE ON ALL TABLES IN SCHEMA public TO ${PROBE_ROLE}`)
+
+    // Seed one tenant directly (as superuser, which bypasses RLS by design).
+    tenantId = uuidv7()
+    await admin.tenant.create({
+      data: {
+        id: tenantId,
+        name: 'RLS Probe Tenant',
+        registeredAddress: 'x',
+        contactName: 'x',
+        contactEmail: 'rls@probe.example',
+        contactPhone: 'x',
+        country: 'IN',
+        plan: 'standard',
+        billingPeriod: 'monthly',
+      },
+    })
+    await admin.auditEvent.create({
+      data: {
+        tenantId,
+        actorEmail: 'rls@probe.example',
+        action: 'rls.probe',
+        reason: 'rls test fixture',
+        occurredAt: new Date(),
+      },
+    })
+
+    probe = createPrismaClient(probeUrl())
+  })
+
+  afterAll(async () => {
+    await probe.$disconnect()
+    await admin.auditEvent.deleteMany({ where: { tenantId } })
+    await admin.tenant.delete({ where: { id: tenantId } })
+    await admin.$disconnect()
+  })
+
+  it('returns zero rows with no tenant context (fail closed)', async () => {
+    expect(await probe.tenant.count()).toBe(0)
+  })
+
+  it('returns zero rows under the WRONG tenant context', async () => {
+    const rows = await probe.$transaction(async (tx) => {
+      await tx.$executeRaw`SELECT set_config('app.tenant_id', ${randomUUID()}, true)`
+      return tx.tenant.count()
+    })
+    expect(rows).toBe(0)
+  })
+
+  it('returns the tenant row under the correct tenant context', async () => {
+    const rows = await probe.$transaction(async (tx) => {
+      await tx.$executeRaw`SELECT set_config('app.tenant_id', ${tenantId}, true)`
+      return tx.tenant.count({ where: { id: tenantId } })
+    })
+    expect(rows).toBe(1)
+  })
+
+  it('blocks INSERTs whose tenant_id does not match the context', async () => {
+    await expect(
+      probe.$transaction(async (tx) => {
+        await tx.$executeRaw`SELECT set_config('app.tenant_id', ${randomUUID()}, true)`
+        await tx.brand.create({ data: { tenantId, name: 'Smuggled Brand' } })
+      }),
+    ).rejects.toThrow()
+    expect(await admin.brand.count({ where: { tenantId } })).toBe(0)
+  })
+
+  it('reads cross-tenant under the explicit operator context', async () => {
+    const rows = await probe.$transaction(async (tx) => {
+      await tx.$executeRaw`SELECT set_config('app.operator_context', 'operator', true)`
+      return tx.tenant.count()
+    })
+    expect(rows).toBeGreaterThanOrEqual(1)
+  })
+
+  it('owner_invites: fails closed under tenant context, reads cross-tenant under the invite-accept context (AD-10/CAP-1)', async () => {
+    await admin.ownerInvite.create({
+      data: {
+        tenantId,
+        email: 'probe-owner@test.example',
+        firstName: 'Probe',
+        lastName: 'Owner',
+        tokenHash: 'rls-probe-token-hash',
+        expiresAt: new Date(Date.now() + 3_600_000),
+      },
+    })
+
+    const underWrongTenant = await probe.$transaction(async (tx) => {
+      await tx.$executeRaw`SELECT set_config('app.tenant_id', ${randomUUID()}, true)`
+      return tx.ownerInvite.count()
+    })
+    expect(underWrongTenant).toBe(0)
+
+    // The accept-invite flow authenticates by possession of the raw token,
+    // before any tenant_id is known - this context is what makes that lookup
+    // possible without disabling RLS.
+    const underInviteContext = await probe.$transaction(async (tx) => {
+      await tx.$executeRaw`SELECT set_config('app.invite_accept_context', 'invite', true)`
+      return tx.ownerInvite.count({ where: { tenantId } })
+    })
+    expect(underInviteContext).toBe(1)
+
+    await admin.ownerInvite.deleteMany({ where: { tenantId } })
+  })
+
+  it('table_sessions/guests: fail closed under the wrong tenant, visible under the correct one (AD-17/CAP-1)', async () => {
+    const brand = await admin.brand.create({ data: { tenantId, name: 'RLS Probe Brand' } })
+    const outlet = await admin.outlet.create({
+      data: { tenantId, brandId: brand.id, name: 'RLS Probe Outlet', address: 'x', type: 'dine_in', timezone: 'Asia/Kolkata' },
+    })
+    const floor = await admin.floor.create({ data: { tenantId, outletId: outlet.id, name: 'Ground' } })
+    const table = await admin.diningTable.create({
+      data: { tenantId, floorId: floor.id, label: 'T1', x: 0, y: 0, width: 1, height: 1, shape: 'square', seatCapacity: 2 },
+    })
+    const session = await admin.tableSession.create({
+      data: {
+        tenantId,
+        outletId: outlet.id,
+        tableId: table.id,
+        sessionPin: '1234',
+        startedByGuestName: 'Probe Guest',
+        startedByGuestPhone: 'x',
+        expiresAt: new Date(Date.now() + 3_600_000),
+      },
+    })
+    await admin.guest.create({ data: { tenantId, sessionId: session.id, name: 'Probe Guest' } })
+
+    const underWrongTenant = await probe.$transaction(async (tx) => {
+      await tx.$executeRaw`SELECT set_config('app.tenant_id', ${randomUUID()}, true)`
+      return { sessions: await tx.tableSession.count(), guests: await tx.guest.count() }
+    })
+    expect(underWrongTenant).toEqual({ sessions: 0, guests: 0 })
+
+    const underCorrectTenant = await probe.$transaction(async (tx) => {
+      await tx.$executeRaw`SELECT set_config('app.tenant_id', ${tenantId}, true)`
+      return { sessions: await tx.tableSession.count({ where: { tenantId } }), guests: await tx.guest.count({ where: { tenantId } }) }
+    })
+    expect(underCorrectTenant).toEqual({ sessions: 1, guests: 1 })
+
+    await admin.guest.deleteMany({ where: { tenantId } })
+    await admin.tableSession.deleteMany({ where: { tenantId } })
+    await admin.diningTable.deleteMany({ where: { tenantId } })
+    await admin.floor.deleteMany({ where: { tenantId } })
+    await admin.outlet.deleteMany({ where: { tenantId } })
+    await admin.brand.deleteMany({ where: { tenantId } })
+  })
+
+  it('cart_lines/cart_line_modifiers: fail closed under the wrong tenant, visible under the correct one (qr-self-order/CAP-3, issue #72)', async () => {
+    const brand = await admin.brand.create({ data: { tenantId, name: 'Cart RLS Probe Brand' } })
+    const outlet = await admin.outlet.create({
+      data: { tenantId, brandId: brand.id, name: 'Cart RLS Probe Outlet', address: 'x', type: 'dine_in', timezone: 'Asia/Kolkata' },
+    })
+    const floor = await admin.floor.create({ data: { tenantId, outletId: outlet.id, name: 'Ground' } })
+    const table = await admin.diningTable.create({
+      data: { tenantId, floorId: floor.id, label: 'T1', x: 0, y: 0, width: 1, height: 1, shape: 'square', seatCapacity: 2 },
+    })
+    const session = await admin.tableSession.create({
+      data: {
+        tenantId,
+        outletId: outlet.id,
+        tableId: table.id,
+        sessionPin: '1234',
+        startedByGuestName: 'Probe Guest',
+        startedByGuestPhone: 'x',
+        expiresAt: new Date(Date.now() + 3_600_000),
+      },
+    })
+    const guest = await admin.guest.create({ data: { tenantId, sessionId: session.id, name: 'Probe Guest' } })
+    const category = await admin.menuCategory.create({ data: { tenantId, name: 'Mains', sortOrder: 0 } })
+    const item = await admin.menuItem.create({ data: { tenantId, categoryId: category.id, name: 'Probe Item', shortName: 'PI' } })
+    const group = await admin.modifierGroup.create({ data: { tenantId, name: 'Probe Group', minSelections: 0, maxSelections: 1 } })
+    const modifier = await admin.modifier.create({ data: { tenantId, groupId: group.id, name: 'Probe Mod', sortOrder: 0 } })
+    const cartLine = await admin.cartLine.create({
+      data: { tenantId, sessionId: session.id, guestId: guest.id, guestName: guest.name, itemId: item.id, quantity: 1 },
+    })
+    await admin.cartLineModifier.create({ data: { tenantId, cartLineId: cartLine.id, modifierId: modifier.id } })
+
+    const underWrongTenant = await probe.$transaction(async (tx) => {
+      await tx.$executeRaw`SELECT set_config('app.tenant_id', ${randomUUID()}, true)`
+      return { lines: await tx.cartLine.count(), modifiers: await tx.cartLineModifier.count() }
+    })
+    expect(underWrongTenant).toEqual({ lines: 0, modifiers: 0 })
+
+    const underCorrectTenant = await probe.$transaction(async (tx) => {
+      await tx.$executeRaw`SELECT set_config('app.tenant_id', ${tenantId}, true)`
+      return { lines: await tx.cartLine.count({ where: { tenantId } }), modifiers: await tx.cartLineModifier.count({ where: { tenantId } }) }
+    })
+    expect(underCorrectTenant).toEqual({ lines: 1, modifiers: 1 })
+
+    await admin.cartLineModifier.deleteMany({ where: { tenantId } })
+    await admin.cartLine.deleteMany({ where: { tenantId } })
+    await admin.modifier.deleteMany({ where: { tenantId } })
+    await admin.modifierGroup.deleteMany({ where: { tenantId } })
+    await admin.menuItem.deleteMany({ where: { tenantId } })
+    await admin.menuCategory.deleteMany({ where: { tenantId } })
+    await admin.guest.deleteMany({ where: { tenantId } })
+    await admin.tableSession.deleteMany({ where: { tenantId } })
+    await admin.diningTable.deleteMany({ where: { tenantId } })
+    await admin.floor.deleteMany({ where: { tenantId } })
+    await admin.outlet.deleteMany({ where: { tenantId } })
+    await admin.brand.deleteMany({ where: { tenantId } })
+  })
+
+  it('guest entry (AD-17): outlets/dining_tables fail closed under tenant context, read under the guest-entry context, but the added policy never widens writes', async () => {
+    const brand = await admin.brand.create({ data: { tenantId, name: 'Guest Entry Probe Brand' } })
+    const outlet = await admin.outlet.create({
+      data: { tenantId, brandId: brand.id, name: 'Guest Entry Probe Outlet', address: 'x', type: 'dine_in', timezone: 'Asia/Kolkata' },
+    })
+    const floor = await admin.floor.create({ data: { tenantId, outletId: outlet.id, name: 'Ground' } })
+    const table = await admin.diningTable.create({
+      data: { tenantId, floorId: floor.id, label: 'T1', x: 0, y: 0, width: 1, height: 1, shape: 'square', seatCapacity: 2 },
+    })
+
+    const underNoContext = await probe.$transaction(async (tx) => ({
+      outlets: await tx.outlet.count({ where: { id: outlet.id } }),
+      tables: await tx.diningTable.count({ where: { id: table.id } }),
+    }))
+    expect(underNoContext).toEqual({ outlets: 0, tables: 0 })
+
+    const underGuestEntryContext = await probe.$transaction(async (tx) => {
+      await tx.$executeRaw`SELECT set_config('app.guest_entry_context', 'guest', true)`
+      return {
+        outlets: await tx.outlet.count({ where: { id: outlet.id } }),
+        tables: await tx.diningTable.count({ where: { id: table.id } }),
+      }
+    })
+    expect(underGuestEntryContext).toEqual({ outlets: 1, tables: 1 })
+
+    // The guest-entry policy is SELECT-only (see the migration comment) - it
+    // must never let a write through without the real tenant context.
+    await expect(
+      probe.$transaction(async (tx) => {
+        await tx.$executeRaw`SELECT set_config('app.guest_entry_context', 'guest', true)`
+        await tx.diningTable.update({ where: { id: table.id }, data: { label: 'Smuggled Label' } })
+      }),
+    ).rejects.toThrow()
+    expect((await admin.diningTable.findUniqueOrThrow({ where: { id: table.id } })).label).toBe('T1')
+
+    await admin.diningTable.deleteMany({ where: { tenantId } })
+    await admin.floor.deleteMany({ where: { tenantId } })
+    await admin.outlet.deleteMany({ where: { tenantId } })
+    await admin.brand.deleteMany({ where: { tenantId } })
+  })
+
+  it('keeps audit_events append-only: UPDATE and DELETE touch zero rows even in-context', async () => {
+    const updated = await probe.$transaction(async (tx) => {
+      await tx.$executeRaw`SELECT set_config('app.tenant_id', ${tenantId}, true)`
+      return tx.auditEvent.updateMany({ where: { tenantId }, data: { reason: 'tampered' } })
+    })
+    expect(updated.count).toBe(0)
+
+    const deleted = await probe.$transaction(async (tx) => {
+      await tx.$executeRaw`SELECT set_config('app.tenant_id', ${tenantId}, true)`
+      return tx.auditEvent.deleteMany({ where: { tenantId } })
+    })
+    expect(deleted.count).toBe(0)
+
+    expect(await admin.auditEvent.count({ where: { tenantId, reason: 'rls test fixture' } })).toBe(1)
+  })
+})

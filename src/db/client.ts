@@ -5,7 +5,7 @@
 // this module (for a type, or for createPrismaClient) must not demand a
 // DATABASE_URL or open a pool.
 import { PrismaPg } from '@prisma/adapter-pg'
-import { PrismaClient } from '../generated/prisma/client.js'
+import { PrismaClient } from '../generated/prisma/client'
 
 export function databaseUrl(): string {
   const url = process.env['DATABASE_URL']
