@@ -523,3 +523,26 @@
   410s both endpoints, no token 401s, and cross-tenant isolation. See
   [wiki/features/qr-self-order.md](../features/qr-self-order.md) for the
   full step-mapping write-up. Issue AusPosRest/restiq-backend#81.
+- **2026-09-02** - Public device-side enrolment endpoint (device realm,
+  AD-12/AD-13). New `POST /device/v1/enroll` (`src/device/`, unauthenticated
+  by construction - no guard matches the `/device` prefix) lets a device
+  redeem its own one-time enrolment code directly, as the product intends;
+  the existing `POST /ops/v1/devices/enroll` still requires an operator
+  token and is unchanged for the internal console. Both now call
+  `DevicesService.enrollWithActor()`, extracted from the ops-only `enroll()`
+  (same one-time-use/expiry/code checks, same `Device` row shape) so the
+  two callers can't drift - they differ only in the `audit_events` actor: an
+  ops operator's `{ id, email }`, or `{ actorId: null, actorEmail:
+  'device:<hardwareKeyFingerprint prefix>' }` for a device with no operator
+  identity. No schema change. **Known risk:** enrolment codes are short and
+  this route has no application-level rate limiting - no throttling
+  package/pattern exists elsewhere in the repo to reuse, so none was
+  invented here; noted in the PR as an infra-level (reverse proxy/WAF)
+  followup rather than shipped ad hoc. 7 new e2e tests
+  (`test/device-enroll.e2e-spec.ts`): the public happy path (audited with a
+  device actor), `code_invalid`/`code_expired`/`code_already_used`, that any
+  `Authorization` header sent is simply ignored on this route, body
+  validation, and that the ops-realm enroll endpoint keeps working
+  unchanged. See
+  [wiki/features/platform-console.md](../features/platform-console.md).
+  Issue AusPosRest/restiq-backend#89.

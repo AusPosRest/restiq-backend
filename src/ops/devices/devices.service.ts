@@ -28,6 +28,16 @@ export interface DeviceView {
   revokedAt: string | null
 }
 
+// Who to hold accountable for the enroll() audit_events row - an ops
+// operator, or (src/device/enroll) a device that enrolled itself with no
+// operator session at all. actorId is nullable on audit_events for exactly
+// this reason; actorEmail is not, so a device actor synthesises one.
+export interface EnrollActor {
+  actorId: string | null
+  actorEmail: string
+  reason?: string
+}
+
 export interface DeviceListItem extends DeviceView {
   tenantName: string
   outletName: string | null
@@ -220,8 +230,18 @@ export class DevicesService {
   }
 
   async enroll(operator: OpsPrincipal, dto: EnrollDeviceDto): Promise<{ device: DeviceView }> {
+    return this.enrollWithActor({ actorId: operator.id, actorEmail: operator.email, reason: dto.reason }, dto)
+  }
+
+  // Shared enrol core (AD-12/AD-13 flavour: also reachable with no operator
+  // at all from the public device realm - see src/device/enroll -
+  // reused rather than reimplemented so the two callers can never drift on
+  // one-time-use/expiry semantics). `actor` carries whoever is accountable
+  // for the audit_events row: an ops operator for the existing route, or a
+  // device actor (null actorId, a synthetic actorEmail) for the public one.
+  async enrollWithActor(actor: EnrollActor, dto: EnrollDeviceDto): Promise<{ device: DeviceView }> {
     const codeHash = hashCode(normalizeCode(dto.code))
-    const reason = dto.reason ?? DEFAULT_ENROLL_REASON
+    const reason = actor.reason ?? DEFAULT_ENROLL_REASON
     const plane = this.registry.planeFor(this.registry.homeRegion())
 
     return plane.$transaction(async (tx) => {
@@ -260,8 +280,8 @@ export class DevicesService {
       await tx.auditEvent.create({
         data: {
           tenantId: record.tenantId,
-          actorId: operator.id,
-          actorEmail: operator.email,
+          actorId: actor.actorId,
+          actorEmail: actor.actorEmail,
           action: 'device.enrolled',
           reason,
           occurredAt: now,
