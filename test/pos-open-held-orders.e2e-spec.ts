@@ -19,6 +19,7 @@ interface OrderBody {
   tenantId: string
   outletId: string
   tableId: string | null
+  tableLabel: string | null
   ownerId: string
   status: 'open' | 'sent' | 'closed'
   createdAt: string
@@ -180,6 +181,8 @@ describe('/pos/v1 outlet-wide open and held orders (e2e)', () => {
     const orders = res.body as OrderBody[]
     expect(orders.map((o) => o.id).sort()).toEqual([tableOrder.id, counterOrder.id].sort())
     expect(orders.find((o) => o.id === counterOrder.id)?.tableId).toBeNull()
+    expect(orders.find((o) => o.id === counterOrder.id)?.tableLabel).toBeNull()
+    expect(orders.find((o) => o.id === tableOrder.id)?.tableLabel).toBe('T1')
   })
 
   it('excludes closed orders', async () => {

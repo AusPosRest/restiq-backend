@@ -25,6 +25,11 @@ export interface OrderView {
   tenantId: string
   outletId: string
   tableId: string | null
+  // pos/CAP-9 (issue #94): the DiningTable.label for a dine-in (tableId
+  // non-null) order - null for a counter order (tableId null), same
+  // condition as tokenNumber below but inverted. Display-only, resolved at
+  // the buildOrderView projection point so every order endpoint carries it.
+  tableLabel: string | null
   // Nullable as of qr-self-order/CAP-4 (issue #77): null only for a
   // guest-placed (source 'qr') order that no staff member has yet taken over
   // via transfer() - see Order.ownerId's schema comment.
@@ -128,6 +133,10 @@ export type TableMapStatus = 'occupied' | 'empty'
 export interface TableMapEntry {
   tableId: string
   floorId: string
+  // pos/CAP-9 (issue #94): the owning Floor's name, display-only - added
+  // alongside floorId so the POS web doesn't need a separate floor lookup to
+  // render a human-readable floor label.
+  floorName: string
   label: string
   seatCapacity: number
   // TODO(pos/CAP-7 Bill and settle): SPEC's third state, "needs-bill", is

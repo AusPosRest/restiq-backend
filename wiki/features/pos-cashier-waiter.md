@@ -166,6 +166,26 @@ real Postgres test DB)
 - No session -> `401`; another tenant's table map/order -> `404` (never a
   different shape leaking existence).
 
+### Name projections (issue #94, additive)
+
+The POS web was rendering raw UUIDs (`FLOOR 01a06107-…`, `TABLE
+01a06108-…`) because `TableMapEntry` only carried `floorId` and `OrderView`
+only carried `tableId` - no human-readable name travelled with either. Two
+display-only fields were added, non-breaking (no existing field renamed or
+removed):
+
+- `TableMapEntry.floorName: string` - the owning `Floor.name`, added to
+  `getTableMap()`'s existing `diningTable.findMany` via `include: { floor: {
+  select: { name: true } } }` (one query, same as before).
+- `OrderView.tableLabel: string | null` - the `DiningTable.label` for a
+  dine-in order, `null` for a counter order (`tableId: null`), resolved
+  inside `buildOrderView()` itself (one extra `diningTable.findUnique`
+  alongside the existing lines query, run with `Promise.all`) - since every
+  order read/mutation endpoint (get, add/update/remove line, status,
+  transfer, open-orders list, table-map claim/open, counter-order create)
+  already routes through this single projection point, all of them pick up
+  `tableLabel` for free.
+
 ### CAP-2 integration points for later stories
 
 - pos/CAP-3 (order taking) and pos/CAP-4 (group ordering) extend this

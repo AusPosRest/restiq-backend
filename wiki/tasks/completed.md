@@ -1,5 +1,14 @@
 # Completed
 
+- **2026-09-02** - POS projections: `floorName` on `TableMapEntry` and
+  `tableLabel` on `OrderView` (additive, non-breaking - no existing field
+  renamed or removed). Fixes the POS web showing raw UUIDs instead of
+  human-readable floor/table names. `floorName` is the owning `Floor.name`,
+  added to `getTableMap()`'s table query; `tableLabel` is the `DiningTable
+  .label` for a dine-in order (`null` for a counter order), resolved once
+  inside `buildOrderView()` so every order read/mutation endpoint carries it.
+  See [wiki/features/pos-cashier-waiter.md](../features/pos-cashier-waiter.md#name-projections-issue-94-additive).
+  Issue AusPosRest/restiq-backend#94.
 - **2026-08-24** - Tenant Admin story 1: owner invite acceptance (CAP-1) and
   go-live checklist API (CAP-2). `POST /admin/v1/auth/accept-invite`,
   `GET /admin/v1/checklist`, `PATCH /admin/v1/checklist/:step`,
