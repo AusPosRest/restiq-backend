@@ -257,7 +257,7 @@ describe('/guest/v1 checkout and split payment, simulated (e2e)', () => {
       expect((fetched.body as BillBody).id).toBe(bill.id)
     })
 
-    it('rejects creating a second bill for the same order', async () => {
+    it('is idempotent: a second POST for the same order returns 200 with the same bill id and writes no second row (issue #98)', async () => {
       const tenantId = await createTenant(prisma)
       const outletId = await createOutlet(prisma, tenantId)
       const tableId = await createTable(prisma, tenantId, outletId)
@@ -265,10 +265,17 @@ describe('/guest/v1 checkout and split payment, simulated (e2e)', () => {
       const itemId = await createItemWithPrice(prisma, tenantId, 10000)
       const { tokens, orderId } = await placeOrderForGuests(outletId, tableId, itemId, 10000, 1)
 
-      await authed(request(httpServer).post(`/guest/v1/orders/${orderId}/bill`), tokens[0]).send()
-      const res = await authed(request(httpServer).post(`/guest/v1/orders/${orderId}/bill`), tokens[0]).send()
-      expect(res.status).toBe(409)
-      expect((res.body as ErrorBody).error.code).toBe('bill_already_exists')
+      const first = await authed(request(httpServer).post(`/guest/v1/orders/${orderId}/bill`), tokens[0]).send()
+      expect(first.status).toBe(201)
+      const firstBill = first.body as BillBody
+
+      const second = await authed(request(httpServer).post(`/guest/v1/orders/${orderId}/bill`), tokens[0]).send()
+      expect(second.status).toBe(200)
+      const secondBill = second.body as BillBody
+      expect(secondBill.id).toBe(firstBill.id)
+      expect(secondBill).toEqual(firstBill)
+
+      expect(await prisma.bill.count({ where: { orderId } })).toBe(1)
     })
   })
 

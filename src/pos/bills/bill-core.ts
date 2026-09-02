@@ -88,40 +88,72 @@ export interface CreateBillParams {
   // null for a guest-checkout Bill (src/guest/bills) - see
   // Bill.createdByStaffId's schema comment.
   createdByStaffId: string | null
+  // True when the caller's own Order row already carries status 'closed'.
+  // Only enforced when no Bill exists yet for this order (below) - an order
+  // closed by an EARLIER call finalising this exact bill (bill-core's
+  // commitFinalize also flips Order to closed) must still return that
+  // existing bill idempotently, not this error. What it does guard is
+  // pos/CAP-2's direct staff status PATCH (orders.service.ts's
+  // FORWARD_TRANSITIONS allows sent->closed on its own, no bill involved) -
+  // an order closed that way, with no Bill ever created, must still be
+  // rejected.
+  orderClosed: boolean
+}
+
+export interface CreateOrGetBillResult {
+  bill: BillWithTenders
+  created: boolean
 }
 
 /**
- * Creates an open Bill snapshotting the order's current lines into
- * subtotal/tax. Caller-gated: bills.service.ts's createBill() checks
- * owner-only (pos/CAP-2's rule) before calling this; guest/bills has no
- * ownership concept (a guest order has no staff owner - see
- * Order.ownerId's schema comment) so it calls this directly after its own
- * session/order-active check. Only one Bill may ever exist per order
- * (schema-enforced, unique orderId) - a second create attempt is rejected,
- * not merged.
+ * Issue #98: this POST is idempotent per orderId, not merged and never a
+ * second row - if a Bill already exists for the order (open or finalized),
+ * it's returned as-is with created:false so the caller can answer 200
+ * instead of 201; only a genuinely new order gets a fresh Bill (created:true).
+ * The schema's unique orderId constraint is still the real backstop for a
+ * concurrent create race (AD-11/AD-14: never two Bill rows) - caught below
+ * and turned into the same idempotent "return the existing bill" outcome
+ * instead of a raw P2002 escaping.
+ *
+ * Caller-gated: bills.service.ts's createBill() checks owner-only
+ * (pos/CAP-2's rule) before calling this; guest/bills has no ownership
+ * concept (a guest order has no staff owner - see Order.ownerId's schema
+ * comment) so it calls this directly after its own session/order-active
+ * check.
  */
-export async function createBillRecord(tx: Tx, params: CreateBillParams): Promise<BillWithTenders> {
-  const existing = await tx.bill.findUnique({ where: { orderId: params.orderId } })
+export async function createOrGetBillRecord(tx: Tx, params: CreateBillParams): Promise<CreateOrGetBillResult> {
+  const existing = await tx.bill.findUnique({ where: { orderId: params.orderId }, include: BILL_INCLUDE })
   if (existing) {
-    throw new ConflictException({ code: 'bill_already_exists', message: 'A bill already exists for this order' })
+    return { bill: existing, created: false }
+  }
+
+  if (params.orderClosed) {
+    throw new ConflictException({ code: 'conflict', message: 'This order is already closed' })
   }
 
   const subtotalMinor = await computeSubtotal(tx, params.orderId)
   const taxMinor = (subtotalMinor * TAX_RATE_PLACEHOLDER_PERCENT) / 100n
 
-  const bill = await tx.bill.create({
-    data: {
-      id: uuidv7(),
-      tenantId: params.tenantId,
-      outletId: params.outletId,
-      orderId: params.orderId,
-      subtotalMinor,
-      taxMinor,
-      createdByStaffId: params.createdByStaffId,
-    },
-    include: BILL_INCLUDE,
-  })
-  return bill
+  try {
+    const bill = await tx.bill.create({
+      data: {
+        id: uuidv7(),
+        tenantId: params.tenantId,
+        outletId: params.outletId,
+        orderId: params.orderId,
+        subtotalMinor,
+        taxMinor,
+        createdByStaffId: params.createdByStaffId,
+      },
+      include: BILL_INCLUDE,
+    })
+    return { bill, created: true }
+  } catch (error) {
+    if (!isUniqueViolation(error)) throw error
+    const raced = await tx.bill.findUnique({ where: { orderId: params.orderId }, include: BILL_INCLUDE })
+    if (!raced) throw error
+    return { bill: raced, created: false }
+  }
 }
 
 /** Inserts one Tender row against an open Bill - a real payment (AD-14), never UPDATEd or DELETEd once written. Returns the created row (its id links a guest BillShare to the Tender that settled it). */

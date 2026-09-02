@@ -1,4 +1,5 @@
-import { Body, Controller, Get, HttpCode, Param, Post } from '@nestjs/common'
+import { Body, Controller, Get, HttpCode, Param, Post, Res } from '@nestjs/common'
+import type { Response } from 'express'
 import { CurrentGuest, GuestPrincipal } from '../../platform'
 import { GuestBillView, SimulatedPaymentDto } from './bills.dtos'
 import { GuestBillsService } from './bills.service'
@@ -7,10 +8,13 @@ import { GuestBillsService } from './bills.service'
 export class GuestBillsController {
   constructor(private readonly bills: GuestBillsService) {}
 
+  // Issue #98: 201 for a genuinely new Bill, 200 when one already existed
+  // for this order (idempotent - see GuestBillsService.createBill).
   @Post('orders/:orderId/bill')
-  @HttpCode(201)
-  createBill(@CurrentGuest() guest: GuestPrincipal, @Param('orderId') orderId: string): Promise<GuestBillView> {
-    return this.bills.createBill(guest, orderId)
+  async createBill(@CurrentGuest() guest: GuestPrincipal, @Param('orderId') orderId: string, @Res({ passthrough: true }) res: Response): Promise<GuestBillView> {
+    const { view, created } = await this.bills.createBill(guest, orderId)
+    res.status(created ? 201 : 200)
+    return view
   }
 
   @Get('orders/:orderId/bill')

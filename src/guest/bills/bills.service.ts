@@ -1,7 +1,7 @@
 // qr-self-order/CAP-5 (issue #80, AD-18): "one order pipeline, many writers"
 // extended to money - guest checkout raises and settles a REAL Bill/Tender
 // (the same rows pos/bills writes), never a parallel guest money model.
-// Bill creation and finalisation reuse pos/bills' exact core (createBillRecord/
+// Bill creation and finalisation reuse pos/bills' exact core (createOrGetBillRecord/
 // commitFinalize/createTenderRecord, imported through its scoped barrel,
 // src/pos/bills/index.ts - see bill-core.ts's top comment for why that barrel
 // exists and why a full NestJS DI reuse of BillsService would cycle the
@@ -17,7 +17,7 @@
 // completes it exactly like any other share.
 import { ConflictException, GoneException, Injectable, NotFoundException } from '@nestjs/common'
 import type { Order, Prisma, TableSession } from '../../generated/prisma/client'
-import { commitFinalize, createBillRecord, createTenderRecord, isUniqueViolation, loadBill, toBillView } from '../../pos/bills'
+import { commitFinalize, createOrGetBillRecord, createTenderRecord, loadBill, toBillView } from '../../pos/bills'
 import type { BillWithTenders } from '../../pos/bills'
 import { GuestPrincipal, RegionRegistryService, uuidv7 } from '../../platform'
 import { isSessionInactive } from '../sessions/sessions.service'
@@ -81,28 +81,30 @@ export class GuestBillsService {
    * each guest's own line total - amounts sum EXACTLY to the bill total
    * (the last guest, in line order, absorbs any rounding remainder, so
    * nothing is dropped or double-counted).
+   *
+   * Issue #98: idempotent per orderId, same as the staff path
+   * (bills.service.ts's createBill) - a second call for an order that
+   * already has a Bill returns it (200, created:false) instead of 409,
+   * shares included, rather than forcing a caller who got a stale 409 into
+   * a second round-trip through GET orders/:orderId/bill below.
    */
-  async createBill(guest: GuestPrincipal, orderId: string): Promise<GuestBillView> {
+  async createBill(guest: GuestPrincipal, orderId: string): Promise<{ view: GuestBillView; created: boolean }> {
     const plane = this.plane()
-    try {
-      return await plane.$transaction(async (tx) => {
-        await setTenantContext(tx, guest.tenantId)
-        await assertSessionActive(tx, guest.tenantId, guest.sessionId)
-        const order = await loadOrderForSession(tx, guest.tenantId, guest.sessionId, orderId)
-        if (order.status === 'closed') {
-          throw new ConflictException({ code: 'conflict', message: 'This order is already closed' })
-        }
+    return plane.$transaction(async (tx) => {
+      await setTenantContext(tx, guest.tenantId)
+      await assertSessionActive(tx, guest.tenantId, guest.sessionId)
+      const order = await loadOrderForSession(tx, guest.tenantId, guest.sessionId, orderId)
 
-        const bill = await createBillRecord(tx, { tenantId: guest.tenantId, outletId: order.outletId, orderId, createdByStaffId: null })
-        const shares = await this.writeShares(tx, guest.tenantId, bill)
-        return { ...toBillView(bill), shares }
+      const { bill, created } = await createOrGetBillRecord(tx, {
+        tenantId: guest.tenantId,
+        outletId: order.outletId,
+        orderId,
+        createdByStaffId: null,
+        orderClosed: order.status === 'closed',
       })
-    } catch (error) {
-      if (isUniqueViolation(error)) {
-        throw new ConflictException({ code: 'bill_already_exists', message: 'A bill already exists for this order' })
-      }
-      throw error
-    }
+      const shares = created ? await this.writeShares(tx, guest.tenantId, bill) : await this.loadShareViews(tx, bill.id)
+      return { view: { ...toBillView(bill), shares }, created }
+    })
   }
 
   async getBill(guest: GuestPrincipal, orderId: string): Promise<GuestBillView> {
@@ -217,7 +219,7 @@ export class GuestBillsService {
     for (const line of lines) {
       // Every qr-placed line carries a guestId (guest/orders' placeOrder) -
       // a missing one would mean a pos-source line on a guest bill, which
-      // createBillRecord's own order lookup already makes impossible.
+      // createOrGetBillRecord's own order lookup already makes impossible.
       if (!line.guestId) continue
       const modifiersTotal = line.modifiers.reduce((sum, m) => sum + m.priceMinor, 0n)
       const lineTotal = BigInt(line.quantity) * (line.unitPriceMinor + modifiersTotal)

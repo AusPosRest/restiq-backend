@@ -40,7 +40,7 @@ import { BadRequestException, ConflictException, Injectable } from '@nestjs/comm
 import { ManagerApproval, ManagerAuthService, PosPrincipal, RegionRegistryService, uuidv7 } from '../../platform'
 import { setTenantContext } from '../tenant-context'
 import { assertOwner, loadOrder } from '../orders/orders.service'
-import { commitFinalize, createBillRecord, createTenderRecord, isUniqueViolation, loadBill, TAX_RATE_PLACEHOLDER_PERCENT, toBillView } from './bill-core'
+import { commitFinalize, createOrGetBillRecord, createTenderRecord, loadBill, TAX_RATE_PLACEHOLDER_PERCENT, toBillView } from './bill-core'
 import { BillView, CreditNoteLineView, CreditNoteView, FinalizeBillDto, RefundBillDto } from './bills.dtos'
 import type { Prisma } from '../../generated/prisma/client'
 
@@ -87,37 +87,34 @@ export class BillsService {
   /**
    * Creates an open Bill snapshotting the order's current lines into
    * subtotal/tax. Owner-only (CAP-2's rule, reused). The order must not
-   * already be closed: "sent" is the usual dine-in path (fired to the
-   * kitchen already), but "open" is accepted too so a future QSR/counter
-   * flow (pos/CAP-6, which the architecture map composes directly over this
-   * module) can bill an order that never needed a kitchen-fire step.
+   * already be closed with no Bill yet: "sent" is the usual dine-in path
+   * (fired to the kitchen already), but "open" is accepted too so a future
+   * QSR/counter flow (pos/CAP-6, which the architecture map composes
+   * directly over this module) can bill an order that never needed a
+   * kitchen-fire step.
+   *
+   * Issue #98: idempotent per orderId - a fresh tab that lost its cached
+   * bill id (the web settle screen's only prior way to find it) can just
+   * POST again and get the same Bill back with 200, instead of a bare 409
+   * with no id to recover from. `created` tells the controller which status
+   * code to answer with; the BillView body is identical either way.
    */
-  async createBill(staff: PosPrincipal, orderId: string): Promise<BillView> {
+  async createBill(staff: PosPrincipal, orderId: string): Promise<{ view: BillView; created: boolean }> {
     const plane = this.plane()
-    try {
-      return await plane.$transaction(async (tx) => {
-        await setTenantContext(tx, staff.tenantId)
-        const order = await loadOrder(tx, staff.tenantId, orderId)
-        await assertOwner(tx, order, staff)
+    return plane.$transaction(async (tx) => {
+      await setTenantContext(tx, staff.tenantId)
+      const order = await loadOrder(tx, staff.tenantId, orderId)
+      await assertOwner(tx, order, staff)
 
-        if (order.status === 'closed') {
-          throw new ConflictException({ code: 'conflict', message: 'This order is already closed' })
-        }
-
-        const bill = await createBillRecord(tx, {
-          tenantId: staff.tenantId,
-          outletId: order.outletId,
-          orderId,
-          createdByStaffId: staff.id,
-        })
-        return toBillView(bill)
+      const { bill, created } = await createOrGetBillRecord(tx, {
+        tenantId: staff.tenantId,
+        outletId: order.outletId,
+        orderId,
+        createdByStaffId: staff.id,
+        orderClosed: order.status === 'closed',
       })
-    } catch (error) {
-      if (isUniqueViolation(error)) {
-        throw new ConflictException({ code: 'bill_already_exists', message: 'A bill already exists for this order' })
-      }
-      throw error
-    }
+      return { view: toBillView(bill), created }
+    })
   }
 
   async getBill(staff: PosPrincipal, billId: string): Promise<BillView> {
@@ -252,7 +249,7 @@ export class BillsService {
 
       // Correct tax reversal (CAP-9): the original bill's tax was
       // subtotal * TAX_RATE_PLACEHOLDER_PERCENT, computed independently of
-      // any discount (bill-core's createBillRecord) - reversing the
+      // any discount (bill-core's createOrGetBillRecord) - reversing the
       // refunded subtotal at that exact same rate is therefore the correct
       // inverse, not a re-guessed figure.
       const taxMinor = (subtotalMinor * TAX_RATE_PLACEHOLDER_PERCENT) / 100n
