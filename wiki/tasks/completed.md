@@ -557,3 +557,22 @@
   and cross-tenant isolation. See
   [wiki/features/tenant-admin.md](../features/tenant-admin.md). Issue
   AusPosRest/restiq-backend#92.
+- **2026-09-02** - Rate-limit the public `POST /device/v1/enroll` endpoint
+  (closes the known risk noted in issue #89): new `EnrollRateLimitGuard`
+  (`src/device/enroll/enroll-rate-limit.guard.ts`), applied only to that
+  route, throttles it to `ENROLL_RATE_LIMIT_ATTEMPTS` (10) attempts per
+  `ENROLL_RATE_LIMIT_WINDOW_MS` (5 minutes) per client IP, returning `429
+  rate_limited` in the standard `{ error: { code, message } }` shape once
+  exceeded. No `@nestjs/throttler`-style package exists in this repo, so
+  this is a small hand-rolled `CanActivate` (an in-memory
+  `Map<ip, { count, windowStart }>`, lazily evicting an IP's expired window
+  on its next lookup) rather than a new dependency - single-process by
+  design, with a Redis followup called out in the file header if this API
+  ever runs multi-instance. Client IP is read from `X-Forwarded-For`
+  (first entry) falling back to `req.ip`. 3 new e2e tests in
+  `test/device-enroll.e2e-spec.ts`: 10 bad-code attempts succeed as
+  `400 code_invalid` and the 11th is `429 rate_limited`, a different
+  client IP is unaffected once one is limited, and a valid code still
+  redeems within the limit. See
+  [wiki/features/platform-console.md](../features/platform-console.md).
+  Issue AusPosRest/restiq-backend#95.
