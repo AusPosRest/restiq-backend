@@ -546,3 +546,14 @@
   unchanged. See
   [wiki/features/platform-console.md](../features/platform-console.md).
   Issue AusPosRest/restiq-backend#89.
+- **2026-09-02** - CAP-5 floor plan: `DELETE
+  /admin/v1/outlets/:outletId/floor-plan/floors/:floorId` (204, or 409
+  `floor_has_tables` if the floor still has any dining tables - deletion
+  never cascades to tables, so an owner must move or delete them first).
+  Mirrors `deleteTable`'s RLS/tenant scoping and owner auth exactly; no
+  audit event, matching `deleteTable`'s precedent. 4 new e2e tests in
+  `test/floor-plan.e2e-spec.ts`: deleting an empty floor, refusing a floor
+  with a table (floor and table both survive), a nonexistent floor 404s,
+  and cross-tenant isolation. See
+  [wiki/features/tenant-admin.md](../features/tenant-admin.md). Issue
+  AusPosRest/restiq-backend#92.
