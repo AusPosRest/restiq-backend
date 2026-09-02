@@ -24,6 +24,7 @@ interface OrderBody {
   tenantId: string
   outletId: string
   tableId: string | null
+  tableLabel: string | null
   ownerId: string
   status: 'open' | 'sent' | 'closed'
   createdAt: string
@@ -32,6 +33,7 @@ interface OrderBody {
 interface TableMapEntryBody {
   tableId: string
   floorId: string
+  floorName: string
   label: string
   seatCapacity: number
   status: 'occupied' | 'empty'
@@ -182,7 +184,9 @@ describe('/pos/v1 table map and order ownership (e2e)', () => {
       const res = await authed(request(httpServer).get(`/pos/v1/outlets/${outletId}/table-map`), waiter.token)
       expect(res.status).toBe(200)
       const map = res.body as TableMapEntryBody[]
-      expect(map).toEqual([{ tableId, floorId: expect.any(String) as string, label: 'T1', seatCapacity: 4, status: 'empty', orderId: null, ownerId: null }])
+      expect(map).toEqual([
+        { tableId, floorId: expect.any(String) as string, floorName: 'Ground Floor', label: 'T1', seatCapacity: 4, status: 'empty', orderId: null, ownerId: null },
+      ])
     })
 
     it('shows a table as occupied once its order is opened, and empty again once the order closes', async () => {
@@ -194,7 +198,7 @@ describe('/pos/v1 table map and order ownership (e2e)', () => {
       const openRes = await authed(request(httpServer).post(`/pos/v1/outlets/${outletId}/tables/${tableId}/order`), waiter.token)
       expect(openRes.status).toBe(200)
       const order = openRes.body as OrderBody
-      expect(order).toMatchObject({ tenantId, outletId, tableId, ownerId: waiter.id, status: 'open' })
+      expect(order).toMatchObject({ tenantId, outletId, tableId, tableLabel: 'T1', ownerId: waiter.id, status: 'open' })
 
       const occupiedMap = (await authed(request(httpServer).get(`/pos/v1/outlets/${outletId}/table-map`), waiter.token)).body as TableMapEntryBody[]
       expect(occupiedMap[0]).toMatchObject({ tableId, status: 'occupied', orderId: order.id, ownerId: waiter.id })

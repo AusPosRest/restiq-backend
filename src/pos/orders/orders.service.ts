@@ -96,12 +96,19 @@ function toOrderLineView(line: OrderLineWithModifiers): OrderLineView {
 
 /** Builds the full OrderView (base fields + lines) - the shape every order read/mutation endpoint returns. */
 export async function buildOrderView(tx: Tx, order: Order): Promise<OrderView> {
-  const lines = await tx.orderLine.findMany({ where: { orderId: order.id }, include: ORDER_LINE_INCLUDE, orderBy: { createdAt: 'asc' } })
+  const [lines, table] = await Promise.all([
+    tx.orderLine.findMany({ where: { orderId: order.id }, include: ORDER_LINE_INCLUDE, orderBy: { createdAt: 'asc' } }),
+    // pos/CAP-9 (issue #94): resolved here, the single projection point every
+    // order endpoint routes through, rather than per-caller - null for a
+    // counter order (tableId null), same as the guard below reads.
+    order.tableId ? tx.diningTable.findUnique({ where: { id: order.tableId }, select: { label: true } }) : Promise.resolve(null),
+  ])
   return {
     id: order.id,
     tenantId: order.tenantId,
     outletId: order.outletId,
     tableId: order.tableId,
+    tableLabel: table?.label ?? null,
     ownerId: order.ownerId,
     status: order.status,
     tokenNumber: order.tokenNumber,
@@ -157,6 +164,7 @@ export class OrdersService {
 
       const tables = await tx.diningTable.findMany({
         where: { tenantId: staff.tenantId, floor: { outletId } },
+        include: { floor: { select: { name: true } } },
         orderBy: { createdAt: 'asc' },
       })
       // One query for every table's order, not N+1 - status != 'closed'
@@ -172,6 +180,7 @@ export class OrdersService {
         return {
           tableId: t.id,
           floorId: t.floorId,
+          floorName: t.floor.name,
           label: t.label,
           seatCapacity: t.seatCapacity,
           status: order ? 'occupied' : 'empty',

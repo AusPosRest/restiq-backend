@@ -30,6 +30,7 @@ interface OrderBody {
   tenantId: string
   outletId: string
   tableId: string | null
+  tableLabel: string | null
   ownerId: string
   status: 'open' | 'sent' | 'closed'
   tokenNumber: number | null
@@ -183,6 +184,7 @@ describe('/pos/v1 QSR counter and token mode (e2e)', () => {
       expect(res.status).toBe(201)
       const order = res.body as OrderBody
       expect(order.tableId).toBeNull()
+      expect(order.tableLabel).toBeNull()
       expect(order.ownerId).toBe(staff.id)
       expect(order.status).toBe('open')
       expect(order.tokenNumber).toBe(1)
@@ -250,6 +252,7 @@ describe('/pos/v1 QSR counter and token mode (e2e)', () => {
 
       const res = await authed(request(httpServer).post(`/pos/v1/outlets/${outletId}/tables/${table.id}/order`), staff.token).send()
       expect((res.body as OrderBody).tokenNumber).toBeNull()
+      expect((res.body as OrderBody).tableLabel).toBe('T1')
     })
   })
 
