@@ -129,22 +129,6 @@ const FORWARD_TRANSITIONS: Record<Order['status'], Order['status'][]> = {
   closed: [],
 }
 
-/**
- * pos/CAP-4 group ordering (issue #58) success criterion: every item must be
- * assigned to a seat before the order can be sent to the kitchen; unassigned
- * items block fire. Only checked on the open->sent transition - once past
- * it, sent->closed never re-opens the line set to fresh unseated additions.
- */
-async function assertAllLinesSeated(tx: Tx, orderId: string): Promise<void> {
-  const unseatedCount = await tx.orderLine.count({ where: { orderId, seatNumber: null } })
-  if (unseatedCount > 0) {
-    throw new BadRequestException({
-      code: 'unseated_lines',
-      message: `${unseatedCount} order line(s) have no seat number assigned - every item must be assigned to a seat before this order can be sent to the kitchen`,
-    })
-  }
-}
-
 @Injectable()
 export class OrdersService {
   constructor(
@@ -310,10 +294,10 @@ export class OrdersService {
         throw new ConflictException({ code: 'invalid_transition', message: `Cannot move an order from "${order.status}" to "${dto.status}"` })
       }
 
-      if (dto.status === 'sent') {
-        await assertAllLinesSeated(tx, orderId)
-      }
-
+      // pos/CAP-4 group ordering (issue #58) originally blocked open->sent
+      // while any line had no seatNumber. Product decision (issue #101,
+      // 2026-09-02): seats are optional end to end - unseated lines fire
+      // normally, seatNumber stays available as opt-in metadata only.
       const updated = await tx.order.update({ where: { id: orderId }, data: { status: dto.status } })
 
       // kitchen-display/CAP-1 (AD-16, issue #67): fire the order's tickets in

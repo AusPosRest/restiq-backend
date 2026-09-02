@@ -137,14 +137,14 @@ export class GuestOrdersService {
         throw new BadRequestException({ code: 'empty_cart', message: 'Add at least one item to the cart before placing the order' })
       }
 
-      // pos/CAP-4 group ordering's all-lines-seated fire gate
-      // (orders.service.ts's assertAllLinesSeated, private to that file) blocks
-      // the open->sent transition while any OrderLine.seatNumber is null. A
-      // guest table order has no staff-assigned "seat" step of its own, so each
-      // distinct guest already in the session is auto-assigned one seat number
-      // here, in join order (first guest = seat 1, second = seat 2, ...), and
-      // every line inherits its adding guest's seat. This satisfies the gate by
-      // construction rather than re-deriving or bypassing it - documented per
+      // pos/CAP-4 group ordering originally had an all-lines-seated fire gate
+      // (orders.service.ts's open->sent transition) that this auto-assignment
+      // satisfied by construction; that gate was removed in issue #101 (seats
+      // are now optional everywhere). Kept anyway - harmless and still useful:
+      // a guest table order has no staff-assigned "seat" step of its own, so
+      // each distinct guest already in the session is auto-assigned one seat
+      // number here, in join order (first guest = seat 1, second = seat 2,
+      // ...), and every line inherits its adding guest's seat - documented per
       // issue #77 scope, since "seat" here means "which guest", not a physical
       // chair.
       const guests = await tx.guest.findMany({ where: { tenantId: guest.tenantId, sessionId: session.id }, orderBy: { joinedAt: 'asc' } })

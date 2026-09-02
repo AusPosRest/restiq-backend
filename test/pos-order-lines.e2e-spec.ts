@@ -562,10 +562,11 @@ describe('/pos/v1 order lines (e2e)', () => {
   })
 
   // pos/CAP-4 group ordering (SPEC-pos-cashier-waiter, story 5, issue #58):
-  // extends story 4's OrderLine with an application-enforced seat number -
-  // every line must carry one before the order can move to "sent", but the
-  // add/edit/remove paths themselves never require it (a table not using
-  // group ordering just never sets seatNumber, and behaves exactly as before).
+  // extends story 4's OrderLine with an optional seat number. Originally an
+  // application-enforced gate required every line to carry one before the
+  // order could move to "sent"; that gate was removed in issue #101
+  // (2026-09-02) - seats are opt-in metadata only, on every path, including
+  // send-to-kitchen.
   describe('seat numbers (group ordering)', () => {
     it('adds a line with a seat number', async () => {
       const tenantId = await createTenant(prisma)
@@ -623,7 +624,7 @@ describe('/pos/v1 order lines (e2e)', () => {
       expect((res.body as OrderBody).status).toBe('sent')
     })
 
-    it('rejects sending an order when any line has no seat number, with a clear message, and leaves the order open', async () => {
+    it('sends an order to the kitchen with a mix of seated and unseated lines (issue #101: seats are optional)', async () => {
       const tenantId = await createTenant(prisma)
       const outletId = await createOutlet(prisma, tenantId)
       const tableId = await createTable(prisma, tenantId, outletId)
@@ -631,19 +632,20 @@ describe('/pos/v1 order lines (e2e)', () => {
       const { itemId } = await createItemWithPrice(prisma, tenantId, 19000)
       const order = await openOrder(outletId, tableId, waiter.token)
       await authed(request(httpServer).post(`/pos/v1/orders/${order.id}/lines`), waiter.token).send({ itemId, quantity: 1, seatNumber: 1 })
-      await authed(request(httpServer).post(`/pos/v1/orders/${order.id}/lines`), waiter.token).send({ itemId, quantity: 1 }) // unseated
+      const unseated = await authed(request(httpServer).post(`/pos/v1/orders/${order.id}/lines`), waiter.token).send({ itemId, quantity: 1 })
+      const unseatedLineId = (unseated.body as OrderBody).lines.find((l) => l.seatNumber === null)?.id
 
       const res = await authed(request(httpServer).patch(`/pos/v1/orders/${order.id}/status`), waiter.token).send({ status: 'sent' })
-      expect(res.status).toBe(400)
-      const body = res.body as ErrorBody
-      expect(body.error.code).toBe('unseated_lines')
-      expect(body.error.message).toMatch(/seat/i)
+      expect(res.status).toBe(200)
+      expect((res.body as OrderBody).status).toBe('sent')
 
-      const fetched = await authed(request(httpServer).get(`/pos/v1/orders/${order.id}`), waiter.token)
-      expect((fetched.body as OrderBody).status).toBe('open')
+      const ticketLine = await prisma.ticketLine.findFirst({ where: { orderLineId: unseatedLineId } })
+      expect(ticketLine).not.toBeNull()
+      const unseatedOrderLine = await prisma.orderLine.findUnique({ where: { id: unseatedLineId } })
+      expect(unseatedOrderLine?.seatNumber).toBeNull()
     })
 
-    it('still rejects an order with zero seated lines out of several unseated ones', async () => {
+    it('sends an order to the kitchen when every line is unseated (issue #101: seats are optional)', async () => {
       const tenantId = await createTenant(prisma)
       const outletId = await createOutlet(prisma, tenantId)
       const tableId = await createTable(prisma, tenantId, outletId)
@@ -654,8 +656,8 @@ describe('/pos/v1 order lines (e2e)', () => {
       await authed(request(httpServer).post(`/pos/v1/orders/${order.id}/lines`), waiter.token).send({ itemId, quantity: 1 })
 
       const res = await authed(request(httpServer).patch(`/pos/v1/orders/${order.id}/status`), waiter.token).send({ status: 'sent' })
-      expect(res.status).toBe(400)
-      expect((res.body as ErrorBody).error.code).toBe('unseated_lines')
+      expect(res.status).toBe(200)
+      expect((res.body as OrderBody).status).toBe('sent')
     })
   })
 })
