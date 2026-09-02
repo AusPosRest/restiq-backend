@@ -3,6 +3,7 @@
 import { INestApplication } from '@nestjs/common'
 import { Test } from '@nestjs/testing'
 import * as argon2 from 'argon2'
+import { createHash } from 'node:crypto'
 import request from 'supertest'
 import { afterAll, beforeAll, describe, expect, it } from 'vitest'
 import { AppModule } from '../src/app.module'
@@ -192,11 +193,13 @@ describe('/ops/v1/tenants onboarding (e2e)', () => {
       expect(res.status).toBe(201)
       const body = res.body as {
         tenant: { id: string; name: string; status: string }
-        invite: { email: string; expiresAt: string }
+        invite: { email: string; expiresAt: string; inviteToken: string }
       }
       expect(body.tenant.status).toBe('provisioning')
       expect(body.invite.email).toBe('owner@spiceroute.example')
       expect(Date.parse(body.invite.expiresAt)).toBeGreaterThan(Date.now())
+      // Issue #85: the raw accept token must come back (no mailer exists).
+      expect(body.invite.inviteToken).toMatch(/^[0-9a-f]{64}$/)
 
       const tenantId = body.tenant.id
 
@@ -228,6 +231,7 @@ describe('/ops/v1/tenants onboarding (e2e)', () => {
       const invites = await prisma.ownerInvite.findMany({ where: { tenantId } })
       expect(invites).toHaveLength(1)
       expect(invites[0]?.tokenHash).toMatch(/^[0-9a-f]{64}$/)
+      expect(invites[0]?.tokenHash).toBe(createHash('sha256').update(body.invite.inviteToken).digest('hex'))
 
       // AD-6/AD-8: audited with actor + reason, region-side, same transaction.
       const audit = await prisma.auditEvent.findMany({ where: { tenantId, action: 'tenant.provisioned' } })

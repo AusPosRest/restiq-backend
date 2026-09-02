@@ -353,7 +353,14 @@ export class TenantDirectoryService {
     return { brandingTokens: tokens }
   }
 
-  async regenerateOwnerInvite(operator: OpsPrincipal, id: string, reason: string): Promise<{ invite: InviteView }> {
+  // inviteToken is the raw accept token, exposed exactly once here: there is
+  // no mailer in this prototype, so the ops console must be able to show a
+  // copyable accept link (issue #85). Only the hash is stored.
+  async regenerateOwnerInvite(
+    operator: OpsPrincipal,
+    id: string,
+    reason: string,
+  ): Promise<{ invite: InviteView; inviteToken: string }> {
     const rawToken = randomBytes(32).toString('hex')
     const expiresAt = new Date(Date.now() + OWNER_INVITE_TTL_HOURS * 3_600_000)
 
@@ -383,6 +390,7 @@ export class TenantDirectoryService {
         expiresAt: invite.expiresAt.toISOString(),
         createdAt: invite.createdAt.toISOString(),
       },
+      inviteToken: rawToken,
     }
   }
 
