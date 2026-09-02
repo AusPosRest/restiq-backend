@@ -412,9 +412,30 @@ pos/CAP-4's below, e2e against a real Postgres test DB)
     this story (existing pos/CAP-2/CAP-3 tests exercise this, unchanged).
 - **Application-enforced, not a DB constraint.** `seat_number` is nullable at
   the Postgres level (migration safety on an already-populated table); the
-  "every line must be seated before send" rule lives entirely in
+  "every line must be seated before send" rule lived entirely in
   `orders.service.ts`, the sole enforcer of `Order.status`, same posture the
-  file already documents for the status column itself.
+  file already documents for the status column itself. **Since removed - see
+  the Deviation note immediately below.**
+
+**Deviation (2026-09-02): seat gate removed - seats optional** (issue #101):
+the product owner decided the per-line seat requirement was too much ceremony
+for staff at send time, and reversed the "every item must be assigned to a
+seat before the order can be sent to the kitchen" success criterion above.
+`orders.service.ts#assertAllLinesSeated` and its `400 unseated_lines`
+rejection on the `open -> sent` transition (previously described in this
+section and in the "Built"/"Test coverage" bullets above) have been removed
+entirely - `PATCH /pos/v1/orders/:orderId/status {status:'sent'}` now
+succeeds regardless of how many lines have `seatNumber: null`, and fired
+tickets simply carry `seatNumber: null` through to the kitchen for those
+lines. `seatNumber` itself is unchanged and stays fully supported end to
+end as optional, opt-in metadata: `POST`/`PATCH` on order lines still accept
+it, `OrderLineView`/`TicketLineView` still return it, and no schema/migration
+change was needed (the column was already nullable). qr-self-order/CAP-4's
+guest auto-seat-by-join-order behaviour (issue #77) is unaffected and kept
+as-is - it was already harmless, just no longer required to "satisfy the
+gate" since the gate no longer exists. See `test/pos-order-lines.e2e-spec.ts`
+- the two rejection tests are replaced by tests asserting `200`/`'sent'` with
+unseated lines present.
 
 ### Data model
 

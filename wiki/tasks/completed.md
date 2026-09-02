@@ -1,5 +1,17 @@
 # Completed
 
+- **2026-09-02** - Made seat assignment optional end to end: removed
+  pos/CAP-4's `assertAllLinesSeated` fire gate, so `PATCH
+  /pos/v1/orders/:orderId/status {status:'sent'}` no longer rejects
+  `400 unseated_lines` - unseated lines fire normally and their tickets
+  simply carry `seatNumber: null`. `seatNumber` itself is untouched: still
+  optional metadata on `POST`/`PATCH` order lines, no schema/migration
+  change (the column was already nullable). qr-self-order's guest
+  auto-seat-by-join-order behaviour (issue #77) is unaffected, kept as-is.
+  Product decision - the per-line seat requirement was too much ceremony
+  for staff at send time. See
+  [wiki/features/pos-cashier-waiter.md](../features/pos-cashier-waiter.md#cap-4---group-ordering-seats-and-covers).
+  Issue AusPosRest/restiq-backend#101.
 - **2026-09-02** - Made `POST /pos/v1/orders/:orderId/bill` (and its guest
   counterpart, `POST /guest/v1/orders/:orderId/bill`) idempotent per orderId:
   a call for an order that already has a Bill now returns it unchanged with
