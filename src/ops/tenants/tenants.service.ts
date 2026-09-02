@@ -59,7 +59,10 @@ export interface DraftView {
 
 export interface ProvisionResult {
   tenant: { id: string; name: string; status: string }
-  invite: { email: string; expiresAt: string }
+  // inviteToken is the raw accept token, exposed exactly once here: there is
+  // no mailer in this prototype, so the ops console must be able to show a
+  // copyable accept link (issue #85). Only the hash is stored.
+  invite: { email: string; expiresAt: string; inviteToken: string }
 }
 
 @Injectable()
@@ -226,7 +229,7 @@ export class OpsTenantsService {
 
     return {
       tenant: { id: tenantId, name: dto.business.companyName, status: 'provisioning' },
-      invite: { email: invite.email, expiresAt: invite.expiresAt.toISOString() },
+      invite: { email: invite.email, expiresAt: invite.expiresAt.toISOString(), inviteToken },
     }
   }
 

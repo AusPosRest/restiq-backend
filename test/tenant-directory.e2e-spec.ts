@@ -393,14 +393,19 @@ describe('/ops/v1/tenants directory (e2e)', () => {
         reason: 'Original invite email bounced',
       })
       expect(res.status).toBe(200)
-      const body = res.body as { invite: { email: string; expiresAt: string; status: string } }
+      const body = res.body as { invite: { email: string; expiresAt: string; status: string }; inviteToken: string }
       expect(body.invite.email).toBe('owner@alpha.example')
       expect(body.invite.status).toBe('pending')
       expect(Date.parse(body.invite.expiresAt)).toBeGreaterThan(Date.now())
 
+      // Issue #85: the raw token must come back (no mailer exists), and it
+      // must be the one whose hash was stored - i.e. actually acceptable.
+      expect(body.inviteToken).toMatch(/^[0-9a-f]{64}$/)
+
       const invites = await prisma.ownerInvite.findMany({ where: { tenantId: ids.alpha } })
       expect(invites).toHaveLength(1)
       expect(invites[0]?.tokenHash).not.toBe(INVITE_TOKEN_HASH)
+      expect(invites[0]?.tokenHash).toBe(createHash('sha256').update(body.inviteToken).digest('hex'))
       expect(await prisma.auditEvent.count({ where: { tenantId: ids.alpha, action: 'tenant.owner_invite_regenerated' } })).toBe(1)
     })
 
