@@ -10,6 +10,7 @@ import request from 'supertest'
 import { afterAll, beforeAll, beforeEach, describe, expect, it } from 'vitest'
 import { AppModule } from '../src/app.module'
 import { createPrismaClient, PrismaClient } from '../src/db/client'
+import { ENROLL_RATE_LIMIT_ATTEMPTS } from '../src/device/enroll/enroll-rate-limit.guard'
 import { signOpsToken, uuidv7 } from '../src/platform'
 
 const EMAIL = 'device-enroll-operator@restiq.example'
@@ -244,5 +245,50 @@ describe('/device/v1/enroll (e2e)', () => {
   it('validates the request body', async () => {
     const res = await request(httpServer).post('/device/v1/enroll').send({ code: '' })
     expect(res.status).toBe(400)
+  })
+
+  describe('rate limiting (issue #95)', () => {
+    // Each test uses its own X-Forwarded-For IP so it can't be affected by
+    // - or affect - attempts made by any other test in this file.
+    async function attempt(ip: string, code = 'ZZZ-ZZZ') {
+      return request(httpServer)
+        .post('/device/v1/enroll')
+        .set('X-Forwarded-For', ip)
+        .send({ code, hardwareKeyFingerprint: 'rate-limit-probe' })
+    }
+
+    it(`allows ${ENROLL_RATE_LIMIT_ATTEMPTS} bad-code attempts, then blocks the next with 429 rate_limited`, async () => {
+      const ip = '10.0.1.1'
+      for (let i = 0; i < ENROLL_RATE_LIMIT_ATTEMPTS; i++) {
+        const res = await attempt(ip)
+        expect(res.status).toBe(400)
+        expect(errorCodeOf(res)).toBe('code_invalid')
+      }
+      const blocked = await attempt(ip)
+      expect(blocked.status).toBe(429)
+      expect(errorCodeOf(blocked)).toBe('rate_limited')
+    })
+
+    it('does not block a different client IP once one IP is rate-limited', async () => {
+      const busyIp = '10.0.1.2'
+      for (let i = 0; i < ENROLL_RATE_LIMIT_ATTEMPTS; i++) await attempt(busyIp)
+      const blocked = await attempt(busyIp)
+      expect(blocked.status).toBe(429)
+
+      const res = await attempt('10.0.1.3')
+      expect(res.status).toBe(400)
+      expect(errorCodeOf(res)).toBe('code_invalid')
+    })
+
+    it('still redeems a valid code within the limit', async () => {
+      const ip = '10.0.1.4'
+      const code = codeOf(await generateCode())
+      for (let i = 0; i < ENROLL_RATE_LIMIT_ATTEMPTS - 1; i++) await attempt(ip)
+      const res = await request(httpServer)
+        .post('/device/v1/enroll')
+        .set('X-Forwarded-For', ip)
+        .send({ code, hardwareKeyFingerprint: 'rate-limit-probe-valid' })
+      expect(res.status).toBe(201)
+    })
   })
 })

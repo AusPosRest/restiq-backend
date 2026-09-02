@@ -53,14 +53,22 @@ future change touches this realm's own docs.
     early-returning true outside its own path prefix; `/device` simply
     isn't matched by any of the four, so no guard changes were needed to
     exempt it.
-  - **Known risk, not addressed here:** enrolment codes are short
-    (`AAA-AAA`, ~33^6 space) and this endpoint has no rate limiting - no
-    throttling package or pattern exists anywhere else in this repo, so
-    none was invented for this one route. A high-volume public brute-force
-    of live enrolment codes within their 15-minute TTL is possible; the
-    real mitigation is normal infra-level rate limiting (reverse proxy/WAF)
-    in front of this route, not application code, and should be tracked as
-    a followup before this leaves prototype status.
+  - **Rate limited (issue #95):** enrolment codes are short (`AAA-AAA`,
+    ~33^6 space), so this route carries `EnrollRateLimitGuard`
+    (`src/device/enroll/enroll-rate-limit.guard.ts`) - 10 attempts per 5
+    minutes per client IP (`ENROLL_RATE_LIMIT_ATTEMPTS`/
+    `ENROLL_RATE_LIMIT_WINDOW_MS`), a hit over the limit returning `429
+    rate_limited` in the usual `{ error: { code, message } }` shape. No
+    throttling package exists anywhere else in this repo, so this is a
+    small hand-rolled `CanActivate` rather than a new dependency. It's an
+    in-memory `Map<ip, window>`, single-process by design - a
+    multi-instance deploy gives each instance its own budget instead of a
+    shared one; move to a shared store (Redis) if/when this API scales out.
+    Client IP comes from `X-Forwarded-For` (first entry) falling back to
+    `req.ip`, so the reverse proxy in front of this route must set that
+    header.
   - See `test/device-enroll.e2e-spec.ts` for the public happy path,
-    `code_invalid`/`code_expired`/`code_already_used` error coverage, and
-    proof that the ops-realm enroll endpoint keeps working unchanged.
+    `code_invalid`/`code_expired`/`code_already_used` error coverage, proof
+    that the ops-realm enroll endpoint keeps working unchanged, and the
+    `rate limiting (issue #95)` block for the 429 behaviour and per-IP
+    isolation.
