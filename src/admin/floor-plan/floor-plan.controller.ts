@@ -42,6 +42,12 @@ export class AdminFloorPlanController {
     return this.floorPlan.updateFloor(owner, outletId, floorId, dto)
   }
 
+  @Delete('floors/:floorId')
+  @HttpCode(204)
+  deleteFloor(@CurrentOwner() owner: AdminPrincipal, @Param('outletId') outletId: string, @Param('floorId') floorId: string): Promise<void> {
+    return this.floorPlan.deleteFloor(owner, outletId, floorId)
+  }
+
   @Post('tables')
   @HttpCode(201)
   createTable(@CurrentOwner() owner: AdminPrincipal, @Param('outletId') outletId: string, @Body() dto: CreateTableDto): Promise<TableView> {

@@ -305,6 +305,43 @@ describe('/admin/v1/outlets/:outletId/floor-plan (e2e)', () => {
       const planRes = await authed(request(httpServer).get(base(outletId)), token)
       expect((planRes.body as FloorPlanBody).floors[0]?.tables).toEqual([])
     })
+
+    it('deletes an empty floor', async () => {
+      const { tenantId, token } = await createOwner(prisma)
+      const outletId = await createOutlet(prisma, tenantId)
+      const floor = (await authed(request(httpServer).post(`${base(outletId)}/floors`), token).send({ name: 'Ground Floor' })).body as FloorBody
+
+      const delRes = await authed(request(httpServer).delete(`${base(outletId)}/floors/${floor.id}`), token)
+      expect(delRes.status).toBe(204)
+
+      const planRes = await authed(request(httpServer).get(base(outletId)), token)
+      expect((planRes.body as FloorPlanBody).floors).toEqual([])
+    })
+
+    it('refuses to delete a floor that still has tables (409, floor and table both survive)', async () => {
+      const { tenantId, token } = await createOwner(prisma)
+      const outletId = await createOutlet(prisma, tenantId)
+      const floor = (await authed(request(httpServer).post(`${base(outletId)}/floors`), token).send({ name: 'Ground Floor' })).body as FloorBody
+      await authed(request(httpServer).post(`${base(outletId)}/tables`), token).send({ floorId: floor.id, label: 'T1', x: 0, y: 0, width: 10, height: 10, shape: 'square', seatCapacity: 4 })
+
+      const delRes = await authed(request(httpServer).delete(`${base(outletId)}/floors/${floor.id}`), token)
+      expect(delRes.status).toBe(409)
+      expect((delRes.body as ErrorBody).error.code).toBe('floor_has_tables')
+
+      const planRes = await authed(request(httpServer).get(base(outletId)), token)
+      const plan = planRes.body as FloorPlanBody
+      expect(plan.floors).toHaveLength(1)
+      expect(plan.floors[0]?.tables).toHaveLength(1)
+    })
+
+    it('returns 404 deleting a floor that does not exist', async () => {
+      const { tenantId, token } = await createOwner(prisma)
+      const outletId = await createOutlet(prisma, tenantId)
+
+      const delRes = await authed(request(httpServer).delete(`${base(outletId)}/floors/${uuidv7()}`), token)
+      expect(delRes.status).toBe(404)
+      expect((delRes.body as ErrorBody).error.code).toBe('not_found')
+    })
   })
 
   describe('go-live checklist integration', () => {
@@ -464,6 +501,19 @@ describe('/admin/v1/outlets/:outletId/floor-plan (e2e)', () => {
 
       const res = await authed(request(httpServer).get(base(outletId)), other.token)
       expect(res.status).toBe(404)
+    })
+
+    it('rejects deleting another tenant’s floor (404, floor survives)', async () => {
+      const owner = await createOwner(prisma, 'Spice Route Hospitality')
+      const other = await createOwner(prisma, 'Curry Leaf Kitchens')
+      const outletId = await createOutlet(prisma, owner.tenantId, 'Indiranagar')
+      const floor = (await authed(request(httpServer).post(`${base(outletId)}/floors`), owner.token).send({ name: 'Ground Floor' })).body as FloorBody
+
+      const res = await authed(request(httpServer).delete(`${base(outletId)}/floors/${floor.id}`), other.token)
+      expect(res.status).toBe(404)
+
+      const planRes = await authed(request(httpServer).get(base(outletId)), owner.token)
+      expect((planRes.body as FloorPlanBody).floors).toHaveLength(1)
     })
 
     it('rejects a request with no admin session', async () => {

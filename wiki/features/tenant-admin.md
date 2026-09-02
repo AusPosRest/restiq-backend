@@ -361,9 +361,9 @@ built here, story by story.
     the one read the floor-plan editor screen needs, no separate calls per
     floor/station.
   - `POST /floors { name, sortOrder? }`, `PATCH /floors/:floorId { name?,
-    sortOrder? }`. No `DELETE /floors` - not called for by the SPEC or the
-    designed screen (floors accumulate; a discard-floor flow can be added
-    when a story actually needs it).
+    sortOrder? }`, `DELETE /floors/:floorId` (204, or 409 `floor_has_tables`
+    if the floor still has any tables - the owner must move or delete them
+    first; deletion never cascades to a floor's tables).
   - `POST /tables { floorId, label, x, y, width, height, shape,
     seatCapacity }` (201, or 409 `table_overlap`), `PATCH /tables/:tableId`
     (any subset of the same fields, still overlap-checked against the
@@ -707,9 +707,12 @@ built here, story by story.
   re-trigger the gate; only a request that would *change* the station to
   printerless does (creation with no printer, or an explicit
   `primaryPrinterId: null` on update).
-- CAP-5 has no `DELETE /floors` and `PATCH /tables/:tableId` cannot move a
-  table across floors - neither is in the designed screen or the SPEC text;
-  added only if a later story needs them.
+- CAP-5's `DELETE /floors/:floorId` (issue #92) refuses with 409
+  `floor_has_tables` rather than cascade-deleting a floor's tables - an owner
+  who wants a floor gone must move or delete its tables first, so a floor
+  full of tables never disappears by one misclick. `PATCH /tables/:tableId`
+  still cannot move a table across floors - not in the designed screen or the
+  SPEC text; added only if a later story needs it.
 - CAP-7's `PATCH /staff/:id` (including a role reassignment) is treated as a
   routine content edit, not audited - only `revoke-pin` requires a reason
   and writes an `audit_events` row. This is a judgment call: the SPEC's

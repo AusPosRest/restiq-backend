@@ -170,6 +170,19 @@ export class FloorPlanService {
     })
   }
 
+  async deleteFloor(owner: AdminPrincipal, outletId: string, floorId: string): Promise<void> {
+    const plane = this.registry.planeFor(this.registry.homeRegion())
+    await plane.$transaction(async (tx) => {
+      await setTenantContext(tx, owner.tenantId)
+      await loadFloor(tx, owner.tenantId, outletId, floorId)
+      const tableCount = await tx.diningTable.count({ where: { floorId } })
+      if (tableCount > 0) {
+        throw new ConflictException({ code: 'floor_has_tables', message: 'This floor still has tables. Remove them first.' })
+      }
+      await tx.floor.delete({ where: { id: floorId } })
+    })
+  }
+
   async createTable(owner: AdminPrincipal, outletId: string, dto: CreateTableDto): Promise<TableView> {
     const plane = this.registry.planeFor(this.registry.homeRegion())
     const bounds: Bounds = { x: dto.x, y: dto.y, width: dto.width, height: dto.height }
