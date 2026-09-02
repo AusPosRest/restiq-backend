@@ -1,5 +1,20 @@
 # Completed
 
+- **2026-09-02** - Made `POST /pos/v1/orders/:orderId/bill` (and its guest
+  counterpart, `POST /guest/v1/orders/:orderId/bill`) idempotent per orderId:
+  a call for an order that already has a Bill now returns it unchanged with
+  200 (same `BillView`/`GuestBillView` shape, same id, no second row -
+  never merged), instead of a bare `409 bill_already_exists` with no bill
+  id to recover from. Fixes the web settle screen breaking in a fresh tab
+  (its only prior way to find a bill was a `sessionStorage`-cached id, lost
+  on a fresh tab). `bill-core.ts`'s `createBillRecord` became
+  `createOrGetBillRecord`, returning `{ bill, created }`; the concurrent-
+  create race is still caught by the schema's unique `orderId` (AD-11/
+  AD-14: never a second Bill row), just turned into the same idempotent
+  return instead of a raw constraint error. No new route added - the
+  existing POST covers the fresh-tab case once it's idempotent. See
+  [wiki/features/pos-cashier-waiter.md](../features/pos-cashier-waiter.md#cap-7---bill-and-settle).
+  Issue AusPosRest/restiq-backend#98.
 - **2026-09-02** - POS projections: `floorName` on `TableMapEntry` and
   `tableLabel` on `OrderView` (additive, non-breaking - no existing field
   renamed or removed). Fixes the POS web showing raw UUIDs instead of

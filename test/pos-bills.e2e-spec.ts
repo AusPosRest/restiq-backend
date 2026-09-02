@@ -237,15 +237,64 @@ describe('/pos/v1 bill and settle (e2e)', () => {
       expect(res.status).toBe(403)
     })
 
-    it('rejects creating a second bill for the same order', async () => {
+    it('is idempotent: a second POST for the same order returns 200 with the same bill id and writes no second row (issue #98)', async () => {
       const tenantId = await createTenant(prisma)
       const outletId = await createOutlet(prisma, tenantId)
       const { orderId, ownerToken } = await setUpSentOrder(tenantId, outletId, 10000)
-      await authed(request(httpServer).post(`/pos/v1/orders/${orderId}/bill`), ownerToken).send()
+
+      const first = await authed(request(httpServer).post(`/pos/v1/orders/${orderId}/bill`), ownerToken).send()
+      expect(first.status).toBe(201)
+      const firstBill = first.body as BillBody
+
+      const second = await authed(request(httpServer).post(`/pos/v1/orders/${orderId}/bill`), ownerToken).send()
+      expect(second.status).toBe(200)
+      const secondBill = second.body as BillBody
+      expect(secondBill.id).toBe(firstBill.id)
+      expect(secondBill).toEqual(firstBill)
+
+      const rows = await prisma.bill.findMany({ where: { orderId } })
+      expect(rows).toHaveLength(1)
+    })
+
+    it('returns a finalized bill with 200 (not 409) on a repeat POST', async () => {
+      const tenantId = await createTenant(prisma)
+      const outletId = await createOutlet(prisma, tenantId)
+      const { orderId, ownerToken } = await setUpSentOrder(tenantId, outletId, 10000)
+      const created = await authed(request(httpServer).post(`/pos/v1/orders/${orderId}/bill`), ownerToken).send()
+      const billId = (created.body as BillBody).id
+
+      const finalized = await authed(request(httpServer).post(`/pos/v1/bills/${billId}/finalize`), ownerToken).send({
+        tenders: [{ method: 'cash', amountMinor: 21000 }],
+      })
+      expect(finalized.status).toBe(200)
 
       const res = await authed(request(httpServer).post(`/pos/v1/orders/${orderId}/bill`), ownerToken).send()
+      expect(res.status).toBe(200)
+      const bill = res.body as BillBody
+      expect(bill.id).toBe(billId)
+      expect(bill.status).toBe('finalized')
+      expect(bill.tenders).toHaveLength(1)
+
+      const rows = await prisma.bill.findMany({ where: { orderId } })
+      expect(rows).toHaveLength(1)
+    })
+
+    it('rejects billing an order closed via a direct status transition with no bill ever created', async () => {
+      const tenantId = await createTenant(prisma)
+      const outletId = await createOutlet(prisma, tenantId)
+      const tableId = await createTable(prisma, tenantId, outletId)
+      const owner = await createStaff(prisma, tenantId, outletId, 'Asha')
+      const opened = await authed(request(httpServer).post(`/pos/v1/outlets/${outletId}/tables/${tableId}/order`), owner.token).send()
+      const orderId = (opened.body as OrderBody).id
+      await authed(request(httpServer).patch(`/pos/v1/orders/${orderId}/status`), owner.token).send({ status: 'sent' })
+      await authed(request(httpServer).patch(`/pos/v1/orders/${orderId}/status`), owner.token).send({ status: 'closed' })
+
+      const res = await authed(request(httpServer).post(`/pos/v1/orders/${orderId}/bill`), owner.token).send()
       expect(res.status).toBe(409)
-      expect((res.body as ErrorBody).error.code).toBe('bill_already_exists')
+      expect((res.body as ErrorBody).error.code).toBe('conflict')
+
+      const rows = await prisma.bill.findMany({ where: { orderId } })
+      expect(rows).toHaveLength(0)
     })
   })
 

@@ -9,12 +9,12 @@ export {
   BILL_INCLUDE,
   commitFinalize,
   computeSubtotal,
-  createBillRecord,
+  createOrGetBillRecord,
   createTenderRecord,
   isUniqueViolation,
   loadBill,
   TAX_RATE_PLACEHOLDER_PERCENT,
   toBillView,
 } from './bill-core'
-export type { BillWithTenders, CommitFinalizeParams, CreateBillParams } from './bill-core'
+export type { BillWithTenders, CommitFinalizeParams, CreateBillParams, CreateOrGetBillResult } from './bill-core'
 export type { BillView, TenderView } from './bills.dtos'

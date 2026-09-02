@@ -617,17 +617,27 @@ against a real Postgres test DB)
 - **Built** (new `src/pos/bills/`, greenfield `Bill`/`Tender`/
   `BillNumberCounter` models per AD-14 - the last pieces of that story's
   table list, alongside `Order`/`Shift`/`CashMovement`):
-  - `POST /pos/v1/orders/:orderId/bill` (201) - snapshots the order's
-    current lines into `subtotalMinor`/`taxMinor` on a new, still-`open`
-    Bill. **Owner-only** (CAP-2's `assertOwner`, reused verbatim - not
-    reimplemented). The order must be `open` or `sent`, not `closed`:
-    `sent` is the normal dine-in path (already fired to the kitchen), but
-    `open` is accepted too since the architecture's own capability map
-    (`pos/CAP-6 QSR counter & token | pos/orders + pos/bills composition`)
-    composes a future counter-service flow directly over this endpoint, and
-    a counter order never needs a kitchen-fire step. Only one Bill may ever
-    exist per order (`orderId` is unique on `Bill`) - a second create
-    attempt is `409 bill_already_exists`, not merged into the first.
+  - `POST /pos/v1/orders/:orderId/bill` - snapshots the order's current
+    lines into `subtotalMinor`/`taxMinor` on a new, still-`open` Bill.
+    **Owner-only** (CAP-2's `assertOwner`, reused verbatim - not
+    reimplemented). The order must be `open` or `sent`, not `closed` with no
+    Bill yet: `sent` is the normal dine-in path (already fired to the
+    kitchen), but `open` is accepted too since the architecture's own
+    capability map (`pos/CAP-6 QSR counter & token | pos/orders + pos/bills
+    composition`) composes a future counter-service flow directly over this
+    endpoint, and a counter order never needs a kitchen-fire step. Only one
+    Bill may ever exist per order (`orderId` is unique on `Bill`, and the
+    create race is caught the same way, not just prevented by an earlier
+    read).
+    **Idempotent per orderId (issue #98):** a first call returns `201` with
+    a fresh Bill; every later call for that same order - Bill still open,
+    or already finalized - returns the *same* Bill unchanged with `200`,
+    never `409`, and never a second row. This is what lets the web settle
+    screen recover a bill id in a fresh tab that lost its cached one (its
+    only other way to find it): it can just re-POST instead of needing a
+    separate lookup-by-order-id endpoint. An order closed with no Bill ever
+    created (CAP-2's direct staff status PATCH, forward-only `sent` ->
+    `closed`, needs no Bill) still gets `409 conflict` on create.
   - `POST /pos/v1/bills/:id/finalize` (200) - body
     `{ discountMinor?, discountReason?, managerPin?, tenders: [{ method,
     amountMinor }] }`. Validates the tender sum equals the bill total
@@ -724,7 +734,8 @@ against a real Postgres test DB)
          finalizedByStaffId: string | null, finalizedAt: string | null }
   Tender { id, tenantId, billId, method: "cash" | "upi_manual", amountMinor, createdAt }
 
-  POST /pos/v1/orders/:orderId/bill          -> 201 BillView (empty body)
+  POST /pos/v1/orders/:orderId/bill          -> 201 BillView (empty body), first call for this order
+                                              -> 200 BillView, every later call for this order (idempotent - #98)
   GET  /pos/v1/bills/:id                     -> 200 BillView
   POST /pos/v1/bills/:id/finalize            -> 200 BillView
     body: { discountMinor?, discountReason?, managerPin?,
@@ -739,8 +750,10 @@ real Postgres test DB)
 - Creating a bill from a real order's lines computes the correct
   subtotal and the 5% placeholder tax.
 - A non-owner cannot create a bill (403, naming the current owner).
-- A second bill cannot be created for the same order (409
-  `bill_already_exists`).
+- A second `POST` for the same order returns the same Bill idempotently
+  (200, same id, no second row) - see issue #98's dedicated test.
+- Billing an order that's `closed` with no Bill ever created (a direct
+  staff status PATCH, not a finalise) is still rejected (409 `conflict`).
 - Finalising with a matching single tender succeeds, closes the order, and
   is immutable after - a second finalise attempt is `409 already_finalized`.
 - A split multi-tender settlement summing to the total succeeds.

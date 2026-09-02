@@ -200,7 +200,7 @@
     (framework-free: no `PosPrincipal`, no NestJS decorators) and exposed
     through a new, narrowly-scoped second barrel, `src/pos/bills/index.ts`
     (the module's main barrel, `src/pos/index.ts`, still exports only
-    `PosModule`). `guest/bills` imports `createBillRecord`/`commitFinalize`/
+    `PosModule`). `guest/bills` imports `createOrGetBillRecord`/`commitFinalize`/
     `createTenderRecord`/`loadBill`/`toBillView` from that barrel as plain
     functions - not a NestJS-injected `BillsService` - because `PosModule`
     already imports `GuestModule` (for the staff-side session close), so a
@@ -213,12 +213,14 @@
     of bill creation and finalisation for both callers.
   - `POST /guest/v1/orders/:orderId/bill` - creates the Bill
     (`createdByStaffId: null`, see the schema note below) via
-    `createBillRecord`, then splits its subtotal+tax into one `BillShare` per
-    distinct guest attributed on the order's lines (`OrderLine.guestId`),
-    proportional to each guest's own line total. Amounts sum **exactly** to
-    the bill total - integer division's rounding remainder (if any) is
-    folded entirely into the last guest's share (by line order), never
-    dropped or double-counted.
+    `createOrGetBillRecord`, then splits its subtotal+tax into one
+    `BillShare` per distinct guest attributed on the order's lines
+    (`OrderLine.guestId`), proportional to each guest's own line total.
+    Amounts sum **exactly** to the bill total - integer division's rounding
+    remainder (if any) is folded entirely into the last guest's share (by
+    line order), never dropped or double-counted. Idempotent per orderId
+    (issue #98): a repeat call for an order that already has a Bill returns
+    it (200, shares included) instead of 409, same as the staff path below.
   - `GET /guest/v1/orders/:orderId/bill` - the bill plus its live
     `BillShare` breakdown; any guest in the session may read it (shared-table
     view, same posture as the cart).
@@ -313,10 +315,12 @@
 - `CartLineView`: `{ id, guestId, guestName, itemId, itemName, variantId, variantName, quantity, unitPriceMinor, modifiers: [{ id, name, priceMinor }], lineTotalMinor, createdAt }`
   (`unitPriceMinor`/`modifiers[].priceMinor` are resolved live, never
   snapshotted; `lineTotalMinor = (unitPriceMinor + sum(modifiers.priceMinor)) * quantity`).
-- `POST /guest/v1/orders/:orderId/bill` (guest token) -> 201 `GuestBillView`;
-  409 `bill_already_exists`; 409 `conflict` if the order is already closed;
-  410 `session_closed`; 404 `not_found` for an order outside the caller's
-  own session/tenant.
+- `POST /guest/v1/orders/:orderId/bill` (guest token) -> 201 `GuestBillView`
+  on the first call for this order; 200 on any later call for the same
+  order (idempotent, same bill id, shares included - issue #98, matching
+  `pos/v1/orders/:orderId/bill`'s contract); 409 `conflict` if the order is
+  `closed` with no Bill ever created; 410 `session_closed`; 404 `not_found`
+  for an order outside the caller's own session/tenant.
 - `GET /guest/v1/orders/:orderId/bill` (guest token) -> 200 `GuestBillView`;
   404 `not_found` (no bill yet, or the order isn't the caller's own).
 - `POST /guest/v1/bills/:id/shares/:guestId/pay`
@@ -484,7 +488,7 @@
 - **Bill-creation/finalisation code has exactly one implementation, reused
   by two callers** (AD-18, generalizing AD-15's "one shared service, not six
   reimplementations" to a non-staff caller for the first time): the
-  framework-free core (`createBillRecord`, `commitFinalize`,
+  framework-free core (`createOrGetBillRecord`, `commitFinalize`,
   `createTenderRecord`, `loadBill`, `toBillView`, the tax-placeholder
   constant) now lives in `src/pos/bills/bill-core.ts`, with NO dependency on
   `PosPrincipal` or any staff-ownership concept. `pos/bills/bills.service.ts`
