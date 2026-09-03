@@ -7,14 +7,15 @@
 // is a separate, framework-free file rather than the full BillsService).
 export {
   BILL_INCLUDE,
+  buildInvoiceView,
   commitFinalize,
   computeSubtotal,
   createOrGetBillRecord,
   createTenderRecord,
   isUniqueViolation,
   loadBill,
-  TAX_RATE_PLACEHOLDER_PERCENT,
+  loadTenantTaxProfile,
   toBillView,
 } from './bill-core'
-export type { BillWithTenders, CommitFinalizeParams, CreateBillParams, CreateOrGetBillResult } from './bill-core'
-export type { BillView, TenderView } from './bills.dtos'
+export type { BillWithTenders, CommitFinalizeParams, CreateBillParams, CreateOrGetBillResult, TenantTaxProfile } from './bill-core'
+export type { BillView, InvoiceView, TaxBreakdownLineView, TenderView } from './bills.dtos'

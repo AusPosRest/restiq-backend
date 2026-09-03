@@ -690,15 +690,46 @@ against a real Postgres test DB)
   read) and just posts however many tenders that produces. Documented as a
   deliberate scope call, not an oversight - see the CAP-4 section's own
   updated integration-points note above.
-- **Tax - no real rate field exists anywhere in the schema.** Checked
-  `MenuItem`/`MenuCategory`/`ItemPrice` (admin/menu) and
-  `Tenant`/`TenantTaxRegistration` (the latter carries a registration-type
-  enum and a `taxProfile` string, not a rate) - none carry a tax rate.
-  Per this story's brief, a flat **5% placeholder** is applied to
-  `subtotalMinor` (`TAX_RATE_PLACEHOLDER_PERCENT` in `bills.service.ts`),
-  clearly commented as a TODO rather than a real GST/VAT figure for any
-  jurisdiction. **A future tax-configuration story owns making this a real,
-  tenant-configurable rate** - not invented here.
+- **Tax - a real, country-aware engine (issue #103), replacing the old flat
+  5% placeholder.** `src/pos/bills/tax.ts`'s `computeTax()` is a pure,
+  framework-free function (`bigint` minor units in and out, no `tx`, no
+  Prisma types) driven by `Tenant.country` and the tenant's
+  `TenantTaxRegistration` (`taxProfile` free-text string,
+  `compositionScheme` boolean) - loaded once per bill creation by
+  `bill-core.ts`'s `loadTenantTaxProfile()`. Rules:
+  | Country | Profile | Rate | Breakdown | Prices |
+  |---|---|---|---|---|
+  | IN | default (no `"igst"` in `taxProfile`) | 5% | `CGST` 2.5% + `SGST` 2.5% | exclusive |
+  | IN | `taxProfile` contains `"igst"` (case-insensitive) | 5% | single `IGST` 5% | exclusive |
+  | IN | `compositionScheme: true` (overrides the above) | 0% | `[]`, plus the note *"Composition taxable person, not eligible to collect tax on supplies"* | exclusive |
+  | AU | any | 10% | single `GST` 10% | **inclusive** (`taxMinor = subtotal - round(subtotal * 10/11)`) |
+
+  Rounding is deterministic integer minor-unit round-half-up
+  (`(2*numerator + denominator) / (2*denominator)`, no floats); for the
+  CGST/SGST split, `taxMinor` is rounded once as the authoritative total,
+  CGST is rounded independently at its own rate, and SGST absorbs whatever
+  the two roundings leave over, so the breakdown lines always sum exactly
+  to `taxMinor`. A tenant with no `TenantTaxRegistration` row at all (empty
+  `taxProfile`) defaults to the ordinary IN CGST/SGST case. Unit-tested
+  exhaustively in `src/pos/bills/tax.spec.ts` (every branch plus rounding
+  edge cases). **A future tax-configuration story still owns anything
+  beyond these two countries/rates** (e.g. a third jurisdiction, or a
+  tenant-configurable rate) - not attempted here.
+- **Bill tax snapshot (issue #103):** `bills.tax_breakdown` (nullable
+  JSONB: `{ lines: [{ label, ratePercent, amountMinor }], notes: string[] }`)
+  and `bills.prices_include_tax` (boolean, default `false`) are set once, at
+  bill creation (`createOrGetBillRecord`), from `computeTax()`'s result -
+  never recomputed afterwards, including across `finalize()`, so a later
+  change to the tenant's tax registration never retroactively alters an
+  already-open (let alone finalized) Bill. `taxMinor` stays the
+  authoritative total (unchanged column, unchanged meaning) so every
+  existing reader keeps working; `taxBreakdown`/`pricesIncludeTax` are
+  additive detail. `BillView.totalMinor` is computed pricesIncludeTax-aware:
+  `subtotal + tax - discount` for an exclusive-tax bill (IN), but just
+  `subtotal - discount` for an inclusive-tax bill (AU), since `subtotalMinor`
+  there already contains the tax - adding `taxMinor` again would double-count
+  it. A pre-migration bill has `taxBreakdown: null` on disk, surfaced as `[]`
+  on every view so callers never need a null check on top of an array one.
 - **Discount-above-threshold routes through the real `platform/manager-auth`
   service (AD-15)**, per stories.yaml's explicit instruction, rather than
   accepting a bare reason string: `ManagerAuthService.authorize
@@ -749,6 +780,8 @@ against a real Postgres test DB)
   Bill { id, tenantId, outletId, orderId (unique),
          billNumber: number | null,     // null until finalised
          subtotalMinor, taxMinor,
+         taxBreakdown: { label, ratePercent, amountMinor }[],  // issue #103, snapshotted at creation
+         pricesIncludeTax: boolean,                            // issue #103, snapshotted at creation
          discountMinor: number | null, discountReason: string | null,
          status: "open" | "finalized",
          createdByStaffId, createdAt,
@@ -758,18 +791,77 @@ against a real Postgres test DB)
   POST /pos/v1/orders/:orderId/bill          -> 201 BillView (empty body), first call for this order
                                               -> 200 BillView, every later call for this order (idempotent - #98)
   GET  /pos/v1/bills/:id                     -> 200 BillView
+  GET  /pos/v1/bills/:id/invoice             -> 200 InvoiceView, or 409 not_finalized if the bill is still open
   POST /pos/v1/bills/:id/finalize            -> 200 BillView
     body: { discountMinor?, discountReason?, managerPin?,
             tenders: [{ method: "cash"|"upi_manual", amountMinor }] }
-  // BillView adds a derived `totalMinor` (subtotal + tax - discount) and
-  // `tenders: TenderView[]` - never persisted as its own column.
+  // BillView adds a derived `totalMinor` (pricesIncludeTax-aware - see
+  // above) and `tenders: TenderView[]` - never persisted as its own column.
   ```
+- **`GET /pos/v1/bills/:id/invoice` (issue #103) - a read-only, customer-
+  facing projection of an already-finalized Bill, built fresh on every call
+  (never itself persisted).** Same auth/ownership as `GET /pos/v1/bills/:id`
+  (owner-unrestricted, like that endpoint - unlike `create`). `409
+  not_finalized` against a still-`open` bill (its tax breakdown is
+  provisional and it carries no `billNumber`/`finalizedAt` yet, both of
+  which this view is built around); `404` across tenants, same as every
+  other bill read. Also exposed, unchanged in shape, at guest realm `GET
+  /guest/v1/bills/:id/invoice` (ownership check: the bill's order must
+  belong to the calling guest's own session, the same rule `payShare`/
+  `payAll` already use).
+  ```
+  InvoiceView {
+    invoiceNumber: string       // the gapless bill number, formatted as-is
+    title: string                // "Tax Invoice" for an AU/ABN seller (AU GST law
+                                  // requires the literal phrase), "Invoice" otherwise
+    issuedAt: string             // Bill.finalizedAt
+    currency: string             // "INR" | "AUD", derived from Tenant.country
+    seller: {
+      legalEntityName: string
+      registrationLabel: "GSTIN" | "ABN"   // derived from country, not registrationType
+      registrationNumber: string
+      fssaiLicense: string | null
+      outletName: string
+      outletAddress: string
+    }
+    lines: { name, quantity, unitPriceMinor, lineTotalMinor }[]   // resolved from the
+                                                                    // order's own snapshotted lines
+    subtotalMinor: number
+    discountMinor: number | null
+    discountReason: string | null
+    taxBreakdown: { label, ratePercent, amountMinor }[]   // the Bill's own frozen snapshot
+    taxMinor: number
+    totalMinor: number            // pricesIncludeTax-aware, same formula as BillView
+    pricesIncludeTax: boolean
+    tenders: { method, amountMinor, createdAt }[]
+    creditNotes: { id, amountMinor, reason, createdAt }[]
+    notes: string[]               // e.g. the composition-scheme statutory wording
+  }
+  ```
+  Seller detail (`legalEntityName`/`registrationNumber`/`fssaiLicense`,
+  outlet name/address) is read live from the tenant's **current** tax
+  registration and outlet row, not frozen at bill time - unlike
+  `taxBreakdown`/`notes` (read back from the Bill's own snapshot), a
+  seller's registered legal details are a live legal fact, not a
+  point-in-time snapshot. `lines[].unitPriceMinor` includes each line's
+  selected modifiers, the same per-unit figure `computeSubtotal()` folds
+  into `subtotalMinor`. `creditNotes[].amountMinor` is
+  `subtotalMinor + taxMinor` for an exclusive-tax bill, or just
+  `subtotalMinor` for an inclusive-tax one (`CreditNote` has no
+  `pricesIncludeTax` of its own - it's read from the original Bill), the
+  same `pricesIncludeTax`-aware rule CAP-9's own `toCreditNoteView()` uses.
 
 ### Test coverage (`test/pos-bills.e2e-spec.ts`, 12 tests, e2e against a
 real Postgres test DB)
 
-- Creating a bill from a real order's lines computes the correct
-  subtotal and the 5% placeholder tax.
+- Creating a bill from a real order's lines computes the correct subtotal
+  and, per issue #103's tax engine (`test/pos-bills.e2e-spec.ts`'s own
+  "country-aware tax engine" and "GET .../invoice" describe blocks, +11
+  tests): IN CGST/SGST splitting to `taxMinor`, IN IGST as a single line, IN
+  composition scheme as zero tax with the statutory note, AU inclusive GST
+  (`totalMinor === subtotalMinor`), and the invoice endpoint's exact shape -
+  409 before finalize, 200 with real tenders after, `"Tax Invoice"` title
+  for AU, the composition note carried through, and cross-tenant 404.
 - A non-owner cannot create a bill (403, naming the current owner).
 - A second `POST` for the same order returns the same Bill idempotently
   (200, same id, no second row) - see issue #98's dedicated test.
@@ -991,16 +1083,21 @@ service directly rather than through an HTTP endpoint)
   remain. Not explicitly named in SPEC.md's success criterion, but a direct
   consequence of "itemized against the real order lines" - without it, the
   same dish could be refunded twice.
-- **Correct tax reversal, against the real, documented placeholder rate -
-  not a re-guessed one.** Story 8's `bills.service.ts` computes
-  `taxMinor = subtotalMinor * TAX_RATE_PLACEHOLDER_PERCENT / 100` (5%,
-  independent of any discount). `TAX_RATE_PLACEHOLDER_PERCENT` is now
-  exported from `bills.service.ts` (was module-private) so `refund()`
-  imports the exact same constant - never a second 5%, never a re-derived
-  figure - and reverses each refund's `subtotalMinor` at that identical
-  rate. Because the original tax was computed independent of discount, this
-  is the correct inverse for a partial refund too, not an approximation.
-  `CreditNoteView.totalMinor` (subtotal + tax) is derived, never persisted -
+- **Correct tax reversal, proportional to the bill's own actual rate
+  (updated for issue #103's real tax engine).** `refund()` derives the
+  reversal rate from the bill's own `subtotalMinor`/`taxMinor` ratio
+  (`taxMinor = subtotalMinor * bill.taxMinor / bill.subtotalMinor`) rather
+  than re-deriving a rate from the tenant's tax registration - which may
+  have changed since the bill was created - so the reversal is always
+  correct for whichever rate actually produced `bill.taxMinor`: the
+  CGST/SGST split, IGST, composition scheme's 0%, or AU's inclusive GST,
+  without `refund()` needing to know which one applied. Because the
+  original tax was computed independent of any discount, this is the
+  correct inverse for a partial refund too, not an approximation.
+  `CreditNoteView.totalMinor` is derived, never persisted, and
+  `pricesIncludeTax`-aware (read from the original Bill, since `CreditNote`
+  has no such column of its own): `subtotalMinor + taxMinor` for an
+  exclusive-tax bill, or just `subtotalMinor` for an inclusive-tax one -
   same convention as `BillView.totalMinor`.
 - **`CreditNote` schema/endpoint contract:**
   ```
@@ -1217,8 +1314,11 @@ a real Postgres test DB)
   menu module.
 - CAP-11 adds **no table or column** - it is a pure read over CAP-1's
   existing `clock_events`, per stories.yaml story 11.
-- `bills` (new, CAP-7) - `{ id, tenantId, outletId, orderId (unique),
+- `bills` (new, CAP-7; `taxBreakdown`/`pricesIncludeTax` added by issue
+  #103) - `{ id, tenantId, outletId, orderId (unique),
   billNumber? (null until finalised), subtotalMinor, taxMinor,
+  taxBreakdown? (JSONB, nullable - null only for a pre-#103 bill),
+  pricesIncludeTax (boolean, default false),
   discountMinor?, discountReason?, status (open|finalized),
   createdByStaffId, createdAt, finalizedByStaffId?, finalizedAt? }`. RLS
   `tenant_isolation` + `operator_read`. Insert-only past finalisation (AD-14)

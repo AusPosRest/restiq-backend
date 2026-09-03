@@ -2,7 +2,7 @@ import { Body, Controller, Get, HttpCode, Param, Post, Res } from '@nestjs/commo
 import type { Response } from 'express'
 import { CurrentStaff, PosPrincipal } from '../../platform'
 import { BillsService } from './bills.service'
-import { BillView, CreditNoteView, FinalizeBillDto, RefundBillDto } from './bills.dtos'
+import { BillView, CreditNoteView, FinalizeBillDto, InvoiceView, RefundBillDto } from './bills.dtos'
 
 @Controller('pos/v1')
 export class PosBillsController {
@@ -22,6 +22,12 @@ export class PosBillsController {
   @Get('bills/:id')
   getOne(@CurrentStaff() staff: PosPrincipal, @Param('id') id: string): Promise<BillView> {
     return this.bills.getBill(staff, id)
+  }
+
+  // issue #103: 409 not_finalized before finalize (bill-core.ts's buildInvoiceView) - same auth/ownership as getOne above (owner-unrestricted, unlike create).
+  @Get('bills/:id/invoice')
+  getInvoice(@CurrentStaff() staff: PosPrincipal, @Param('id') id: string): Promise<InvoiceView> {
+    return this.bills.getInvoice(staff, id)
   }
 
   @Post('bills/:id/finalize')
