@@ -29,6 +29,11 @@ interface TenderRowBody {
   amountMinor: number
   createdAt: string
 }
+interface TaxBreakdownLineBody {
+  label: string
+  ratePercent: number
+  amountMinor: number
+}
 interface CreditNoteRowBody {
   id: string
   amountMinor: number
@@ -50,6 +55,7 @@ interface PaymentRowBody {
   discountMinor: number | null
   discountReason: string | null
   taxMinor: number
+  taxBreakdown: TaxBreakdownLineBody[]
   totalMinor: number
   tenders: TenderRowBody[]
   creditNotes: CreditNoteRowBody[]
@@ -298,6 +304,12 @@ describe('/admin/v1/reports/payments (e2e)', () => {
         taxMinor: 1500,
         totalMinor: 31500,
       })
+      // Default IN tax profile (no TenantTaxRegistration row): 5% split into
+      // CGST 2.5% + SGST 2.5% (see pos-bills.e2e-spec.ts's tax engine tests).
+      expect(b3Row.taxBreakdown).toEqual([
+        { label: 'CGST', ratePercent: 2.5, amountMinor: 750 },
+        { label: 'SGST', ratePercent: 2.5, amountMinor: 750 },
+      ])
       expect(b3Row.tenders).toEqual([{ method: 'cash', amountMinor: 31500, createdAt: expect.any(String) as string }])
       expect(b3Row.creditNotes).toHaveLength(1)
       expect(b3Row.creditNotes[0]).toMatchObject({ amountMinor: 31500, reason: 'Sent back' })

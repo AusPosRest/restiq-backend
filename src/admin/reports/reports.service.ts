@@ -20,6 +20,7 @@
 import { BadRequestException, Injectable, NotFoundException } from '@nestjs/common'
 import type { Prisma } from '../../generated/prisma/client'
 import { AdminPrincipal, RegionRegistryService } from '../../platform'
+import type { TaxBreakdownLineView } from '../../pos/bills'
 import { setTenantContext } from '../menu/tenant-context'
 import { resolveCurrentPrice } from '../menu/pricing'
 import { pinStatus } from '../staff/staff.service'
@@ -139,12 +140,31 @@ const PAYMENTS_INCLUDE = {
 } satisfies Prisma.BillInclude
 type BillWithPaymentsInclude = Prisma.BillGetPayload<{ include: typeof PAYMENTS_INCLUDE }>
 
-function toCreditNoteRow(note: BillWithPaymentsInclude['creditNotes'][number]): PaymentCreditNoteRow {
-  // CreditNote has no single amountMinor column - its refunded total is
-  // subtotal + tax, the same never-persisted-derived-total convention
-  // Bill.totalMinor and CreditNoteView already use (see the CreditNote
-  // model's schema comment).
-  return { id: note.id, amountMinor: Number(note.subtotalMinor + note.taxMinor), reason: note.reason, createdAt: note.createdAt.toISOString() }
+// Issue #103: the same pricesIncludeTax-aware total bill-core.ts's (private)
+// computeTotalMinor derives - AU's subtotalMinor is already tax-inclusive
+// (adding taxMinor again would double-charge GST), IN's is not. Duplicated
+// here rather than exported/shared, same posture as bills.service.ts's own
+// toCreditNoteView, which re-derives the sibling credit-note formula below
+// rather than importing it.
+function computeTotalMinor(subtotalMinor: bigint, taxMinor: bigint, discountMinor: bigint, pricesIncludeTax: boolean): bigint {
+  return pricesIncludeTax ? subtotalMinor - discountMinor : subtotalMinor + taxMinor - discountMinor
+}
+
+// The tax_breakdown JSONB column's on-disk shape is { lines, notes } (see
+// bill-core.ts's StoredTaxBreakdown) - this report only ever surfaces the
+// lines. [] for a bill that predates the column, same "never null" posture
+// PaymentRow.taxBreakdown documents.
+function readTaxBreakdownLines(taxBreakdown: Prisma.JsonValue | null): TaxBreakdownLineView[] {
+  const stored = taxBreakdown as { lines?: TaxBreakdownLineView[] } | null
+  return stored?.lines ?? []
+}
+
+function toCreditNoteRow(note: BillWithPaymentsInclude['creditNotes'][number], pricesIncludeTax: boolean): PaymentCreditNoteRow {
+  // CreditNote has no single amountMinor column, and pricesIncludeTax comes
+  // from the originating Bill, not CreditNote itself - same formula as
+  // bill-core.ts's buildInvoiceView and bills.service.ts's toCreditNoteView.
+  const amountMinor = pricesIncludeTax ? note.subtotalMinor : note.subtotalMinor + note.taxMinor
+  return { id: note.id, amountMinor: Number(amountMinor), reason: note.reason, createdAt: note.createdAt.toISOString() }
 }
 
 function toPaymentRow(bill: BillWithPaymentsInclude): PaymentRow {
@@ -167,9 +187,10 @@ function toPaymentRow(bill: BillWithPaymentsInclude): PaymentRow {
     discountMinor: bill.discountMinor === null ? null : Number(bill.discountMinor),
     discountReason: bill.discountReason,
     taxMinor: Number(bill.taxMinor),
-    totalMinor: Number(bill.subtotalMinor + bill.taxMinor - discountMinor),
+    taxBreakdown: readTaxBreakdownLines(bill.taxBreakdown),
+    totalMinor: Number(computeTotalMinor(bill.subtotalMinor, bill.taxMinor, discountMinor, bill.pricesIncludeTax)),
     tenders: bill.tenders.map((t) => ({ method: t.method, amountMinor: Number(t.amountMinor), createdAt: t.createdAt.toISOString() })),
-    creditNotes: bill.creditNotes.map(toCreditNoteRow),
+    creditNotes: bill.creditNotes.map((n) => toCreditNoteRow(n, bill.pricesIncludeTax)),
   }
 }
 
@@ -241,22 +262,46 @@ export class ReportsService {
     }
   }
 
+  // totalMinor/refundedMinor can't be a plain _sum aggregate: each bill's
+  // (and each of its credit notes') contribution depends on that bill's own
+  // pricesIncludeTax (computeTotalMinor above), and Prisma can't group a
+  // CreditNote aggregate by its related Bill's column. So this pulls the
+  // scalar columns needed for that per-bill formula and reduces them in JS -
+  // the same "no cap on range size" posture exportPaymentsCsv already has.
   private async totalsFor(tx: Prisma.TransactionClient, where: Prisma.BillWhereInput): Promise<PaymentsTotals> {
-    const [billAgg, tenderAgg, creditNoteAgg] = await Promise.all([
-      tx.bill.aggregate({ where, _count: true, _sum: { subtotalMinor: true, discountMinor: true, taxMinor: true } }),
-      tx.tender.aggregate({ where: { bill: where }, _sum: { amountMinor: true } }),
-      tx.creditNote.aggregate({ where: { originalBill: where }, _sum: { subtotalMinor: true, taxMinor: true } }),
+    const bills = await tx.bill.findMany({ where, select: { id: true, subtotalMinor: true, discountMinor: true, taxMinor: true, pricesIncludeTax: true } })
+    const billIds = bills.map((b) => b.id)
+    const pricesIncludeTaxByBillId = new Map(bills.map((b) => [b.id, b.pricesIncludeTax]))
+
+    const [tenderAgg, creditNotes] = await Promise.all([
+      tx.tender.aggregate({ where: { billId: { in: billIds } }, _sum: { amountMinor: true } }),
+      tx.creditNote.findMany({ where: { originalBillId: { in: billIds } }, select: { subtotalMinor: true, taxMinor: true, originalBillId: true } }),
     ])
-    const subtotalMinor = billAgg._sum.subtotalMinor ?? 0n
-    const discountMinor = billAgg._sum.discountMinor ?? 0n
-    const taxMinor = billAgg._sum.taxMinor ?? 0n
-    const refundedMinor = (creditNoteAgg._sum.subtotalMinor ?? 0n) + (creditNoteAgg._sum.taxMinor ?? 0n)
+
+    let subtotalMinor = 0n
+    let discountMinor = 0n
+    let taxMinor = 0n
+    let totalMinor = 0n
+    for (const bill of bills) {
+      const billDiscount = bill.discountMinor ?? 0n
+      subtotalMinor += bill.subtotalMinor
+      discountMinor += billDiscount
+      taxMinor += bill.taxMinor
+      totalMinor += computeTotalMinor(bill.subtotalMinor, bill.taxMinor, billDiscount, bill.pricesIncludeTax)
+    }
+
+    let refundedMinor = 0n
+    for (const note of creditNotes) {
+      const pricesIncludeTax = pricesIncludeTaxByBillId.get(note.originalBillId) ?? false
+      refundedMinor += pricesIncludeTax ? note.subtotalMinor : note.subtotalMinor + note.taxMinor
+    }
+
     return {
-      count: billAgg._count,
+      count: bills.length,
       subtotalMinor: Number(subtotalMinor),
       discountMinor: Number(discountMinor),
       taxMinor: Number(taxMinor),
-      totalMinor: Number(subtotalMinor + taxMinor - discountMinor),
+      totalMinor: Number(totalMinor),
       tenderedMinor: Number(tenderAgg._sum.amountMinor ?? 0n),
       refundedMinor: Number(refundedMinor),
     }

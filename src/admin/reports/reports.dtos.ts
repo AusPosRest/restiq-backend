@@ -2,6 +2,7 @@
 // every read is scoped to the signed-in owner's session (AD-5), same
 // posture as every other admin DTO.
 import { IsISO8601, IsOptional, IsString, IsUUID } from 'class-validator'
+import type { TaxBreakdownLineView } from '../../pos/bills'
 
 export type ReportCategory = 'sales' | 'financial' | 'menu' | 'operations' | 'inventory' | 'labour'
 
@@ -65,10 +66,6 @@ export interface PaymentCreditNoteRow {
   createdAt: string
 }
 
-// taxBreakdown is intentionally absent: Bill carries no such column in this
-// build's schema (checked against prisma/schema.prisma at the time of
-// writing) - another branch is adding it. Add the field back here, sourced
-// from bill.taxBreakdown, once that column lands.
 export interface PaymentRow {
   billId: string
   billNumber: number
@@ -84,6 +81,10 @@ export interface PaymentRow {
   discountMinor: number | null
   discountReason: string | null
   taxMinor: number
+  // Issue #103's country-aware tax engine's own breakdown lines, snapshotted
+  // on the Bill at creation time (pos/bills/bill-core.ts) - [] for a bill
+  // that predates that column, same "never null" posture as BillView.
+  taxBreakdown: TaxBreakdownLineView[]
   totalMinor: number
   tenders: PaymentTenderRow[]
   creditNotes: PaymentCreditNoteRow[]

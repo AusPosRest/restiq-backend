@@ -1,5 +1,23 @@
 # Completed
 
+- **2026-09-03** - CAP-9's first real transactional report: Payments
+  History. `GET /admin/v1/reports/payments?outletId&from&to&cursor&limit`
+  returns finalised bills newest-first, keyset-paginated on
+  `(finalizedAt, id)`, plus `totals` over the whole filtered range (not just
+  the page) - built on pos/CAP-7's `Bill`/`Tender`/`CreditNote` tables via
+  the real POS finalize/refund endpoints, no fabricated data. `GET
+  .../payments/export` exports the same filtered range as CSV, tenders and
+  credit notes flattened into `method=amount` cells. Each row's
+  `totalMinor` (and a credit note's `amountMinor`) is aware of issue #103's
+  `pricesIncludeTax` (AU's subtotal is already tax-inclusive, IN's isn't)
+  and carries that engine's own `taxBreakdown` lines, snapshotted on the
+  `Bill` at creation time. Both endpoints registered in the reports
+  catalogue (`hasData: true`, `exportFormats: ['csv']`). 9 new e2e tests
+  (`test/reports-payments.e2e-spec.ts`): only-finalized/newest-first,
+  whole-range totals, cursor pagination with no gaps or repeats, outlet and
+  date filtering, cross-tenant 404, and the CSV header/rows. See
+  [wiki/features/tenant-admin.md](../features/tenant-admin.md#cap-9---reports-catalogue).
+  Issue AusPosRest/restiq-backend#104.
 - **2026-09-03** - Country-aware tax engine, bill tax snapshot, and
   tax-invoice view. New pure `src/pos/bills/tax.ts` (`computeTax()`,
   `bigint` minor units, deterministic round-half-up rounding) replaces the
