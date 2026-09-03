@@ -253,11 +253,16 @@ built here, story by story.
   Order/Bill/Payment/Document model; the catalogue shape (`hasData`,
   `message`, `exportFormats`) is designed to flip to real values without a
   breaking change.
-- **Two report types ARE real today**, backed by tables that already exist
+- **Three report types ARE real today**, backed by tables that already exist
   and are already live-written by other capabilities:
   - **Menu Catalogue** (`hasData: true`) - CAP-4's `menu_categories` /
     `menu_items` / `item_prices`.
   - **Staff Roster** (`hasData: true`) - CAP-7's `staff_users` / `roles`.
+  - **Payments History** (`hasData: true`, issue #104) - pos/CAP-7's
+    `bills` / `tenders` / `credit_notes`, the first report built on real
+    transactional data. `Sales Summary` (an aggregated rollup, not a
+    transaction list) is unrelated and stays `hasData: false` pending its
+    own aggregation logic.
 - **Built** (`src/admin/reports/`):
   - `GET /admin/v1/reports` -> `ReportCatalogueEntry[]`, each
     `{ key, name, category: "sales"|"financial"|"menu"|"operations"|
@@ -281,6 +286,35 @@ built here, story by story.
   - Both export endpoints 400 on any `format` other than `csv` (the only
     format either catalogue entry advertises) - a bad or missing format is
     a rejection, not a silent fallback.
+  - `GET /admin/v1/reports/payments?outletId&from&to&cursor&limit` (issue
+    #104) -> `{ items: PaymentRow[], nextCursor, totals }`. Finalised
+    (`status: 'finalized'`) bills only, newest `finalizedAt` first,
+    keyset-paginated on `(finalizedAt, id)` (`limit` 1-200, default 50 -
+    validated by hand, same posture as ops/dlq's cursor list, since the
+    global `ValidationPipe` runs with no `transform: true`). `outletId`,
+    when given, must belong to the caller's own tenant (404 otherwise);
+    `from`/`to` filter on `finalizedAt` and are both optional/independent.
+    `totals` (`{ count, subtotalMinor, discountMinor, taxMinor,
+    totalMinor, tenderedMinor, refundedMinor }`) always covers the *whole*
+    filtered range, not just the returned page. Each `PaymentRow` is
+    `{ billId, billNumber, finalizedAt, outletId, outletName, orderId,
+    source: "pos"|"qr", tableLabel, tokenNumber, cashierName,
+    subtotalMinor, discountMinor, discountReason, taxMinor, taxBreakdown,
+    totalMinor, tenders: [{method, amountMinor, createdAt}], creditNotes:
+    [{id, amountMinor, reason, createdAt}] }` - `taxBreakdown` is issue
+    #103's tax-engine breakdown lines snapshotted on the `Bill`, and
+    `totalMinor`/a credit note's `amountMinor` are both
+    `pricesIncludeTax`-aware (AU's subtotal is already tax-inclusive, IN's
+    is not), the same formula `pos/bills/bill-core.ts` and
+    `bills.service.ts` use - re-derived here rather than imported, matching
+    how those two already duplicate it between themselves.
+  - `GET /admin/v1/reports/payments/export` -> the same filters (no
+    pagination), one CSV row per finalized bill:
+    `bill_number,finalized_at,outlet,source,table,token_number,cashier,
+    subtotal,discount,discount_reason,tax,total,tenders,credit_notes`.
+    Money columns are 2-dp major units; `tenders`/`credit_notes` flatten a
+    variable number of rows into one `method=amount;method=amount` cell
+    each, so a variable count never needs a variable number of columns.
   - `GET /admin/v1/reports/export-destinations` -> a static
     `ExportDestinationView[]`, `{ key, name, status: "not_connected" }` for
     Tally, Xero, MYOB, Zoho Books, and QuickBooks. Every destination is
