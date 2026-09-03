@@ -1421,6 +1421,20 @@ model Bill {
   billNumber         Int?       @map("bill_number")
   subtotalMinor      BigInt     @map("subtotal_minor")
   taxMinor           BigInt     @map("tax_minor")
+  // issue #103: the country-aware tax engine's own breakdown lines
+  // ([{ label, ratePercent, amountMinor }]), snapshotted at bill-creation
+  // time alongside subtotalMinor/taxMinor - never recomputed afterwards, so
+  // a later tax-registration change never retroactively alters an
+  // already-open (let alone finalized) bill. Nullable only because a bill
+  // created before this migration has none; every bill created from here on
+  // always sets it. taxMinor stays the authoritative total (existing readers
+  // that only care about the number keep working unchanged) - this is
+  // additive detail for the tax-invoice view (src/pos/bills/tax.ts).
+  taxBreakdown       Json?      @map("tax_breakdown")
+  // True only for a country whose prices are tax-inclusive (AU GST) - see
+  // tax.ts's computeTax(). Always false for IN, whose CGST/SGST/IGST is
+  // added on top of subtotalMinor.
+  pricesIncludeTax   Boolean    @default(false) @map("prices_include_tax")
   discountMinor      BigInt?    @map("discount_minor")
   discountReason     String?    @map("discount_reason")
   status             BillStatus @default(open)

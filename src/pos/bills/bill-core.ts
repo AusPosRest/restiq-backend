@@ -18,19 +18,87 @@
 import { BadRequestException, ConflictException, NotFoundException } from '@nestjs/common'
 import type { Prisma } from '../../generated/prisma/client'
 import { uuidv7 } from '../../platform'
-import { BillView, TenderView } from './bills.dtos'
+import { BillView, InvoiceCreditNoteView, InvoiceLineView, InvoiceView, TaxBreakdownLineView, TenderView } from './bills.dtos'
+import { computeTax, TaxBreakdownLine, TaxCountry } from './tax'
 
 type Tx = Prisma.TransactionClient
 
-// TODO(tax-configuration story): replace with a real per-tenant/per-item tax
-// rate once one exists anywhere in the schema. 5% is a documented, flat
-// placeholder - not a real GST/VAT figure for any jurisdiction - chosen only
-// so bills carry a non-zero, deterministic tax breakdown until that story
-// lands. Also used by guest/bills for the identical reason.
-export const TAX_RATE_PLACEHOLDER_PERCENT = 5n
+export interface TenantTaxProfile {
+  country: TaxCountry
+  // '' when the tenant has no TenantTaxRegistration row yet (e.g. a tenant
+  // provisioned before this story, or a test fixture that never seeded one) -
+  // tax.ts's computeTax() treats that the same as any other non-IGST profile
+  // (the CGST/SGST split), which is also the ordinary domestic-supply case.
+  taxProfile: string
+  compositionScheme: boolean
+  legalEntityName: string | null
+  registrationNumber: string | null
+  fssaiLicense: string | null
+}
+
+/**
+ * Issue #103: the one place a Bill computation loads a tenant's country +
+ * tax registration - called once per bill creation (and again, separately,
+ * whenever the tax-invoice view is built, since that needs the seller
+ * detail fields too). findFirst, not a unique lookup: the schema carries no
+ * @@unique([tenantId]) on TenantTaxRegistration, but
+ * TenantTaxRegistration.registrationNumber's own comment ("one legal entity,
+ * one tenant per region") documents that only one row is ever expected.
+ */
+export async function loadTenantTaxProfile(tx: Tx, tenantId: string): Promise<TenantTaxProfile> {
+  const [tenant, registration] = await Promise.all([
+    tx.tenant.findUniqueOrThrow({ where: { id: tenantId }, select: { country: true, name: true } }),
+    tx.tenantTaxRegistration.findFirst({ where: { tenantId } }),
+  ])
+  return {
+    country: tenant.country,
+    taxProfile: registration?.taxProfile ?? '',
+    compositionScheme: registration?.compositionScheme ?? false,
+    legalEntityName: registration?.legalEntityName ?? tenant.name,
+    registrationNumber: registration?.registrationNumber ?? null,
+    fssaiLicense: registration?.fssaiLicense ?? null,
+  }
+}
+
+// The tax_breakdown JSONB column's actual on-disk shape: the engine's
+// breakdown lines AND its notes (e.g. the composition-scheme statutory
+// wording) together, both snapshotted at bill-creation time - notes are
+// exactly as tenant-configuration-dependent as the lines are (tax.ts derives
+// both from the same country/taxProfile/compositionScheme triple), so an
+// invoice built later must read the note that actually applied at billing
+// time, not one freshly recomputed against whatever the tenant's tax
+// registration says today.
+interface StoredTaxBreakdown {
+  lines: TaxBreakdownLineView[]
+  notes: string[]
+}
+
+function toStoredTaxBreakdown(lines: TaxBreakdownLine[], notes: string[]): StoredTaxBreakdown {
+  return { lines: lines.map((l) => ({ label: l.label, ratePercent: l.ratePercent, amountMinor: Number(l.amountMinor) })), notes }
+}
+
+function readStoredTaxBreakdown(taxBreakdown: Prisma.JsonValue | null): StoredTaxBreakdown {
+  const stored = taxBreakdown as StoredTaxBreakdown | null
+  return { lines: stored?.lines ?? [], notes: stored?.notes ?? [] }
+}
 
 export function isUniqueViolation(error: unknown): boolean {
   return typeof error === 'object' && error !== null && (error as { code?: unknown }).code === 'P2002'
+}
+
+/**
+ * Issue #103: the customer-payable total, aware of pricesIncludeTax. For an
+ * exclusive-tax bill (IN), tax sits on top of subtotalMinor, so the total is
+ * subtotal + tax - discount, same formula this module always used. For an
+ * inclusive-tax bill (AU), subtotalMinor IS already the tax-inclusive figure
+ * (computeSubtotal() sums the order lines' own menu prices unchanged - it
+ * has no country awareness of its own) and taxMinor is only how much of that
+ * subtotal is GST, not an amount owed on top of it - adding it again would
+ * charge the GST twice. Shared by toBillView, commitFinalize's tender-sum
+ * validation, and buildInvoiceView, so all three always agree on one number.
+ */
+function computeTotalMinor(subtotalMinor: bigint, taxMinor: bigint, discountMinor: bigint, pricesIncludeTax: boolean): bigint {
+  return pricesIncludeTax ? subtotalMinor - discountMinor : subtotalMinor + taxMinor - discountMinor
 }
 
 export const BILL_INCLUDE = { tenders: { orderBy: { createdAt: 'asc' as const } } } satisfies Prisma.BillInclude
@@ -50,9 +118,13 @@ export function toBillView(bill: BillWithTenders): BillView {
     billNumber: bill.billNumber,
     subtotalMinor: Number(bill.subtotalMinor),
     taxMinor: Number(bill.taxMinor),
+    // [] rather than null for a pre-migration bill that predates this
+    // column, so callers never need a null check on top of an array one.
+    taxBreakdown: readStoredTaxBreakdown(bill.taxBreakdown).lines,
+    pricesIncludeTax: bill.pricesIncludeTax,
     discountMinor: bill.discountMinor === null ? null : Number(bill.discountMinor),
     discountReason: bill.discountReason,
-    totalMinor: Number(bill.subtotalMinor + bill.taxMinor - discountMinor),
+    totalMinor: Number(computeTotalMinor(bill.subtotalMinor, bill.taxMinor, discountMinor, bill.pricesIncludeTax)),
     status: bill.status,
     createdByStaffId: bill.createdByStaffId,
     createdAt: bill.createdAt.toISOString(),
@@ -132,7 +204,13 @@ export async function createOrGetBillRecord(tx: Tx, params: CreateBillParams): P
   }
 
   const subtotalMinor = await computeSubtotal(tx, params.orderId)
-  const taxMinor = (subtotalMinor * TAX_RATE_PLACEHOLDER_PERCENT) / 100n
+  const taxContext = await loadTenantTaxProfile(tx, params.tenantId)
+  const tax = computeTax({
+    country: taxContext.country,
+    taxProfile: taxContext.taxProfile,
+    compositionScheme: taxContext.compositionScheme,
+    subtotalMinor,
+  })
 
   try {
     const bill = await tx.bill.create({
@@ -142,7 +220,9 @@ export async function createOrGetBillRecord(tx: Tx, params: CreateBillParams): P
         outletId: params.outletId,
         orderId: params.orderId,
         subtotalMinor,
-        taxMinor,
+        taxMinor: tax.taxMinor,
+        taxBreakdown: toStoredTaxBreakdown(tax.breakdown, tax.notes) as unknown as Prisma.InputJsonValue,
+        pricesIncludeTax: tax.pricesIncludeTax,
         createdByStaffId: params.createdByStaffId,
       },
       include: BILL_INCLUDE,
@@ -191,7 +271,7 @@ export async function commitFinalize(tx: Tx, params: CommitFinalizeParams): Prom
     throw new ConflictException({ code: 'already_finalized', message: 'This bill has already been finalised' })
   }
 
-  const totalMinor = bill.subtotalMinor + bill.taxMinor - (params.discountMinor ?? 0n)
+  const totalMinor = computeTotalMinor(bill.subtotalMinor, bill.taxMinor, params.discountMinor ?? 0n, bill.pricesIncludeTax)
   const tenderAgg = await tx.tender.aggregate({ where: { billId: bill.id }, _sum: { amountMinor: true } })
   const tenderTotal = tenderAgg._sum.amountMinor ?? 0n
   if (tenderTotal !== totalMinor) {
@@ -238,4 +318,84 @@ export async function commitFinalize(tx: Tx, params: CommitFinalizeParams): Prom
   await tx.order.update({ where: { id: bill.orderId }, data: { status: 'closed' } })
 
   return loadBill(tx, params.tenantId, bill.id)
+}
+
+// Same IN->INR/AU->AUD rule ops/tenants/tenants.service.ts uses at
+// provisioning to price the tenant's seed menu - Tenant carries no currency
+// column of its own, so this is the one place that rule is re-derived rather
+// than read back.
+function currencyForCountry(country: TaxCountry): string {
+  return country === 'IN' ? 'INR' : 'AUD'
+}
+
+/**
+ * Issue #103: GET .../bills/:id/invoice's read model - built fresh on every
+ * call (never persisted) from the Bill's own immutable snapshot
+ * (subtotalMinor/taxMinor/taxBreakdown, discountMinor/discountReason,
+ * billNumber/finalizedAt) plus the order's lines and the tenant's CURRENT
+ * seller detail (legalEntityName/registrationNumber/fssaiLicense, outlet
+ * name/address) - the seller's own registered details are a live legal fact,
+ * unlike the tax breakdown, which is frozen at bill-creation time (see
+ * StoredTaxBreakdown's comment). 409 not_finalized on a still-open bill: its
+ * tax breakdown is provisional and it carries no billNumber/finalizedAt yet,
+ * both of which this view requires.
+ */
+export async function buildInvoiceView(tx: Tx, tenantId: string, billId: string): Promise<InvoiceView> {
+  const bill = await loadBill(tx, tenantId, billId)
+  if (bill.status !== 'finalized' || !bill.billNumber || !bill.finalizedAt) {
+    throw new ConflictException({ code: 'not_finalized', message: 'This bill has not been finalized yet' })
+  }
+
+  const [orderLines, outlet, taxContext, creditNotes] = await Promise.all([
+    tx.orderLine.findMany({ where: { orderId: bill.orderId }, include: { item: true, modifiers: true }, orderBy: { createdAt: 'asc' } }),
+    tx.outlet.findUniqueOrThrow({ where: { id: bill.outletId }, select: { name: true, address: true } }),
+    loadTenantTaxProfile(tx, tenantId),
+    tx.creditNote.findMany({ where: { originalBillId: bill.id }, orderBy: { createdAt: 'asc' } }),
+  ])
+
+  const lines: InvoiceLineView[] = orderLines.map((line) => {
+    const modifiersTotal = line.modifiers.reduce((sum, m) => sum + m.priceMinor, 0n)
+    const unitPriceMinor = line.unitPriceMinor + modifiersTotal
+    return { name: line.item.name, quantity: line.quantity, unitPriceMinor: Number(unitPriceMinor), lineTotalMinor: Number(unitPriceMinor * BigInt(line.quantity)) }
+  })
+
+  const creditNoteViews: InvoiceCreditNoteView[] = creditNotes.map((note) => ({
+    id: note.id,
+    // pricesIncludeTax comes from the original Bill (no such column on
+    // CreditNote) - same reasoning as computeTotalMinor above and
+    // bills.service.ts's toCreditNoteView: an AU/inclusive bill's refunded
+    // subtotal already contains its own tax.
+    amountMinor: Number(bill.pricesIncludeTax ? note.subtotalMinor : note.subtotalMinor + note.taxMinor),
+    reason: note.reason,
+    createdAt: note.createdAt.toISOString(),
+  }))
+
+  const { lines: taxBreakdown, notes } = readStoredTaxBreakdown(bill.taxBreakdown)
+  const discountMinor = bill.discountMinor ?? 0n
+
+  return {
+    invoiceNumber: String(bill.billNumber),
+    title: taxContext.country === 'AU' ? 'Tax Invoice' : 'Invoice',
+    issuedAt: bill.finalizedAt.toISOString(),
+    currency: currencyForCountry(taxContext.country),
+    seller: {
+      legalEntityName: taxContext.legalEntityName ?? '',
+      registrationLabel: taxContext.country === 'AU' ? 'ABN' : 'GSTIN',
+      registrationNumber: taxContext.registrationNumber ?? '',
+      fssaiLicense: taxContext.fssaiLicense,
+      outletName: outlet.name,
+      outletAddress: outlet.address,
+    },
+    lines,
+    subtotalMinor: Number(bill.subtotalMinor),
+    discountMinor: bill.discountMinor === null ? null : Number(bill.discountMinor),
+    discountReason: bill.discountReason,
+    taxBreakdown,
+    taxMinor: Number(bill.taxMinor),
+    totalMinor: Number(computeTotalMinor(bill.subtotalMinor, bill.taxMinor, discountMinor, bill.pricesIncludeTax)),
+    pricesIncludeTax: bill.pricesIncludeTax,
+    tenders: bill.tenders.map(toTenderView),
+    creditNotes: creditNoteViews,
+    notes,
+  }
 }

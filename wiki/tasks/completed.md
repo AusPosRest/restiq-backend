@@ -1,5 +1,26 @@
 # Completed
 
+- **2026-09-03** - Country-aware tax engine, bill tax snapshot, and
+  tax-invoice view. New pure `src/pos/bills/tax.ts` (`computeTax()`,
+  `bigint` minor units, deterministic round-half-up rounding) replaces the
+  old flat 5% `TAX_RATE_PLACEHOLDER_PERCENT`: IN CGST 2.5% + SGST 2.5%
+  (IGST profile: single IGST 5%; composition scheme: 0% + the statutory
+  note), AU GST 10% tax-inclusive. `bills.tax_breakdown` (nullable JSONB)
+  and `bills.prices_include_tax` (boolean, default false) snapshot the
+  engine's result once at bill creation, never recomputed afterwards -
+  `taxMinor` stays the authoritative total so existing readers keep
+  working. New `GET /pos/v1/bills/:id/invoice` (and guest-realm
+  `GET /guest/v1/bills/:id/invoice`) returns a read-only `InvoiceView`
+  (seller detail, resolved order lines, tax breakdown, tenders, credit
+  notes) for an already-finalized bill, `409 not_finalized` before that.
+  CAP-9's refund tax reversal now derives its rate from the bill's own
+  `subtotalMinor`/`taxMinor` ratio instead of the old fixed placeholder, so
+  it stays correct under every tax regime. 20 new tests (`tax.spec.ts`'s
+  unit coverage of every branch + rounding edge cases, and
+  `pos-bills.e2e-spec.ts`'s IN/AU/composition/invoice/cross-tenant e2e
+  cases). See
+  [wiki/features/pos-cashier-waiter.md](../features/pos-cashier-waiter.md#cap-7---bill-and-settle).
+  Issue AusPosRest/restiq-backend#103.
 - **2026-09-02** - Made seat assignment optional end to end: removed
   pos/CAP-4's `assertAllLinesSeated` fire gate, so `PATCH
   /pos/v1/orders/:orderId/status {status:'sent'}` no longer rejects

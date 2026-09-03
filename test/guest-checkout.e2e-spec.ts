@@ -412,6 +412,58 @@ describe('/guest/v1 checkout and split payment, simulated (e2e)', () => {
     })
   })
 
+  describe('GET /guest/v1/bills/:id/invoice (issue #103)', () => {
+    it('409s before finalize, 200s with the invoice shape after pay-all finalizes the bill', async () => {
+      const tenantId = await createTenant(prisma)
+      const outletId = await createOutlet(prisma, tenantId)
+      const tableId = await createTable(prisma, tenantId, outletId)
+      await enableQrOrdering(prisma, tenantId, outletId)
+      const itemId = await createItemWithPrice(prisma, tenantId, 10000)
+      const { tokens, orderId } = await placeOrderForGuests(outletId, tableId, itemId, 10000, 2)
+      const created = await authed(request(httpServer).post(`/guest/v1/orders/${orderId}/bill`), tokens[0]).send()
+      const bill = created.body as BillBody // subtotal 20000, tax 1000, total 21000
+
+      const beforeFinalize = await authed(request(httpServer).get(`/guest/v1/bills/${bill.id}/invoice`), tokens[0])
+      expect(beforeFinalize.status).toBe(409)
+      expect((beforeFinalize.body as ErrorBody).error.code).toBe('not_finalized')
+
+      const paid = await authed(request(httpServer).post(`/guest/v1/bills/${bill.id}/pay-all`), tokens[0]).send({
+        simulatedOutcome: 'success',
+        payerPhone: '+91 90000 09999',
+      })
+      expect((paid.body as BillBody).status).toBe('finalized')
+
+      const res = await authed(request(httpServer).get(`/guest/v1/bills/${bill.id}/invoice`), tokens[0])
+      expect(res.status).toBe(200)
+      const invoice = res.body as { invoiceNumber: string; title: string; taxMinor: number; totalMinor: number; tenders: { amountMinor: number }[] }
+      expect(invoice.invoiceNumber).toBe(String((paid.body as BillBody).billNumber))
+      expect(invoice.title).toBe('Invoice')
+      expect(invoice.taxMinor).toBe(1000)
+      expect(invoice.totalMinor).toBe(21000)
+      expect(invoice.tenders.map((t) => t.amountMinor)).toEqual([21000])
+    })
+
+    it('a guest from a different session cannot read another bill\'s invoice (404)', async () => {
+      const tenantId = await createTenant(prisma)
+      const outletId = await createOutlet(prisma, tenantId)
+      const tableId = await createTable(prisma, tenantId, outletId)
+      const otherTableId = await createTable(prisma, tenantId, outletId, 'T2')
+      await enableQrOrdering(prisma, tenantId, outletId)
+      const itemId = await createItemWithPrice(prisma, tenantId, 10000)
+      const { tokens, orderId } = await placeOrderForGuests(outletId, tableId, itemId, 10000, 1)
+      const created = await authed(request(httpServer).post(`/guest/v1/orders/${orderId}/bill`), tokens[0]).send()
+      const bill = created.body as BillBody
+
+      const otherStart = await request(httpServer)
+        .post('/guest/v1/sessions')
+        .send({ outletId, tableId: otherTableId, name: 'Other Guest', phone: '+91 90000 00002' })
+      const otherToken = (otherStart.body as StartResult).token
+
+      const res = await authed(request(httpServer).get(`/guest/v1/bills/${bill.id}/invoice`), otherToken)
+      expect(res.status).toBe(404)
+    })
+  })
+
   describe('validation', () => {
     it('410s bill creation and payment once staff close the session', async () => {
       const tenantId = await createTenant(prisma)

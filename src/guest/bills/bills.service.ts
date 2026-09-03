@@ -17,8 +17,8 @@
 // completes it exactly like any other share.
 import { ConflictException, GoneException, Injectable, NotFoundException } from '@nestjs/common'
 import type { Order, Prisma, TableSession } from '../../generated/prisma/client'
-import { commitFinalize, createOrGetBillRecord, createTenderRecord, loadBill, toBillView } from '../../pos/bills'
-import type { BillWithTenders } from '../../pos/bills'
+import { buildInvoiceView, commitFinalize, createOrGetBillRecord, createTenderRecord, loadBill, toBillView } from '../../pos/bills'
+import type { BillWithTenders, InvoiceView } from '../../pos/bills'
 import { GuestPrincipal, RegionRegistryService, uuidv7 } from '../../platform'
 import { isSessionInactive } from '../sessions/sessions.service'
 import { setTenantContext } from '../tenant-context'
@@ -119,6 +119,22 @@ export class GuestBillsService {
       const bill = await loadBill(tx, guest.tenantId, billRow.id)
       const shares = await this.loadShareViews(tx, bill.id)
       return { ...toBillView(bill), shares }
+    })
+  }
+
+  /**
+   * Issue #103: GET .../bills/:id/invoice - the same ownership check as
+   * payShare/payAll below (loadBill by id, then confirm the bill's order
+   * belongs to this guest's own session), not getBill's orderId-scoped
+   * lookup, since the invoice is addressed by billId like those two.
+   */
+  async getInvoice(guest: GuestPrincipal, billId: string): Promise<InvoiceView> {
+    const plane = this.plane()
+    return plane.$transaction(async (tx) => {
+      await setTenantContext(tx, guest.tenantId)
+      const bill = await loadBill(tx, guest.tenantId, billId)
+      await loadOrderForSession(tx, guest.tenantId, guest.sessionId, bill.orderId)
+      return buildInvoiceView(tx, guest.tenantId, billId)
     })
   }
 

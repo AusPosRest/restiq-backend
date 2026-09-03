@@ -1,5 +1,6 @@
 import { Body, Controller, Get, HttpCode, Param, Post, Res } from '@nestjs/common'
 import type { Response } from 'express'
+import type { InvoiceView } from '../../pos/bills'
 import { CurrentGuest, GuestPrincipal } from '../../platform'
 import { GuestBillView, SimulatedPaymentDto } from './bills.dtos'
 import { GuestBillsService } from './bills.service'
@@ -37,5 +38,10 @@ export class GuestBillsController {
   @HttpCode(200)
   payAll(@CurrentGuest() guest: GuestPrincipal, @Param('id') billId: string, @Body() dto: SimulatedPaymentDto): Promise<GuestBillView> {
     return this.bills.payAll(guest, billId, dto)
+  }
+
+  @Get('bills/:id/invoice')
+  getInvoice(@CurrentGuest() guest: GuestPrincipal, @Param('id') billId: string): Promise<InvoiceView> {
+    return this.bills.getInvoice(guest, billId)
   }
 }

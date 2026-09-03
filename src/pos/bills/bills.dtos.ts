@@ -44,6 +44,15 @@ export interface TenderView {
   createdAt: string
 }
 
+// issue #103: the country-aware tax engine's own breakdown line shape
+// (src/pos/bills/tax.ts's TaxBreakdownLine, with amountMinor converted from
+// bigint to number the same way every other *Minor field on these views is).
+export interface TaxBreakdownLineView {
+  label: string
+  ratePercent: number
+  amountMinor: number
+}
+
 export interface BillView {
   id: string
   tenantId: string
@@ -52,6 +61,11 @@ export interface BillView {
   billNumber: number | null
   subtotalMinor: number
   taxMinor: number
+  // Snapshotted once at bill-creation time (bill-core.ts's
+  // createOrGetBillRecord) - never recomputed, including across finalize.
+  taxBreakdown: TaxBreakdownLineView[]
+  // True only for a tax-inclusive country (AU GST) - see tax.ts.
+  pricesIncludeTax: boolean
   discountMinor: number | null
   discountReason: string | null
   // Convenience total the client would otherwise have to recompute itself:
@@ -121,4 +135,60 @@ export interface CreditNoteView {
   totalMinor: number
   createdAt: string
   lines: CreditNoteLineView[]
+}
+
+// issue #103: GET .../bills/:id/invoice - a read-only, customer-facing
+// projection of an already-finalized Bill (never itself persisted; built
+// fresh from the Bill's own snapshot plus the order's lines and the
+// tenant's tax registration). 409 not_finalized before finalize - an open
+// Bill's tax breakdown is not yet the final one (see createOrGetBillRecord)
+// and it carries no billNumber/finalizedAt yet, both of which this view is
+// built around.
+export interface InvoiceLineView {
+  name: string
+  quantity: number
+  unitPriceMinor: number
+  lineTotalMinor: number
+}
+
+export interface InvoiceSellerView {
+  legalEntityName: string
+  // "GSTIN" for an IN seller, "ABN" for AU - derived from country, not from
+  // TenantTaxRegistration.registrationType, so it's still well-defined for a
+  // tenant that somehow has no registration row.
+  registrationLabel: 'GSTIN' | 'ABN'
+  registrationNumber: string
+  fssaiLicense: string | null
+  outletName: string
+  outletAddress: string
+}
+
+export interface InvoiceCreditNoteView {
+  id: string
+  amountMinor: number
+  reason: string
+  createdAt: string
+}
+
+export interface InvoiceView {
+  // The gapless bill number, formatted as-is (no leading zeros or prefix
+  // invented here - a future receipt-template story owns any of that).
+  invoiceNumber: string
+  // "Tax Invoice" for an AU/ABN seller (AU's GST law requires the literal
+  // phrase on a compliant tax invoice), "Invoice" otherwise.
+  title: string
+  issuedAt: string
+  currency: string
+  seller: InvoiceSellerView
+  lines: InvoiceLineView[]
+  subtotalMinor: number
+  discountMinor: number | null
+  discountReason: string | null
+  taxBreakdown: TaxBreakdownLineView[]
+  taxMinor: number
+  totalMinor: number
+  pricesIncludeTax: boolean
+  tenders: TenderView[]
+  creditNotes: InvoiceCreditNoteView[]
+  notes: string[]
 }

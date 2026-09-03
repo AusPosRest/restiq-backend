@@ -23,12 +23,9 @@
 // against, so this module doesn't validate a split's shape - only that
 // whatever tenders arrive sum to the total.
 //
-// Tax: no per-item, per-category, or per-tenant tax-rate field exists
-// anywhere in the schema (checked admin/menu's ItemPrice/MenuItem/
-// MenuCategory and Tenant/TenantTaxRegistration - the latter carries a
-// registration profile string, not a rate). Per this story's brief, a flat
-// placeholder rate is applied instead of inventing a fake per-item tax
-// field: see bill-core.ts's TAX_RATE_PLACEHOLDER_PERCENT.
+// Tax (issue #103): a real, country-aware engine - see ./tax.ts's
+// computeTax() and bill-core.ts's loadTenantTaxProfile(). Replaces the old
+// flat TAX_RATE_PLACEHOLDER_PERCENT this comment used to point to.
 //
 // Discount-above-threshold: routes through platform/manager-auth
 // (ManagerAuthService), per stories.yaml's explicit instruction, rather than
@@ -40,8 +37,8 @@ import { BadRequestException, ConflictException, Injectable } from '@nestjs/comm
 import { ManagerApproval, ManagerAuthService, PosPrincipal, RegionRegistryService, uuidv7 } from '../../platform'
 import { setTenantContext } from '../tenant-context'
 import { assertOwner, loadOrder } from '../orders/orders.service'
-import { commitFinalize, createOrGetBillRecord, createTenderRecord, loadBill, TAX_RATE_PLACEHOLDER_PERCENT, toBillView } from './bill-core'
-import { BillView, CreditNoteLineView, CreditNoteView, FinalizeBillDto, RefundBillDto } from './bills.dtos'
+import { buildInvoiceView, commitFinalize, createOrGetBillRecord, createTenderRecord, loadBill, toBillView } from './bill-core'
+import { BillView, CreditNoteLineView, CreditNoteView, FinalizeBillDto, InvoiceView, RefundBillDto } from './bills.dtos'
 import type { Prisma } from '../../generated/prisma/client'
 
 // SPEC.md's Assumptions section defers the actual discount-above-threshold
@@ -57,7 +54,12 @@ function toCreditNoteLineView(l: CreditNoteWithLines['lines'][number]): CreditNo
   return { id: l.id, orderLineId: l.orderLineId, quantity: l.quantity, unitPriceMinor: Number(l.unitPriceMinor), amountMinor: Number(l.amountMinor) }
 }
 
-function toCreditNoteView(note: CreditNoteWithLines): CreditNoteView {
+// pricesIncludeTax comes from the original Bill, not CreditNote itself (no
+// such column there) - same issue #103 reasoning as bill-core.ts's
+// computeTotalMinor: for an AU/inclusive bill, the refunded subtotal already
+// contains its own tax, so the payable total is the subtotal alone, not
+// subtotal + tax again.
+function toCreditNoteView(note: CreditNoteWithLines, pricesIncludeTax: boolean): CreditNoteView {
   return {
     id: note.id,
     tenantId: note.tenantId,
@@ -67,7 +69,7 @@ function toCreditNoteView(note: CreditNoteWithLines): CreditNoteView {
     createdByStaffId: note.createdByStaffId,
     subtotalMinor: Number(note.subtotalMinor),
     taxMinor: Number(note.taxMinor),
-    totalMinor: Number(note.subtotalMinor + note.taxMinor),
+    totalMinor: pricesIncludeTax ? Number(note.subtotalMinor) : Number(note.subtotalMinor + note.taxMinor),
     createdAt: note.createdAt.toISOString(),
     lines: note.lines.map(toCreditNoteLineView),
   }
@@ -123,6 +125,15 @@ export class BillsService {
       await setTenantContext(tx, staff.tenantId)
       const bill = await loadBill(tx, staff.tenantId, billId)
       return toBillView(bill)
+    })
+  }
+
+  /** GET .../bills/:id/invoice - see bill-core.ts's buildInvoiceView for the 404/409 rules. */
+  async getInvoice(staff: PosPrincipal, billId: string): Promise<InvoiceView> {
+    const plane = this.plane()
+    return plane.$transaction(async (tx) => {
+      await setTenantContext(tx, staff.tenantId)
+      return buildInvoiceView(tx, staff.tenantId, billId)
     })
   }
 
@@ -247,12 +258,17 @@ export class BillsService {
         lineData.push({ orderLineId: target.orderLineId, quantity: target.quantity, unitPriceMinor, amountMinor })
       }
 
-      // Correct tax reversal (CAP-9): the original bill's tax was
-      // subtotal * TAX_RATE_PLACEHOLDER_PERCENT, computed independently of
-      // any discount (bill-core's createOrGetBillRecord) - reversing the
-      // refunded subtotal at that exact same rate is therefore the correct
-      // inverse, not a re-guessed figure.
-      const taxMinor = (subtotalMinor * TAX_RATE_PLACEHOLDER_PERCENT) / 100n
+      // Correct tax reversal (CAP-9, updated for issue #103's real tax
+      // engine): proportional to the bill's own actual tax rate - taken from
+      // the bill's own subtotalMinor/taxMinor ratio rather than
+      // re-deriving a rate from the tenant's (possibly-since-changed) tax
+      // registration, the same allocation guest/bills' BillShare split
+      // already uses for the identical reason (bills.service.ts here has no
+      // sibling to that file's own comment, so it's restated: this is the
+      // correct inverse of whatever rate actually produced bill.taxMinor,
+      // composition scheme's 0% and AU's inclusive GST included, without
+      // this module needing to know which one applied).
+      const taxMinor = bill.subtotalMinor === 0n ? 0n : (subtotalMinor * bill.taxMinor) / bill.subtotalMinor
 
       // Refund is unconditionally gated (unlike finalize()'s above-threshold
       // discount) - validate the refund request itself first (cheap), then
@@ -285,7 +301,7 @@ export class BillsService {
 
       await this.managerAuth.recordApproval(tx, approval, { actorId: staff.id, actorEmail: staff.name, occurredAt: new Date() })
 
-      return toCreditNoteView(created)
+      return toCreditNoteView(created, bill.pricesIncludeTax)
     })
   }
 }
