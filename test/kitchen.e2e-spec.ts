@@ -110,6 +110,11 @@ async function wipe(prisma: PrismaClient): Promise<void> {
   await prisma.outletCapability.deleteMany()
   await prisma.station.deleteMany()
   await prisma.printer.deleteMany()
+  // qr-self-order/CAP-1 (guest realm, issue #68): table_sessions FKs to
+  // dining_tables (RESTRICT) - wiped first so this helper is safe regardless
+  // of what another e2e file left behind (same rationale as every sibling
+  // spec's wipe(), e.g. tenant-onboarding.e2e-spec.ts).
+  await prisma.tableSession.deleteMany()
   await prisma.diningTable.deleteMany()
   await prisma.floor.deleteMany()
   await prisma.outlet.deleteMany()
