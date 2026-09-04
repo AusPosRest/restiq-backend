@@ -379,6 +379,31 @@ built here, story by story.
     branding or capability changes, unlike price changes/role changes/PIN
     revokes.
 
+## CAP-108 - Tax registration settings
+
+- **Intent:** an owner reads and edits tenant tax-registration settings in
+  `/admin/v1/tax-registration` without leaking or clobbering another
+  tenant's row.
+- **Built** (`src/admin/tax/`, merged into `src/admin/admin.module.ts`):
+  - `GET /admin/v1/tax-registration` -> `{ country, registrationType,
+    registrationNumber, legalEntityName, taxProfile, fssaiLicense,
+    compositionScheme }`. `country` comes from `tenants.country`; `registrationType`
+    is derived (`IN -> gstin`, otherwise `abn`). If no row exists,
+    values are returned as defaults/nulls (no 404) to keep the settings
+    UI renderable before the owner saves first time.
+  - `PUT /admin/v1/tax-registration` - merge-update semantics with
+    `@IsOptional()`-validated writable fields: `registrationNumber`,
+    `legalEntityName`, `taxProfile`, `fssaiLicense`, `compositionScheme`.
+    Omitted fields keep their current value; missing row is created
+    transactionally using a `findFirst(owner.tenantId)` first because
+    `tenant_tax_registrations.tenantId` is not `@@unique`.
+  - Writes are tenant-scoped through `setTenantContext` and `owner.tenantId`
+    checks in an interactive transaction; `registrationType` and
+    `country` are read-only inputs and are not accepted from request body.
+  - `tenant_tax_registrations.registrationNumber` is globally unique; a
+    collision with another tenant is mapped to `409 conflict` (`{ code:
+    'conflict' }`) instead of a raw Prisma `P2002`.
+
 ## CAP-5 - Floor plan & stations
 
 - **Intent:** an owner lays out floors and tables, defines kitchen stations

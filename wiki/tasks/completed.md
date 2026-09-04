@@ -1,5 +1,11 @@
 # Completed
 
+- **2026-09-05** - Admin tax-registration settings (`GET /admin/v1/tax-registration`
+  and `PUT /admin/v1/tax-registration`) for issue #108. Owners can read
+  tenant tax settings, merge-edit writable fields without cross-tenant leakage,
+  create the missing registration row on `PUT`, and receive `409 conflict`
+  when `registrationNumber` is already used by another tenant.
+
 - **2026-09-05** - Fixed the flaky full e2e suite (issue #100). Root cause:
   `test/kitchen.e2e-spec.ts`'s `wipe()` deleted `dining_table` rows without
   first clearing `table_session` rows that FK to them with `RESTRICT`

@@ -9,3 +9,4 @@ export type { PinStatus } from './staff/staff.service'
 // add-time against the real, already-shipped item_prices resolution rules -
 // no second price-picking implementation.
 export { resolveCurrentPrice } from './menu/pricing'
+export { TaxRegistrationService } from './tax/tax-registration.service'
