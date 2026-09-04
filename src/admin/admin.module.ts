@@ -9,6 +9,8 @@ import { AdminChecklistController } from './checklist/checklist.controller'
 import { ChecklistService } from './checklist/checklist.service'
 import { AdminDashboardController } from './dashboard/dashboard.controller'
 import { DashboardService } from './dashboard/dashboard.service'
+import { AdminTaxController } from './tax/tax-registration.controller'
+import { TaxRegistrationService } from './tax/tax-registration.service'
 import { AdminDevicesController } from './devices/devices.controller'
 import { AdminDevicesService } from './devices/devices.service'
 import { AdminFloorPlanController } from './floor-plan/floor-plan.controller'
@@ -53,6 +55,7 @@ import { StaffService } from './staff/staff.service'
     AdminStaffController,
     AdminRolesController,
     AdminReportsController,
+    AdminTaxController,
   ],
   providers: [
     AdminAuthService,
@@ -68,6 +71,7 @@ import { StaffService } from './staff/staff.service'
     OutletsService,
     BrandingService,
     FloorPlanService,
+    TaxRegistrationService,
     AdminDevicesService,
     StaffService,
     ReportsService,
