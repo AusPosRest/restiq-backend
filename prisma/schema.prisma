@@ -216,6 +216,7 @@ model TenantTaxRegistration {
   taxProfile         String              @map("tax_profile")
   fssaiLicense       String?             @map("fssai_license")
   compositionScheme  Boolean             @default(false) @map("composition_scheme")
+  gstRegistered      Boolean             @default(true) @map("gst_registered")
   createdAt          DateTime            @default(now()) @map("created_at") @db.Timestamptz(6)
 
   tenant Tenant @relation(fields: [tenantId], references: [id])

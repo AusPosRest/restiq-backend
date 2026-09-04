@@ -26,6 +26,10 @@ export class UpdateTaxRegistrationDto {
   @IsOptional()
   @IsBoolean()
   compositionScheme?: boolean
+
+  @IsOptional()
+  @IsBoolean()
+  gstRegistered?: boolean
 }
 
 export interface TaxRegistrationView {
@@ -36,4 +40,5 @@ export interface TaxRegistrationView {
   taxProfile: string
   fssaiLicense: string | null
   compositionScheme: boolean
+  gstRegistered: boolean
 }

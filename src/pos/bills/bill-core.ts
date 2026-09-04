@@ -31,9 +31,21 @@ export interface TenantTaxProfile {
   // (the CGST/SGST split), which is also the ordinary domestic-supply case.
   taxProfile: string
   compositionScheme: boolean
+  gstRegistered: boolean
   legalEntityName: string | null
   registrationNumber: string | null
   fssaiLicense: string | null
+  brandingTokens: Prisma.JsonValue
+  contactPhone: string
+  contactEmail: string
+}
+
+function readReceiptFooter(brandingTokens: Prisma.JsonValue): string | null {
+  const map =
+    typeof brandingTokens === 'object' && brandingTokens !== null && !Array.isArray(brandingTokens)
+      ? (brandingTokens as Record<string, unknown>)
+      : {}
+  return typeof map.receiptFooter === 'string' ? map.receiptFooter : null
 }
 
 /**
@@ -47,16 +59,23 @@ export interface TenantTaxProfile {
  */
 export async function loadTenantTaxProfile(tx: Tx, tenantId: string): Promise<TenantTaxProfile> {
   const [tenant, registration] = await Promise.all([
-    tx.tenant.findUniqueOrThrow({ where: { id: tenantId }, select: { country: true, name: true } }),
+    tx.tenant.findUniqueOrThrow({
+      where: { id: tenantId },
+      select: { country: true, name: true, brandingTokens: true, contactPhone: true, contactEmail: true },
+    }),
     tx.tenantTaxRegistration.findFirst({ where: { tenantId } }),
   ])
   return {
     country: tenant.country,
     taxProfile: registration?.taxProfile ?? '',
     compositionScheme: registration?.compositionScheme ?? false,
+    gstRegistered: registration?.gstRegistered ?? true,
     legalEntityName: registration?.legalEntityName ?? tenant.name,
     registrationNumber: registration?.registrationNumber ?? null,
     fssaiLicense: registration?.fssaiLicense ?? null,
+    brandingTokens: tenant.brandingTokens,
+    contactPhone: tenant.contactPhone,
+    contactEmail: tenant.contactEmail,
   }
 }
 
@@ -209,6 +228,7 @@ export async function createOrGetBillRecord(tx: Tx, params: CreateBillParams): P
     country: taxContext.country,
     taxProfile: taxContext.taxProfile,
     compositionScheme: taxContext.compositionScheme,
+    gstRegistered: taxContext.gstRegistered,
     subtotalMinor,
   })
 
@@ -375,17 +395,20 @@ export async function buildInvoiceView(tx: Tx, tenantId: string, billId: string)
 
   return {
     invoiceNumber: String(bill.billNumber),
-    title: taxContext.country === 'AU' ? 'Tax Invoice' : 'Invoice',
+    title: taxContext.country === 'AU' ? (taxContext.gstRegistered ? 'Tax Invoice' : 'Receipt') : 'Invoice',
     issuedAt: bill.finalizedAt.toISOString(),
     currency: currencyForCountry(taxContext.country),
     seller: {
       legalEntityName: taxContext.legalEntityName ?? '',
+      phone: taxContext.contactPhone,
+      email: taxContext.contactEmail,
       registrationLabel: taxContext.country === 'AU' ? 'ABN' : 'GSTIN',
       registrationNumber: taxContext.registrationNumber ?? '',
       fssaiLicense: taxContext.fssaiLicense,
       outletName: outlet.name,
       outletAddress: outlet.address,
     },
+    footerMessage: readReceiptFooter(taxContext.brandingTokens),
     lines,
     subtotalMinor: Number(bill.subtotalMinor),
     discountMinor: bill.discountMinor === null ? null : Number(bill.discountMinor),

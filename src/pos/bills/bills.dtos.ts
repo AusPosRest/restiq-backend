@@ -153,6 +153,8 @@ export interface InvoiceLineView {
 
 export interface InvoiceSellerView {
   legalEntityName: string
+  phone: string
+  email: string
   // "GSTIN" for an IN seller, "ABN" for AU - derived from country, not from
   // TenantTaxRegistration.registrationType, so it's still well-defined for a
   // tenant that somehow has no registration row.
@@ -180,6 +182,7 @@ export interface InvoiceView {
   issuedAt: string
   currency: string
   seller: InvoiceSellerView
+  footerMessage: string | null
   lines: InvoiceLineView[]
   subtotalMinor: number
   discountMinor: number | null

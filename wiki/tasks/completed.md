@@ -1,5 +1,13 @@
 # Completed
 
+- **2026-09-05** - AU GST tax-registration path for issue #110: `TenantTaxRegistration`
+  gains `gstRegistered` (default true). AU `gstRegistered:false` bills now
+  calculate zero tax with `pricesIncludeTax=false`, `InvoiceView.title`
+  switches to `Receipt`, and `InvoiceView.footerMessage` is now sourced from
+  tenant branding `receiptFooter`; both POS and guest invoice flows include
+  seller `phone`/`email`. `GET`/`PUT /admin/v1/tax-registration` now round-trip
+  `gstRegistered`, with IN rejecting `gstRegistered:false` as `validation_failed`.
+
 - **2026-09-05** - Admin tax-registration settings (`GET /admin/v1/tax-registration`
   and `PUT /admin/v1/tax-registration`) for issue #108. Owners can read
   tenant tax settings, merge-edit writable fields without cross-tenant leakage,
