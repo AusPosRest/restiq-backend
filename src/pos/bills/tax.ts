@@ -16,6 +16,7 @@ export interface ComputeTaxParams {
   country: TaxCountry
   taxProfile: string
   compositionScheme: boolean
+  gstRegistered: boolean
   subtotalMinor: bigint
 }
 
@@ -44,7 +45,7 @@ function isIgstProfile(taxProfile: string): boolean {
 }
 
 export function computeTax(params: ComputeTaxParams): TaxResult {
-  const { country, taxProfile, compositionScheme, subtotalMinor } = params
+  const { country, gstRegistered, taxProfile, compositionScheme, subtotalMinor } = params
 
   if (country === 'IN') {
     if (compositionScheme) {
@@ -72,6 +73,10 @@ export function computeTax(params: ComputeTaxParams): TaxResult {
       ],
       notes: [],
     }
+  }
+
+  if (!gstRegistered) {
+    return { taxMinor: 0n, pricesIncludeTax: false, breakdown: [], notes: ['Not registered for GST - this is a receipt, not a tax invoice'] }
   }
 
   // AU: GST 10%, prices tax-inclusive - subtotalMinor is the customer-facing

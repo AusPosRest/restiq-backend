@@ -1,4 +1,4 @@
-import { ConflictException, Injectable, NotFoundException } from '@nestjs/common'
+import { BadRequestException, ConflictException, Injectable, NotFoundException } from '@nestjs/common'
 import { AdminPrincipal, RegionRegistryService } from '../../platform'
 import { setTenantContext } from '../menu/tenant-context'
 import { TaxRegistrationView, UpdateTaxRegistrationDto } from './tax-registration.dtos'
@@ -18,6 +18,7 @@ function toView(country: string, registrationType: 'gstin' | 'abn', registration
   taxProfile: string
   fssaiLicense: string | null
   compositionScheme: boolean
+  gstRegistered: boolean
 } | null, tenantName: string): TaxRegistrationView {
   return {
     country,
@@ -27,6 +28,7 @@ function toView(country: string, registrationType: 'gstin' | 'abn', registration
     taxProfile: registration?.taxProfile ?? '',
     fssaiLicense: registration?.fssaiLicense ?? null,
     compositionScheme: registration?.compositionScheme ?? false,
+    gstRegistered: registration?.gstRegistered ?? true,
   }
 }
 
@@ -66,6 +68,10 @@ export class TaxRegistrationService {
         throw new NotFoundException({ code: 'not_found', message: 'No such tenant' })
       }
 
+      if (tenant.country === 'IN' && dto.gstRegistered === false) {
+        throw new BadRequestException({ code: 'validation_failed', message: 'IN tenants cannot set gstRegistered to false' })
+      }
+
       const registrationType = tenant.country === 'IN' ? TAX_REGISTRATION_TYPE.IN : TAX_REGISTRATION_TYPE.AU
       const updateData = {
         registrationType,
@@ -74,6 +80,7 @@ export class TaxRegistrationService {
         taxProfile: dto.taxProfile ?? existing?.taxProfile ?? '',
         fssaiLicense: dto.fssaiLicense ?? existing?.fssaiLicense ?? null,
         compositionScheme: dto.compositionScheme ?? existing?.compositionScheme ?? false,
+        gstRegistered: dto.gstRegistered ?? existing?.gstRegistered ?? true,
       }
 
       try {
@@ -86,6 +93,7 @@ export class TaxRegistrationService {
               fssaiLicense: dto.fssaiLicense ?? existing.fssaiLicense,
               compositionScheme: dto.compositionScheme ?? existing.compositionScheme,
               registrationNumber: dto.registrationNumber ?? existing.registrationNumber,
+              gstRegistered: dto.gstRegistered ?? existing.gstRegistered,
             },
           })
           return toView(tenant.country, registrationType, updated, tenant.name)

@@ -15,6 +15,7 @@ interface TaxRegistrationBody {
   taxProfile: string
   fssaiLicense: string | null
   compositionScheme: boolean
+  gstRegistered: boolean
 }
 interface ErrorBody {
   error: { code: string; message: string }
@@ -112,6 +113,7 @@ interface SeedTaxRegistration {
   registrationType?: 'gstin' | 'abn'
   fssaiLicense?: string
   compositionScheme?: boolean
+  gstRegistered?: boolean
 }
 
 async function seedTenantTaxRegistration(prisma: PrismaClient, tenantId: string, data: SeedTaxRegistration): Promise<void> {
@@ -123,6 +125,7 @@ async function seedTenantTaxRegistration(prisma: PrismaClient, tenantId: string,
       registrationNumber: data.registrationNumber,
       legalEntityName: data.legalEntityName,
       taxProfile: data.taxProfile,
+      gstRegistered: data.gstRegistered ?? true,
       fssaiLicense: data.fssaiLicense,
       compositionScheme: data.compositionScheme ?? false,
     },
@@ -168,6 +171,7 @@ describe('/admin/v1/tax-registration', () => {
     expect(body.taxProfile).toBe('')
     expect(body.fssaiLicense).toBeNull()
     expect(body.compositionScheme).toBe(false)
+    expect(body.gstRegistered).toBe(true)
   })
 
   it('PUT merges caller-writable fields into the existing TenantTaxRegistration row', async () => {
@@ -191,11 +195,43 @@ describe('/admin/v1/tax-registration', () => {
     expect(body.taxProfile).toBe('India GST')
     expect(body.fssaiLicense).toBe('FSSAI-OLD')
     expect(body.compositionScheme).toBe(true)
+    expect(body.gstRegistered).toBe(true)
 
     const db = await prisma.tenantTaxRegistration.findFirstOrThrow({ where: { tenantId } })
     expect(db.legalEntityName).toBe('New Name')
     expect(db.compositionScheme).toBe(true)
     expect(db.fssaiLicense).toBe('FSSAI-OLD')
+  })
+
+  it('rejects gstRegistered=false for IN tenants', async () => {
+    const { token } = await createOwner(prisma, 'Indian Tenant', 'IN')
+    const seed = await authed(request(httpServer).put('/admin/v1/tax-registration'), token).send({
+      registrationNumber: '22AAABC1111A1ZZ',
+      legalEntityName: 'Indian Tenant',
+      taxProfile: 'India GST',
+      gstRegistered: false,
+    })
+    expect(seed.status).toBe(400)
+    expect((seed.body as ErrorBody).error.code).toBe('validation_failed')
+  })
+
+  it('stores and returns gstRegistered for AU tenants', async () => {
+    const { tenantId, token } = await createOwner(prisma, 'Tenant AU', 'AU')
+    const createRes = await authed(request(httpServer).put('/admin/v1/tax-registration'), token).send({
+      registrationNumber: '22AAAAC1111A1ZZ',
+      legalEntityName: 'Tenant AU',
+      taxProfile: 'Australia GST',
+      gstRegistered: false,
+    })
+    expect(createRes.status).toBe(200)
+    expect((createRes.body as TaxRegistrationBody).gstRegistered).toBe(false)
+
+    const getRes = await authed(request(httpServer).get('/admin/v1/tax-registration'), token)
+    expect(getRes.status).toBe(200)
+    expect((getRes.body as TaxRegistrationBody).gstRegistered).toBe(false)
+
+    const db = await prisma.tenantTaxRegistration.findFirstOrThrow({ where: { tenantId } })
+    expect(db.gstRegistered).toBe(false)
   })
 
   it('creates a TenantTaxRegistration row on PUT when one did not exist', async () => {

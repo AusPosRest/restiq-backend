@@ -63,12 +63,15 @@ interface InvoiceBody {
   currency: string
   seller: {
     legalEntityName: string
+    phone: string
+    email: string
     registrationLabel: 'GSTIN' | 'ABN'
     registrationNumber: string
     fssaiLicense: string | null
     outletName: string
     outletAddress: string
   }
+  footerMessage: string | null
   lines: { name: string; quantity: number; unitPriceMinor: number; lineTotalMinor: number }[]
   subtotalMinor: number
   discountMinor: number | null
@@ -188,7 +191,14 @@ async function createAuTenant(prisma: PrismaClient, name = 'Sydney Harbour Bistr
 async function createTaxRegistration(
   prisma: PrismaClient,
   tenantId: string,
-  opts: { taxProfile: string; registrationType: 'gstin' | 'abn'; compositionScheme?: boolean; legalEntityName?: string; fssaiLicense?: string },
+  opts: {
+    taxProfile: string
+    registrationType: 'gstin' | 'abn'
+    compositionScheme?: boolean
+    legalEntityName?: string
+    fssaiLicense?: string
+    gstRegistered?: boolean
+  },
 ): Promise<void> {
   await prisma.tenantTaxRegistration.create({
     data: {
@@ -198,6 +208,7 @@ async function createTaxRegistration(
       legalEntityName: opts.legalEntityName ?? 'Spice Route Hospitality Pvt Ltd',
       taxProfile: opts.taxProfile,
       compositionScheme: opts.compositionScheme ?? false,
+      gstRegistered: opts.gstRegistered ?? true,
       fssaiLicense: opts.fssaiLicense ?? null,
     },
   })
@@ -625,6 +636,21 @@ describe('/pos/v1 bill and settle (e2e)', () => {
       expect(bill.taxBreakdown).toEqual([{ label: 'GST', ratePercent: 10, amountMinor: 1000 }])
       expect(bill.totalMinor).toBe(11000)
     })
+
+    it('AU + not GST-registered: zero tax, no GST-inclusive total math, title should be "Receipt" on invoice', async () => {
+      const tenantId = await createAuTenant(prisma)
+      await createTaxRegistration(prisma, tenantId, { taxProfile: 'Australia GST', registrationType: 'abn', gstRegistered: false })
+      const outletId = await createOutlet(prisma, tenantId, 'Darling Harbour')
+      const { orderId, ownerToken } = await setUpSentOrder(tenantId, outletId, 5500) // 2 x 5500 = 11000 subtotal
+
+      const res = await authed(request(httpServer).post(`/pos/v1/orders/${orderId}/bill`), ownerToken).send()
+      const bill = res.body as BillBody
+      expect(bill.subtotalMinor).toBe(11000)
+      expect(bill.pricesIncludeTax).toBe(false)
+      expect(bill.taxMinor).toBe(0)
+      expect(bill.taxBreakdown).toEqual([])
+      expect(bill.totalMinor).toBe(11000)
+    })
   })
 
   describe('GET /pos/v1/bills/:id/invoice (issue #103)', () => {
@@ -648,11 +674,14 @@ describe('/pos/v1 bill and settle (e2e)', () => {
       const res = await authed(request(httpServer).get(`/pos/v1/bills/${billId}/invoice`), ownerToken)
       expect(res.status).toBe(200)
       const invoice = res.body as InvoiceBody
+      expect(invoice.footerMessage).toBeNull()
       expect(invoice.invoiceNumber).toBe(String((finalized.body as BillBody).billNumber))
       expect(invoice.title).toBe('Invoice')
       expect(invoice.currency).toBe('INR')
       expect(invoice.seller).toMatchObject({
         legalEntityName: 'Spice Route Hospitality Pvt Ltd',
+        phone: '+91 90000 00000',
+        email: 'contact@test.example',
         registrationLabel: 'GSTIN',
         outletName: 'Indiranagar',
         outletAddress: 'A1',
@@ -688,6 +717,34 @@ describe('/pos/v1 bill and settle (e2e)', () => {
       expect(invoice.currency).toBe('AUD')
       expect(invoice.seller.registrationLabel).toBe('ABN')
       expect(invoice.pricesIncludeTax).toBe(true)
+      expect(invoice.totalMinor).toBe(11000)
+    })
+
+    it('AU: unregistered tenant invoices with title "Receipt", zero tax, and no total uplift', async () => {
+      const tenantId = await createAuTenant(prisma)
+      await createTaxRegistration(prisma, tenantId, { taxProfile: 'Australia GST', registrationType: 'abn', gstRegistered: false })
+      await prisma.tenant.update({ where: { id: tenantId }, data: { brandingTokens: { receiptFooter: 'Tax-free receipt footer' } } })
+      const outletId = await createOutlet(prisma, tenantId, 'Darling Harbour')
+      const { orderId, ownerToken } = await setUpSentOrder(tenantId, outletId, 5500) // 2 x 5500 = 11000 subtotal
+      const created = await authed(request(httpServer).post(`/pos/v1/orders/${orderId}/bill`), ownerToken).send()
+      const billId = (created.body as BillBody).id
+
+      const finalized = await authed(request(httpServer).post(`/pos/v1/bills/${billId}/finalize`), ownerToken).send({
+        tenders: [{ method: 'cash', amountMinor: 11000 }],
+      })
+      expect(finalized.status).toBe(200)
+
+      const res = await authed(request(httpServer).get(`/pos/v1/bills/${billId}/invoice`), ownerToken)
+      expect(res.status).toBe(200)
+      const invoice = res.body as InvoiceBody
+      expect(invoice.title).toBe('Receipt')
+      expect(invoice.footerMessage).toBe('Tax-free receipt footer')
+      expect(invoice.currency).toBe('AUD')
+      expect(invoice.seller.phone).toBe('+61 2 9000 0000')
+      expect(invoice.seller.email).toBe('contact@test.example')
+      expect(invoice.taxMinor).toBe(0)
+      expect(invoice.taxBreakdown).toEqual([])
+      expect(invoice.notes).toEqual(['Not registered for GST - this is a receipt, not a tax invoice'])
       expect(invoice.totalMinor).toBe(11000)
     })
 

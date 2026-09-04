@@ -387,16 +387,20 @@ built here, story by story.
 - **Built** (`src/admin/tax/`, merged into `src/admin/admin.module.ts`):
   - `GET /admin/v1/tax-registration` -> `{ country, registrationType,
     registrationNumber, legalEntityName, taxProfile, fssaiLicense,
-    compositionScheme }`. `country` comes from `tenants.country`; `registrationType`
-    is derived (`IN -> gstin`, otherwise `abn`). If no row exists,
-    values are returned as defaults/nulls (no 404) to keep the settings
-    UI renderable before the owner saves first time.
+    compositionScheme, gstRegistered }`. `country` comes from `tenants.country`;
+    `registrationType` is derived (`IN -> gstin`, otherwise `abn`). If no row
+    exists, values are returned as defaults/nulls and `gstRegistered` defaults
+    to `true` (no 404) to keep the settings UI renderable before the owner
+    saves first time.
   - `PUT /admin/v1/tax-registration` - merge-update semantics with
     `@IsOptional()`-validated writable fields: `registrationNumber`,
-    `legalEntityName`, `taxProfile`, `fssaiLicense`, `compositionScheme`.
+    `legalEntityName`, `taxProfile`, `fssaiLicense`, `compositionScheme`,
+    `gstRegistered`.
     Omitted fields keep their current value; missing row is created
     transactionally using a `findFirst(owner.tenantId)` first because
     `tenant_tax_registrations.tenantId` is not `@@unique`.
+    For IN tenants, `gstRegistered: false` is rejected with `400
+    validation_failed` to match AUS GST-vs-India compliance assumptions.
   - Writes are tenant-scoped through `setTenantContext` and `owner.tenantId`
     checks in an interactive transaction; `registrationType` and
     `country` are read-only inputs and are not accepted from request body.

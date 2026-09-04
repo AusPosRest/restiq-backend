@@ -45,6 +45,25 @@ interface BillBody {
   tenders: { id: string; method: string; amountMinor: number }[]
   shares: ShareBody[]
 }
+interface InvoiceBody {
+  invoiceNumber: string
+  title: string
+  footerMessage: string | null
+  seller: {
+    legalEntityName: string
+    phone: string
+    email: string
+    registrationLabel: 'GSTIN' | 'ABN'
+    registrationNumber: string
+    fssaiLicense: string | null
+    outletName: string
+    outletAddress: string
+  }
+  taxMinor: number
+  totalMinor: number
+  notes: string[]
+  tenders: { amountMinor: number }[]
+}
 interface PlacedOrderBody {
   orderId: string
 }
@@ -115,7 +134,7 @@ async function wipe(prisma: PrismaClient): Promise<void> {
   await prisma.onboardingDraft.deleteMany()
 }
 
-async function createTenant(prisma: PrismaClient, name = 'Guest Checkout Test Co'): Promise<string> {
+async function createTenant(prisma: PrismaClient, name = 'Guest Checkout Test Co', country: 'IN' | 'AU' = 'IN'): Promise<string> {
   const tenantId = uuidv7()
   await prisma.tenantRegistryEntry.create({ data: { tenantId, region: 'in-mumbai', lifecycle: 'active' } })
   await prisma.tenant.create({
@@ -126,13 +145,32 @@ async function createTenant(prisma: PrismaClient, name = 'Guest Checkout Test Co
       contactName: 'Test Contact',
       contactEmail: 'contact@test.example',
       contactPhone: '+91 90000 00000',
-      country: 'IN',
+      country,
       status: 'active',
       plan: 'standard',
       billingPeriod: 'monthly',
     },
   })
   return tenantId
+}
+
+async function createTaxRegistration(
+  prisma: PrismaClient,
+  tenantId: string,
+  opts: { taxProfile: string; registrationType: 'gstin' | 'abn'; gstRegistered?: boolean; legalEntityName?: string },
+): Promise<void> {
+  await prisma.tenantTaxRegistration.create({
+    data: {
+      tenantId,
+      registrationType: opts.registrationType,
+      registrationNumber: `REG-${uuidv7()}`,
+      legalEntityName: opts.legalEntityName ?? 'Guest Checkout Test Co',
+      taxProfile: opts.taxProfile,
+      gstRegistered: opts.gstRegistered ?? true,
+      fssaiLicense: null,
+      compositionScheme: false,
+    },
+  })
 }
 
 async function createOutlet(prisma: PrismaClient, tenantId: string, name = 'Koramangala'): Promise<string> {
@@ -435,12 +473,46 @@ describe('/guest/v1 checkout and split payment, simulated (e2e)', () => {
 
       const res = await authed(request(httpServer).get(`/guest/v1/bills/${bill.id}/invoice`), tokens[0])
       expect(res.status).toBe(200)
-      const invoice = res.body as { invoiceNumber: string; title: string; taxMinor: number; totalMinor: number; tenders: { amountMinor: number }[] }
+      const invoice = res.body as InvoiceBody
       expect(invoice.invoiceNumber).toBe(String((paid.body as BillBody).billNumber))
       expect(invoice.title).toBe('Invoice')
+      expect(invoice.footerMessage).toBeNull()
+      expect(invoice.seller.phone).toBe('+91 90000 00000')
+      expect(invoice.seller.email).toBe('contact@test.example')
       expect(invoice.taxMinor).toBe(1000)
       expect(invoice.totalMinor).toBe(21000)
       expect(invoice.tenders.map((t) => t.amountMinor)).toEqual([21000])
+    })
+
+    it('AU: unregistered tenant invoices as Receipt with zero GST and receipt footer', async () => {
+      const tenantId = await createTenant(prisma, 'Guest Checkout AU', 'AU')
+      await createTaxRegistration(prisma, tenantId, { taxProfile: 'Australia GST', registrationType: 'abn', gstRegistered: false })
+      await prisma.tenant.update({ where: { id: tenantId }, data: { brandingTokens: { receiptFooter: 'Guest receipt footer' } } })
+      const outletId = await createOutlet(prisma, tenantId, 'Harbour')
+      const tableId = await createTable(prisma, tenantId, outletId)
+      await enableQrOrdering(prisma, tenantId, outletId)
+      const itemId = await createItemWithPrice(prisma, tenantId, 10000)
+      const { tokens, orderId } = await placeOrderForGuests(outletId, tableId, itemId, 10000, 1)
+
+      const created = await authed(request(httpServer).post(`/guest/v1/orders/${orderId}/bill`), tokens[0]).send()
+      const bill = created.body as BillBody
+      expect(bill.totalMinor).toBe(10000)
+      expect(bill.taxMinor).toBe(0)
+
+      const paid = await authed(request(httpServer).post(`/guest/v1/bills/${bill.id}/pay-all`), tokens[0]).send({
+        simulatedOutcome: 'success',
+        payerPhone: '+91 90000 09999',
+      })
+      expect((paid.body as BillBody).status).toBe('finalized')
+
+      const invoice = (await authed(request(httpServer).get(`/guest/v1/bills/${bill.id}/invoice`), tokens[0])).body as InvoiceBody
+      expect(invoice.title).toBe('Receipt')
+      expect(invoice.footerMessage).toBe('Guest receipt footer')
+      expect(invoice.taxMinor).toBe(0)
+      expect(invoice.totalMinor).toBe(10000)
+      expect(invoice.notes).toEqual(['Not registered for GST - this is a receipt, not a tax invoice'])
+      expect(invoice.seller.phone).toBe('+91 90000 00000')
+      expect(invoice.seller.email).toBe('contact@test.example')
     })
 
     it('a guest from a different session cannot read another bill\'s invoice (404)', async () => {

@@ -812,18 +812,21 @@ against a real Postgres test DB)
   ```
   InvoiceView {
     invoiceNumber: string       // the gapless bill number, formatted as-is
-    title: string                // "Tax Invoice" for an AU/ABN seller (AU GST law
-                                  // requires the literal phrase), "Invoice" otherwise
+    title: string                // "Tax Invoice" for AU ABN sellers that are GST-registered,
+                                  // "Receipt" for unregistered AU tenants, "Invoice" otherwise
     issuedAt: string             // Bill.finalizedAt
     currency: string             // "INR" | "AUD", derived from Tenant.country
     seller: {
       legalEntityName: string
+      phone: string
+      email: string
       registrationLabel: "GSTIN" | "ABN"   // derived from country, not registrationType
       registrationNumber: string
       fssaiLicense: string | null
       outletName: string
       outletAddress: string
     }
+    footerMessage: string | null
     lines: { name, quantity, unitPriceMinor, lineTotalMinor }[]   // resolved from the
                                                                     // order's own snapshotted lines
     subtotalMinor: number
@@ -839,8 +842,9 @@ against a real Postgres test DB)
   }
   ```
   Seller detail (`legalEntityName`/`registrationNumber`/`fssaiLicense`,
-  outlet name/address) is read live from the tenant's **current** tax
-  registration and outlet row, not frozen at bill time - unlike
+  phone/email and outlet name/address) is read live from the tenant's
+  **current** tax registration, tenant row, and outlet row, not frozen at
+  bill time - unlike
   `taxBreakdown`/`notes` (read back from the Bill's own snapshot), a
   seller's registered legal details are a live legal fact, not a
   point-in-time snapshot. `lines[].unitPriceMinor` includes each line's
