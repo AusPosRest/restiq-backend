@@ -1,5 +1,19 @@
 # Completed
 
+- **2026-09-05** - Fixed the flaky full e2e suite (issue #100). Root cause:
+  `test/kitchen.e2e-spec.ts`'s `wipe()` deleted `dining_table` rows without
+  first clearing `table_session` rows that FK to them with `RESTRICT`
+  (added by qr-self-order/CAP-1, issue #68, after this spec's `wipe()` was
+  written) - depending on incidental cross-file ordering within one
+  sequential run, a `table_session` row left by another spec made this
+  `wipe()` throw. Also added `test/global-setup-e2e.ts`: a session-scoped
+  Postgres advisory lock on `TEST_DATABASE_URL` for the whole run, so a
+  second concurrent `pnpm run test:e2e` against the same database fails
+  fast with a clear error instead of silently racing this run's
+  wipes/creates. Verified with a clean 40-file, 514-test run including the
+  previously-flaky `subscription-ops`, `pos-auth-clock` and
+  `owner-dashboard` specs. Issue AusPosRest/restiq-backend#100.
+
 - **2026-09-03** - CAP-9's first real transactional report: Payments
   History. `GET /admin/v1/reports/payments?outletId&from&to&cursor&limit`
   returns finalised bills newest-first, keyset-paginated on
