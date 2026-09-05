@@ -11,6 +11,16 @@
   `POST /pos/v1/orders/:orderId/bill` (same order raced twice) and
   `POST /pos/v1/outlets/:outletId/tables/:tableId/order` (same table raced twice)
   so exactly one request creates and the other receives the same row (`201/200` split).
+- **2026-09-05** - Fixed a stale idle-expired session blocking `startSession`
+  (issue #113). Nothing flips a `TableSession`'s status when its idle TTL
+  passes, so it stays `status: 'open'` with a past `expiresAt`. `startSession`
+  now treats such a row as inactive (`isSessionInactive`) instead of an
+  existing conflict, and closes it out (`status: 'closed'`, `closedAt`) inside
+  the same transaction before creating the new session - required because
+  `table_sessions_one_open_per_table` is a partial unique index on
+  `status = 'open'` alone, so the insert would otherwise still fail even after
+  the app-side check was fixed. A genuinely active open session still 409s
+  `session_already_open` unchanged.
 
 - **2026-09-05** - AU GST tax-registration path for issue #110: `TenantTaxRegistration`
   gains `gstRegistered` (default true). AU `gstRegistered:false` bills now
