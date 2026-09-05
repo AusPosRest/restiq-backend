@@ -240,6 +240,33 @@ describe('/pos/v1 table map and order ownership (e2e)', () => {
       const orders = await prisma.order.findMany({ where: { tableId } })
       expect(orders).toHaveLength(1)
     })
+
+    it('handles concurrent claims on the same table with one created and one returned existing order', async () => {
+      const tenantId = await createTenant(prisma)
+      const outletId = await createOutlet(prisma, tenantId)
+      const tableId = await createTable(prisma, tenantId, outletId)
+      const waiter = await createStaff(prisma, tenantId, 'Asha')
+      const second = await createStaff(prisma, tenantId, 'Vikram')
+
+      const [firstAttempt, secondAttempt] = await Promise.all([
+        authed(request(httpServer).post(`/pos/v1/outlets/${outletId}/tables/${tableId}/order`), waiter.token).send(),
+        authed(request(httpServer).post(`/pos/v1/outlets/${outletId}/tables/${tableId}/order`), second.token).send(),
+      ])
+
+      // openOrClaimTable always responds 200 (created or existing alike, see
+      // the controller's own @HttpCode(200) comment) - unlike bills' create
+      // endpoint, there is no 201/200 split to assert here.
+      expect(firstAttempt.status).toBe(200)
+      expect(secondAttempt.status).toBe(200)
+      const firstOrder = firstAttempt.body as OrderBody
+      const secondOrder = secondAttempt.body as OrderBody
+      expect(firstOrder.id).toBe(secondOrder.id)
+      expect(firstOrder.ownerId).toBe(waiter.id)
+      expect(secondOrder.ownerId).toBe(waiter.id)
+
+      const orders = await prisma.order.findMany({ where: { tableId } })
+      expect(orders).toHaveLength(1)
+    })
   })
 
   describe('ownership and mutation', () => {

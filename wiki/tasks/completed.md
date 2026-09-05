@@ -1,5 +1,17 @@
 # Completed
 
+- **2026-09-05** - Fixed real concurrency races in two Postgres-backed POS flows by adding
+  per-callpoint SAVEPOINT recovery around create-write/readback paths in:
+  `src/pos/bills/bill-core.ts` (`createOrGetBillRecord`) and
+  `src/pos/orders/orders.service.ts` (`openOrClaimTable`). Both now recover from
+  `P2002` without aborting the interactive transaction by `ROLLBACK TO SAVEPOINT`
+  and returning the preexisting row, preventing transient 500s under parallel
+  requests.
+  Added e2e coverage for:
+  `POST /pos/v1/orders/:orderId/bill` (same order raced twice) and
+  `POST /pos/v1/outlets/:outletId/tables/:tableId/order` (same table raced twice)
+  so exactly one request creates and the other receives the same row (`201/200` split).
+
 - **2026-09-05** - AU GST tax-registration path for issue #110: `TenantTaxRegistration`
   gains `gstRegistered` (default true). AU `gstRegistered:false` bills now
   calculate zero tax with `pricesIncludeTax=false`, `InvoiceView.title`
