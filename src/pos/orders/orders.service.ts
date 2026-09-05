@@ -189,6 +189,9 @@ export class OrdersService {
       const existing = await tx.order.findFirst({ where: { tenantId: staff.tenantId, tableId, status: { not: 'closed' } } })
       if (existing) return buildOrderView(tx, existing)
 
+      const savepoint = `sp_order_${uuidv7().replace(/-/g, '')}`
+      await tx.$executeRawUnsafe(`SAVEPOINT "${savepoint}"`)
+
       try {
         const created = await tx.order.create({
           data: { tenantId: staff.tenantId, outletId, tableId, ownerId: staff.id, status: 'open' },
@@ -199,11 +202,15 @@ export class OrdersService {
         // the check-then-create above has a race window under concurrent
         // requests for the same table. Re-read once instead of surfacing a
         // raw DB error to the caller.
+        await tx.$executeRawUnsafe(`ROLLBACK TO SAVEPOINT "${savepoint}"`)
+
         if (isUniqueViolation(error)) {
           const raced = await tx.order.findFirst({ where: { tenantId: staff.tenantId, tableId, status: { not: 'closed' } } })
           if (raced) return buildOrderView(tx, raced)
         }
         throw error
+      } finally {
+        await tx.$executeRawUnsafe(`RELEASE SAVEPOINT "${savepoint}"`).catch(() => {})
       }
     })
   }

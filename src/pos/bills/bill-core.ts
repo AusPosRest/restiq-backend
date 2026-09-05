@@ -232,6 +232,9 @@ export async function createOrGetBillRecord(tx: Tx, params: CreateBillParams): P
     subtotalMinor,
   })
 
+  const savepoint = `sp_bill_${uuidv7().replace(/-/g, '')}`
+  await tx.$executeRawUnsafe(`SAVEPOINT "${savepoint}"`)
+
   try {
     const bill = await tx.bill.create({
       data: {
@@ -249,10 +252,14 @@ export async function createOrGetBillRecord(tx: Tx, params: CreateBillParams): P
     })
     return { bill, created: true }
   } catch (error) {
+    await tx.$executeRawUnsafe(`ROLLBACK TO SAVEPOINT "${savepoint}"`)
+
     if (!isUniqueViolation(error)) throw error
     const raced = await tx.bill.findUnique({ where: { orderId: params.orderId }, include: BILL_INCLUDE })
     if (!raced) throw error
     return { bill: raced, created: false }
+  } finally {
+    await tx.$executeRawUnsafe(`RELEASE SAVEPOINT "${savepoint}"`).catch(() => {})
   }
 }
 

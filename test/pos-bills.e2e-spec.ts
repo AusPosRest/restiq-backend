@@ -337,6 +337,25 @@ describe('/pos/v1 bill and settle (e2e)', () => {
       expect(rows).toHaveLength(1)
     })
 
+    it('is safe under concurrent POST for the same order: one created, one returned from the existing row (same id)', async () => {
+      const tenantId = await createTenant(prisma)
+      const outletId = await createOutlet(prisma, tenantId)
+      const { orderId, ownerToken } = await setUpSentOrder(tenantId, outletId, 10000)
+
+      const [first, second] = await Promise.all([
+        authed(request(httpServer).post(`/pos/v1/orders/${orderId}/bill`), ownerToken).send(),
+        authed(request(httpServer).post(`/pos/v1/orders/${orderId}/bill`), ownerToken).send(),
+      ])
+
+      expect([first.status, second.status].sort()).toEqual([200, 201])
+      const firstBill = first.body as BillBody
+      const secondBill = second.body as BillBody
+      expect(firstBill.id).toBe(secondBill.id)
+
+      const rows = await prisma.bill.findMany({ where: { orderId } })
+      expect(rows).toHaveLength(1)
+    })
+
     it('returns a finalized bill with 200 (not 409) on a repeat POST', async () => {
       const tenantId = await createTenant(prisma)
       const outletId = await createOutlet(prisma, tenantId)
