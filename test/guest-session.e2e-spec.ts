@@ -214,6 +214,32 @@ describe('/guest/v1 table sessions (e2e)', () => {
     expect((secondStartRes.body as ErrorBody).error.code).toBe('session_already_open')
   })
 
+  it('an idle-expired session (status still "open", expiresAt in the past) does not block a fresh start', async () => {
+    const tenantId = await createTenant(prisma)
+    const outletId = await createOutlet(prisma, tenantId)
+    const tableId = await createTable(prisma, tenantId, outletId)
+    await enableQrOrdering(prisma, tenantId, outletId)
+
+    const startRes = await request(httpServer)
+      .post('/guest/v1/sessions')
+      .send({ outletId, tableId, name: 'Asha', phone: '+91 90000 11111' })
+    expect(startRes.status).toBe(201)
+    const { session } = startRes.body as StartResult
+
+    // Nothing flips status on idle-expiry - it stays 'open' with a past
+    // expiresAt, exactly like a real idle-TTL timeout would leave it.
+    await prisma.tableSession.update({ where: { id: session.sessionId }, data: { expiresAt: new Date(Date.now() - 1000) } })
+
+    const restartRes = await request(httpServer)
+      .post('/guest/v1/sessions')
+      .send({ outletId, tableId, name: 'Rohan', phone: '+91 90000 22222' })
+    expect(restartRes.status).toBe(201)
+    const restarted = restartRes.body as StartResult
+    expect(restarted.session.status).toBe('open')
+    expect(restarted.session.table.id).toBe(tableId)
+    expect(restarted.session.guests).toEqual([expect.objectContaining({ name: 'Rohan' })])
+  })
+
   it('joins with the right PIN and sees the earlier guest; a wrong PIN fails', async () => {
     const tenantId = await createTenant(prisma)
     const outletId = await createOutlet(prisma, tenantId)

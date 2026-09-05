@@ -119,7 +119,14 @@ export class GuestSessionsService {
 
         const existing = await tx.tableSession.findFirst({ where: { tenantId: outlet.tenantId, tableId: dto.tableId, status: 'open' } })
         if (existing) {
-          throw new ConflictException({ code: 'session_already_open', message: 'This table already has an open session - join it with its PIN instead' })
+          if (!isSessionInactive(existing)) {
+            throw new ConflictException({ code: 'session_already_open', message: 'This table already has an open session - join it with its PIN instead' })
+          }
+          // Idle-expired (still 'open', past expiresAt) - nothing flips its
+          // status on a timer, and table_sessions_one_open_per_table (a
+          // partial unique index on status = 'open') would otherwise reject
+          // the new row below even though this one is no longer live.
+          await tx.tableSession.update({ where: { id: existing.id }, data: { status: 'closed', closedAt: new Date() } })
         }
 
         const pin = generatePin()
