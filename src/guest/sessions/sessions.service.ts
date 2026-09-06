@@ -101,6 +101,13 @@ export class GuestSessionsService {
         return { available: false, reason: 'not_found' }
       }
       await setTenantContext(tx, outlet.tenantId)
+      // Issue #117: a deactivated/soft-deleted tenant's QR entry reports the
+      // same "not_found" as a missing outlet - never a distinct reason that
+      // would reveal the tenant's lifecycle state to an unauthenticated scan.
+      const tenant = await tx.tenant.findUnique({ where: { id: outlet.tenantId }, select: { status: true, deletedAt: true } })
+      if (!tenant || tenant.status === 'inactive' || tenant.deletedAt) {
+        return { available: false, reason: 'not_found' }
+      }
       const capability = await tx.outletCapability.findUnique({ where: { outletId_key: { outletId, key: CAPABILITY_KEY } } })
       if (!capability?.enabled) {
         return { available: false, reason: 'qr_ordering_disabled' }

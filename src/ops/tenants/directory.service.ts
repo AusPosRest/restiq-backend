@@ -16,7 +16,7 @@ import {
 } from './directory.dtos'
 import { OWNER_INVITE_TTL_HOURS } from './tenants.service'
 
-const STATUSES = ['provisioning', 'active'] as const
+const STATUSES = ['provisioning', 'active', 'inactive'] as const
 const COUNTRIES = ['IN', 'AU'] as const
 const PLANS = ['standard', 'enterprise'] as const
 const HEALTHS = ['healthy', 'lagging', 'silent', 'unknown'] as const
@@ -290,7 +290,7 @@ export class TenantDirectoryService {
       await setOperatorContext(tx)
       return kpiKey === 'active_tenants'
         ? tx.tenant.count({ where: { status: 'active', deletedAt: null } })
-        : tx.outlet.count({ where: { deletedAt: null } })
+        : tx.outlet.count({ where: { deletedAt: null, tenant: { deletedAt: null } } })
     })
     return { key: kpiKey, value }
   }
@@ -401,6 +401,46 @@ export class TenantDirectoryService {
         throw new ConflictException({ code: 'conflict', message: 'Only a provisioning tenant can be activated' })
       }
       return tx.tenant.update({ where: { id }, data: { status: 'active' }, select: { id: true, status: true } })
+    })
+    return { tenant }
+  }
+
+  async deactivate(operator: OpsPrincipal, id: string, reason: string): Promise<{ tenant: { id: string; status: string } }> {
+    const tenant = await this.mutate(operator, id, 'tenant.deactivated', reason, async (tx) => {
+      const current = await tx.tenant.findUnique({ where: { id }, select: { status: true } })
+      if (current?.status === 'inactive' || current?.status === 'provisioning') {
+        throw new ConflictException({ code: 'conflict', message: 'Only an active tenant can be deactivated' })
+      }
+      return tx.tenant.update({ where: { id }, data: { status: 'inactive' }, select: { id: true, status: true } })
+    })
+    return { tenant }
+  }
+
+  async reactivate(operator: OpsPrincipal, id: string, reason: string): Promise<{ tenant: { id: string; status: string } }> {
+    const tenant = await this.mutate(operator, id, 'tenant.reactivated', reason, async (tx) => {
+      const current = await tx.tenant.findUnique({ where: { id }, select: { status: true } })
+      if (current?.status !== 'inactive') {
+        throw new ConflictException({ code: 'conflict', message: 'Only an inactive tenant can be reactivated' })
+      }
+      return tx.tenant.update({ where: { id }, data: { status: 'active' }, select: { id: true, status: true } })
+    })
+    return { tenant }
+  }
+
+  // Soft delete (AD-9's registry lifecycle stays untouched - this is a
+  // region-side marker only): refused while the tenant has activity that a
+  // disappearing tenant would strand mid-flight.
+  async softDelete(operator: OpsPrincipal, id: string, reason: string): Promise<{ tenant: { id: string; status: string } }> {
+    const tenant = await this.mutate(operator, id, 'tenant.deleted', reason, async (tx) => {
+      const openOrder = await tx.order.findFirst({ where: { tenantId: id, status: { not: 'closed' } }, select: { id: true } })
+      const openBill = openOrder ? null : await tx.bill.findFirst({ where: { tenantId: id, status: 'open' }, select: { id: true } })
+      if (openOrder || openBill) {
+        throw new ConflictException({
+          code: 'tenant_has_open_activity',
+          message: 'This tenant has open orders or bills and cannot be deleted',
+        })
+      }
+      return tx.tenant.update({ where: { id }, data: { deletedAt: new Date() }, select: { id: true, status: true } })
     })
     return { tenant }
   }

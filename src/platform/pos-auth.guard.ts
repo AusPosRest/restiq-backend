@@ -9,11 +9,13 @@
 // realm - "auth realms separate principal types, not screens" - so the match
 // below is extended to cover it rather than mounting kitchen routes under
 // /pos/v1 or standing up a second guard for the same principal type.
-import { CanActivate, ExecutionContext, Injectable, UnauthorizedException, createParamDecorator } from '@nestjs/common'
+import { CanActivate, ExecutionContext, ForbiddenException, Injectable, UnauthorizedException, createParamDecorator } from '@nestjs/common'
 import { Reflector } from '@nestjs/core'
 import type { Request } from 'express'
 import { IS_PUBLIC } from './ops-auth.guard'
 import { PosPrincipal, verifyPosToken } from './pos-jwt'
+import { RegionRegistryService } from './region-registry.service'
+import { isTenantBlocked } from './tenant-lifecycle'
 
 type PosRequest = Request & { staff?: PosPrincipal }
 
@@ -29,9 +31,12 @@ export const CurrentStaff = createParamDecorator((_data: unknown, context: Execu
 
 @Injectable()
 export class PosAuthGuard implements CanActivate {
-  constructor(private readonly reflector: Reflector) {}
+  constructor(
+    private readonly reflector: Reflector,
+    private readonly registry: RegionRegistryService,
+  ) {}
 
-  canActivate(context: ExecutionContext): boolean {
+  async canActivate(context: ExecutionContext): Promise<boolean> {
     const request = context.switchToHttp().getRequest<PosRequest>()
     if (!/^\/(pos|kitchen)(\/|$)/.test(request.path)) return true
 
@@ -43,6 +48,9 @@ export class PosAuthGuard implements CanActivate {
     const principal = token ? verifyPosToken(token) : null
     if (!principal) {
       throw new UnauthorizedException({ code: 'unauthorized', message: 'A valid POS session is required' })
+    }
+    if (await isTenantBlocked(this.registry, principal.tenantId)) {
+      throw new ForbiddenException({ code: 'tenant_inactive', message: 'This tenant is no longer active' })
     }
     request.staff = principal
     return true

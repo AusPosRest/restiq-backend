@@ -12,6 +12,18 @@
   5 failed attempts for the same email locks it out for 30s (`429
   locked_out`, in-memory, `src/admin/login-lockout.ts`). Covered in
   `test/admin-auth.e2e-spec.ts`.
+- **2026-09-06** - Tenant lifecycle management for issue #117: `TenantStatus`
+  gains `inactive`, and `OpsTenantsController` gets
+  `POST /ops/v1/tenants/:id/deactivate`, `POST /ops/v1/tenants/:id/reactivate`
+  and `DELETE /ops/v1/tenants/:id` (soft delete via the existing `deletedAt`,
+  refused with `409 tenant_has_open_activity` while any `Order` isn't
+  `closed` or any `Bill` is still `open`) - all audited via the existing
+  `mutate()` helper. `AdminAuthGuard`/`PosAuthGuard`/`GuestAuthGuard` now
+  reject `403 tenant_inactive` for a blocked tenant's JWT via a new shared
+  `isTenantBlocked()` (`src/platform/tenant-lifecycle.ts`), and the guest
+  realm's pre-token `checkAvailability` carries the same check inline. See
+  `wiki/features/platform-console.md`'s "Tenant lifecycle" section.
+
 - **2026-09-05** - Fixed real concurrency races in two Postgres-backed POS flows by adding
   per-callpoint SAVEPOINT recovery around create-write/readback paths in:
   `src/pos/bills/bill-core.ts` (`createOrGetBillRecord`) and

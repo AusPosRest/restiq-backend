@@ -72,3 +72,40 @@ future change touches this realm's own docs.
     that the ops-realm enroll endpoint keeps working unchanged, and the
     `rate limiting (issue #95)` block for the 429 behaviour and per-IP
     isolation.
+
+## Tenant lifecycle (issue #117)
+
+Three new mutations on `TenantDirectoryService`/`OpsTenantsController`
+(`src/ops/tenants/`), all operator-auth, all requiring `reason` and audited
+via the existing `mutate()` helper - the same shape as `activate()`:
+
+- `POST /ops/v1/tenants/:id/deactivate` - `active` -> `inactive`
+  (`tenant.deactivated`). `409 conflict` if the tenant is already `inactive`
+  or still `provisioning`.
+- `POST /ops/v1/tenants/:id/reactivate` - `inactive` -> `active`
+  (`tenant.reactivated`). `409 conflict` if the tenant isn't `inactive`.
+- `DELETE /ops/v1/tenants/:id` - soft delete: sets `deletedAt`, leaves
+  `status` untouched (`tenant.deleted`). Refused with
+  `409 { code: 'tenant_has_open_activity' }` if the tenant has any `Order`
+  not `closed` or any `Bill` still `open`. A deleted tenant disappears from
+  the directory list/detail (`404`) and the `active_tenants`/`outlets` KPIs -
+  every directory read already filters `deletedAt: null`.
+
+**Guard enforcement, every realm:** `AdminAuthGuard`, `PosAuthGuard` and
+`GuestAuthGuard` (`src/platform/*-auth.guard.ts`) each resolve a `tenantId`
+from their own JWT; after verifying the token they now also call
+`isTenantBlocked()` (`src/platform/tenant-lifecycle.ts`) - one `set_config` +
+`Tenant` select on the tenant's plane - and reject with
+`403 { code: 'tenant_inactive' }` when the tenant is `inactive` or
+soft-deleted. This is the one place a blocked tenant is rejected regardless
+of realm, so the helper lives once in `platform` rather than being
+duplicated per guard. The guest realm's pre-token entry point
+(`GuestSessionsService.checkAvailability`, `src/guest/sessions/`) carries the
+same check inline, since it resolves a tenant from an `outletId` before any
+guest token exists and is `@Public()` - it reports the same `not_found`
+reason a missing outlet does, never revealing tenant lifecycle state to an
+unauthenticated QR scan.
+
+See `test/tenant-lifecycle.e2e-spec.ts` for the deactivate/reactivate
+round-trip, the soft-delete/open-activity conflict, and the
+admin/pos-realm 403 proof.
