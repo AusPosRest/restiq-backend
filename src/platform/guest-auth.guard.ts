@@ -5,11 +5,13 @@
 // untouched. No code path may accept a guest token on any other realm's
 // routes, or another realm's token here - each guard early-returns true
 // outside its own prefix and rejects everything that isn't its own audience.
-import { CanActivate, ExecutionContext, Injectable, UnauthorizedException, createParamDecorator } from '@nestjs/common'
+import { CanActivate, ExecutionContext, ForbiddenException, Injectable, UnauthorizedException, createParamDecorator } from '@nestjs/common'
 import { Reflector } from '@nestjs/core'
 import type { Request } from 'express'
-import { IS_PUBLIC } from './ops-auth.guard'
 import { GuestPrincipal, verifyGuestToken } from './guest-jwt'
+import { IS_PUBLIC } from './ops-auth.guard'
+import { RegionRegistryService } from './region-registry.service'
+import { isTenantBlocked } from './tenant-lifecycle'
 
 type GuestRequest = Request & { guest?: GuestPrincipal }
 
@@ -25,9 +27,12 @@ export const CurrentGuest = createParamDecorator((_data: unknown, context: Execu
 
 @Injectable()
 export class GuestAuthGuard implements CanActivate {
-  constructor(private readonly reflector: Reflector) {}
+  constructor(
+    private readonly reflector: Reflector,
+    private readonly registry: RegionRegistryService,
+  ) {}
 
-  canActivate(context: ExecutionContext): boolean {
+  async canActivate(context: ExecutionContext): Promise<boolean> {
     const request = context.switchToHttp().getRequest<GuestRequest>()
     if (!/^\/guest(\/|$)/.test(request.path)) return true
 
@@ -39,6 +44,9 @@ export class GuestAuthGuard implements CanActivate {
     const principal = token ? verifyGuestToken(token) : null
     if (!principal) {
       throw new UnauthorizedException({ code: 'unauthorized', message: 'A valid guest session is required' })
+    }
+    if (await isTenantBlocked(this.registry, principal.tenantId)) {
+      throw new ForbiddenException({ code: 'tenant_inactive', message: 'This tenant is no longer active' })
     }
     request.guest = principal
     return true

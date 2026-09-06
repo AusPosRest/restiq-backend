@@ -2,11 +2,13 @@
 // admin secret - the third disjoint realm, same pattern as the ops guard
 // (AD-3). Applied globally so every future /admin controller is covered
 // without opting in; non-/admin routes pass through untouched.
-import { CanActivate, ExecutionContext, Injectable, UnauthorizedException, createParamDecorator } from '@nestjs/common'
+import { CanActivate, ExecutionContext, ForbiddenException, Injectable, UnauthorizedException, createParamDecorator } from '@nestjs/common'
 import { Reflector } from '@nestjs/core'
 import type { Request } from 'express'
 import { AdminPrincipal, verifyAdminToken } from './admin-jwt'
 import { IS_PUBLIC } from './ops-auth.guard'
+import { RegionRegistryService } from './region-registry.service'
+import { isTenantBlocked } from './tenant-lifecycle'
 
 type AdminRequest = Request & { owner?: AdminPrincipal }
 
@@ -22,9 +24,12 @@ export const CurrentOwner = createParamDecorator((_data: unknown, context: Execu
 
 @Injectable()
 export class AdminAuthGuard implements CanActivate {
-  constructor(private readonly reflector: Reflector) {}
+  constructor(
+    private readonly reflector: Reflector,
+    private readonly registry: RegionRegistryService,
+  ) {}
 
-  canActivate(context: ExecutionContext): boolean {
+  async canActivate(context: ExecutionContext): Promise<boolean> {
     const request = context.switchToHttp().getRequest<AdminRequest>()
     if (!/^\/admin(\/|$)/.test(request.path)) return true
 
@@ -36,6 +41,9 @@ export class AdminAuthGuard implements CanActivate {
     const principal = token ? verifyAdminToken(token) : null
     if (!principal) {
       throw new UnauthorizedException({ code: 'unauthorized', message: 'A valid owner session is required' })
+    }
+    if (await isTenantBlocked(this.registry, principal.tenantId)) {
+      throw new ForbiddenException({ code: 'tenant_inactive', message: 'This tenant is no longer active' })
     }
     request.owner = principal
     return true

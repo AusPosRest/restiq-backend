@@ -87,6 +87,7 @@ model AppliedOp {
 enum TenantStatus {
   provisioning
   active
+  inactive
 }
 
 enum Country {

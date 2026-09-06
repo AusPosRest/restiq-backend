@@ -95,4 +95,33 @@ export class OpsTenantsController {
   ): Promise<{ tenant: { id: string; status: string } }> {
     return this.directory.activate(operator, id, dto.reason)
   }
+
+  @Post(':id/deactivate')
+  @HttpCode(200)
+  deactivate(
+    @CurrentOperator() operator: OpsPrincipal,
+    @Param('id', ParseUUIDPipe) id: string,
+    @Body() dto: ReasonDto,
+  ): Promise<{ tenant: { id: string; status: string } }> {
+    return this.directory.deactivate(operator, id, dto.reason)
+  }
+
+  @Post(':id/reactivate')
+  @HttpCode(200)
+  reactivate(
+    @CurrentOperator() operator: OpsPrincipal,
+    @Param('id', ParseUUIDPipe) id: string,
+    @Body() dto: ReasonDto,
+  ): Promise<{ tenant: { id: string; status: string } }> {
+    return this.directory.reactivate(operator, id, dto.reason)
+  }
+
+  @Delete(':id')
+  softDelete(
+    @CurrentOperator() operator: OpsPrincipal,
+    @Param('id', ParseUUIDPipe) id: string,
+    @Body() dto: ReasonDto,
+  ): Promise<{ tenant: { id: string; status: string } }> {
+    return this.directory.softDelete(operator, id, dto.reason)
+  }
 }
