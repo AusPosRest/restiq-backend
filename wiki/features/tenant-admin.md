@@ -23,6 +23,20 @@ built here, story by story.
   accepts only `aud:"admin"` tokens signed with `ADMIN_JWT_SECRET`; an
   `aud:"ops"` token is rejected even if (hypothetically) signed with the
   admin secret, and vice versa - proven in `test/admin-realm.e2e-spec.ts`.
+- **Returning-owner login (issue #118):** `POST /admin/v1/auth/login`
+  (`{ email, password }` -> same token/owner shape as accept-invite). Looks
+  up `owner_users` by normalized email across every tenant inside a
+  transaction under a dedicated RLS context (`app.owner_login_context`,
+  `owner_login_read` policy, migration `20260906000000`) - the same
+  cross-tenant-read-before-tenant-is-known shape as accept-invite's own
+  `app.invite_accept_context`/`invite_accept_read`, kept as a separate
+  context so the two read paths stay independently revocable. Zero matches
+  runs a dummy `argon2.verify` to equalize timing before the generic 401
+  (`invalid_credentials`); more than one match (email collision across
+  tenants) is `409 ambiguous_owner`. 5 failed attempts for the same
+  normalized email locks it out for 30s (`429 locked_out`,
+  `src/admin/login-lockout.ts` - in-memory, single-instance, same tradeoff as
+  the POS PIN lockout). Covered in `test/admin-auth.e2e-spec.ts`.
 
 ## CAP-2 - Go-Live Checklist
 
@@ -697,10 +711,10 @@ built here, story by story.
 
 ## Key decisions
 
-- No separate `/admin/v1/auth/login` endpoint in this story - the SPEC's
-  CAP-1 success criterion is "no extra login step" after accepting an
-  invite, and nothing in scope calls for a returning-owner login flow yet.
-  Add one when a story needs it.
+- `/admin/v1/auth/login` (issue #118) is the returning-owner counterpart -
+  CAP-1's "no extra login step" only ever meant the invite-accept flow
+  itself doesn't need a second call, not that a login endpoint would never
+  exist.
 - All five checklist steps are required for go-live (no optional/required
   split) - the SPEC states no product decision to make any step optional.
 - CAP-3's commit has no user-supplied "reason" field. The SPEC's Constraints

@@ -1,5 +1,17 @@
 # Completed
 
+- **2026-09-06** - Owner password login for issue #118: `POST /admin/v1/auth/login`
+  (`src/admin/auth.controller.ts`, `src/admin/auth.service.ts`) looks up
+  `owner_users` by normalized email across every tenant (new RLS policy
+  `owner_login_read`, migration `20260906000000_admin_owner_login_context`,
+  same shape as accept-invite's cross-tenant invite lookup), argon2-verifies
+  the password with a dummy-hash timing defence for unknown emails, and
+  returns the same `{ token, owner }` shape as accept-invite. Unknown email
+  and wrong password both 401 `invalid_credentials` with an identical body;
+  an email matching more than one tenant's owner is `409 ambiguous_owner`;
+  5 failed attempts for the same email locks it out for 30s (`429
+  locked_out`, in-memory, `src/admin/login-lockout.ts`). Covered in
+  `test/admin-auth.e2e-spec.ts`.
 - **2026-09-05** - Fixed real concurrency races in two Postgres-backed POS flows by adding
   per-callpoint SAVEPOINT recovery around create-write/readback paths in:
   `src/pos/bills/bill-core.ts` (`createOrGetBillRecord`) and

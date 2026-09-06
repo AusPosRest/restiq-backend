@@ -10,3 +10,6 @@ export type { PinStatus } from './staff/staff.service'
 // no second price-picking implementation.
 export { resolveCurrentPrice } from './menu/pricing'
 export { TaxRegistrationService } from './tax/tax-registration.service'
+// Test-only hook (issue #118): shrinks the owner-login lockout window so
+// e2e coverage of lockout recovery doesn't need a real 30s sleep.
+export { setLockoutMsForTesting } from './login-lockout'
