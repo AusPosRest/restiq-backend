@@ -81,6 +81,8 @@ export interface TenantDetail {
     taxProfile: string
     fssaiLicense: string | null
     compositionScheme: boolean
+    gstRegistered: boolean
+    gstRatePercent: number | null
   }>
   brands: Array<{ id: string; name: string }>
   outlets: Array<{ id: string; name: string; brandId: string; brandName: string; address: string; type: string; timezone: string }>
@@ -253,6 +255,8 @@ export class TenantDirectoryService {
         taxProfile: r.taxProfile,
         fssaiLicense: r.fssaiLicense,
         compositionScheme: r.compositionScheme,
+        gstRegistered: r.gstRegistered,
+        gstRatePercent: r.gstRatePercent != null ? Number(r.gstRatePercent) : null,
       })),
       brands: result.brands.map((b) => ({ id: b.id, name: b.name })),
       outlets: result.outlets.map((o) => ({

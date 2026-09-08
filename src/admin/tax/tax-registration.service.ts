@@ -1,4 +1,5 @@
 import { BadRequestException, ConflictException, Injectable, NotFoundException } from '@nestjs/common'
+import type { Prisma } from '../../generated/prisma/client'
 import { AdminPrincipal, RegionRegistryService } from '../../platform'
 import { setTenantContext } from '../menu/tenant-context'
 import { TaxRegistrationView, UpdateTaxRegistrationDto } from './tax-registration.dtos'
@@ -19,6 +20,7 @@ function toView(country: string, registrationType: 'gstin' | 'abn', registration
   fssaiLicense: string | null
   compositionScheme: boolean
   gstRegistered: boolean
+  gstRatePercent: Prisma.Decimal | null
 } | null, tenantName: string): TaxRegistrationView {
   return {
     country,
@@ -29,6 +31,7 @@ function toView(country: string, registrationType: 'gstin' | 'abn', registration
     fssaiLicense: registration?.fssaiLicense ?? null,
     compositionScheme: registration?.compositionScheme ?? false,
     gstRegistered: registration?.gstRegistered ?? true,
+    gstRatePercent: registration?.gstRatePercent != null ? Number(registration.gstRatePercent) : null,
   }
 }
 
@@ -71,6 +74,10 @@ export class TaxRegistrationService {
       if (tenant.country === 'IN' && dto.gstRegistered === false) {
         throw new BadRequestException({ code: 'validation_failed', message: 'IN tenants cannot set gstRegistered to false' })
       }
+      const effectiveGstRegistered = dto.gstRegistered ?? existing?.gstRegistered ?? true
+      if (dto.gstRatePercent !== undefined && effectiveGstRegistered === false) {
+        throw new BadRequestException({ code: 'validation_failed', message: 'gstRatePercent is only allowed when gstRegistered is not false' })
+      }
 
       const registrationType = tenant.country === 'IN' ? TAX_REGISTRATION_TYPE.IN : TAX_REGISTRATION_TYPE.AU
       const updateData = {
@@ -80,7 +87,8 @@ export class TaxRegistrationService {
         taxProfile: dto.taxProfile ?? existing?.taxProfile ?? '',
         fssaiLicense: dto.fssaiLicense ?? existing?.fssaiLicense ?? null,
         compositionScheme: dto.compositionScheme ?? existing?.compositionScheme ?? false,
-        gstRegistered: dto.gstRegistered ?? existing?.gstRegistered ?? true,
+        gstRegistered: effectiveGstRegistered,
+        gstRatePercent: dto.gstRatePercent ?? existing?.gstRatePercent ?? null,
       }
 
       try {
@@ -93,7 +101,8 @@ export class TaxRegistrationService {
               fssaiLicense: dto.fssaiLicense ?? existing.fssaiLicense,
               compositionScheme: dto.compositionScheme ?? existing.compositionScheme,
               registrationNumber: dto.registrationNumber ?? existing.registrationNumber,
-              gstRegistered: dto.gstRegistered ?? existing.gstRegistered,
+              gstRegistered: effectiveGstRegistered,
+              gstRatePercent: dto.gstRatePercent ?? existing.gstRatePercent,
             },
           })
           return toView(tenant.country, registrationType, updated, tenant.name)

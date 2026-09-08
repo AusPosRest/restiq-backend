@@ -125,6 +125,44 @@ describe('computeTax', () => {
     expect(result.taxMinor).toBe(9n)
   })
 
+  it('IN + custom gstRatePercent: splits 12% into 6% CGST + 6% SGST', () => {
+    const result = computeTax({
+      country: 'IN',
+      gstRegistered: true,
+      taxProfile: 'India GST - CGST/SGST split',
+      compositionScheme: false,
+      subtotalMinor: 20000n,
+      gstRatePercent: 12,
+    })
+    expect(result.taxMinor).toBe(2400n)
+    expect(result.breakdown).toEqual([
+      { label: 'CGST', ratePercent: 6, amountMinor: 1200n },
+      { label: 'SGST', ratePercent: 6, amountMinor: 1200n },
+    ])
+    expect(sumBreakdown(result.breakdown)).toBe(result.taxMinor)
+  })
+
+  it('AU + custom gstRatePercent: single inclusive 15% GST line', () => {
+    const result = computeTax({
+      country: 'AU',
+      gstRegistered: true,
+      taxProfile: 'Australia GST',
+      compositionScheme: false,
+      subtotalMinor: 11500n,
+      gstRatePercent: 15,
+    })
+    expect(result.pricesIncludeTax).toBe(true)
+    expect(result.taxMinor).toBe(1500n)
+    expect(result.breakdown).toEqual([{ label: 'GST', ratePercent: 15, amountMinor: 1500n }])
+  })
+
+  it('gstRatePercent null falls back to the statutory default (5% IN, 10% AU)', () => {
+    const inResult = computeTax({ country: 'IN', gstRegistered: true, taxProfile: '', compositionScheme: false, subtotalMinor: 20000n, gstRatePercent: null })
+    expect(inResult.taxMinor).toBe(1000n)
+    const auResult = computeTax({ country: 'AU', gstRegistered: true, taxProfile: '', compositionScheme: false, subtotalMinor: 11000n, gstRatePercent: null })
+    expect(auResult.taxMinor).toBe(1000n)
+  })
+
   it('zero subtotal produces zero tax in every branch', () => {
     expect(computeTax({ country: 'IN', gstRegistered: true, taxProfile: '', compositionScheme: false, subtotalMinor: 0n }).taxMinor).toBe(0n)
     expect(computeTax({ country: 'IN', gstRegistered: true, taxProfile: 'IGST', compositionScheme: false, subtotalMinor: 0n }).taxMinor).toBe(0n)

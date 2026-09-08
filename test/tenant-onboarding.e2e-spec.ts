@@ -12,7 +12,14 @@ import { signOpsToken } from '../src/platform'
 
 const EMAIL = 'onboarder@restiq.example'
 
-function submitPayload(overrides?: { registrationNumber?: string; companyName?: string }) {
+function submitPayload(overrides?: {
+  registrationNumber?: string
+  companyName?: string
+  country?: 'IN' | 'AU'
+  gstRegistered?: boolean
+  gstRatePercent?: number
+}) {
+  const country = overrides?.country ?? 'IN'
   return {
     business: {
       companyName: overrides?.companyName ?? 'Spice Route Hospitality Pvt Ltd',
@@ -22,12 +29,14 @@ function submitPayload(overrides?: { registrationNumber?: string; companyName?: 
       contactPhone: '+91 98765 43210',
     },
     tax: {
-      country: 'IN',
-      registrationNumber: overrides?.registrationNumber ?? '29ABCDE1234F1Z5',
+      country,
+      registrationNumber: overrides?.registrationNumber ?? (country === 'IN' ? '29ABCDE1234F1Z5' : '51824753556'),
       legalEntityName: 'Spice Route Hospitality Pvt Ltd',
-      taxProfile: 'India GST - CGST/SGST split',
+      taxProfile: country === 'IN' ? 'India GST - CGST/SGST split' : 'Australia GST',
       fssaiLicense: '10012031000123',
       compositionScheme: false,
+      ...(overrides?.gstRegistered !== undefined ? { gstRegistered: overrides.gstRegistered } : {}),
+      ...(overrides?.gstRatePercent !== undefined ? { gstRatePercent: overrides.gstRatePercent } : {}),
     },
     brandsOutlets: {
       brandName: 'Spice Route',
@@ -295,6 +304,36 @@ describe('/ops/v1/tenants onboarding (e2e)', () => {
       delete payload.ownerInvite
       const res = await authed(request(httpServer).post('/ops/v1/tenants')).send(payload)
       expect(res.status).toBe(400)
+    })
+
+    it('persists gstRegistered=false (issue #121)', async () => {
+      const res = await authed(request(httpServer).post('/ops/v1/tenants')).send(
+        submitPayload({ country: 'AU', registrationNumber: '65416738912', companyName: 'Harbour Bistro', gstRegistered: false }),
+      )
+      expect(res.status).toBe(201)
+      const tenantId = (res.body as { tenant: { id: string } }).tenant.id
+      const registration = await prisma.tenantTaxRegistration.findFirst({ where: { tenantId } })
+      expect(registration?.gstRegistered).toBe(false)
+      expect(registration?.gstRatePercent).toBeNull()
+    })
+
+    it('persists a custom gstRatePercent (issue #121)', async () => {
+      const res = await authed(request(httpServer).post('/ops/v1/tenants')).send(
+        submitPayload({ registrationNumber: '24AAACR1234M1Z5', companyName: 'Custom Rate Co', gstRatePercent: 12 }),
+      )
+      expect(res.status).toBe(201)
+      const tenantId = (res.body as { tenant: { id: string } }).tenant.id
+      const registration = await prisma.tenantTaxRegistration.findFirst({ where: { tenantId } })
+      expect(registration?.gstRegistered).toBe(true)
+      expect(Number(registration?.gstRatePercent)).toBe(12)
+    })
+
+    it('rejects gstRatePercent when gstRegistered is false', async () => {
+      const res = await authed(request(httpServer).post('/ops/v1/tenants')).send(
+        submitPayload({ country: 'AU', registrationNumber: '73824719605', companyName: 'Rejected Rate Co', gstRegistered: false, gstRatePercent: 10 }),
+      )
+      expect(res.status).toBe(400)
+      expect((res.body as { error: { code: string } }).error.code).toBe('validation_failed')
     })
   })
 

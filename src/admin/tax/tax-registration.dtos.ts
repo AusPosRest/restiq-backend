@@ -1,4 +1,4 @@
-import { IsBoolean, IsOptional, IsString, MaxLength } from 'class-validator'
+import { IsBoolean, IsNumber, IsOptional, IsString, Max, MaxLength, Min } from 'class-validator'
 
 type TaxRegistrationType = 'gstin' | 'abn'
 
@@ -30,6 +30,14 @@ export class UpdateTaxRegistrationDto {
   @IsOptional()
   @IsBoolean()
   gstRegistered?: boolean
+
+  // Only meaningful when gstRegistered !== false - the service rejects it
+  // otherwise.
+  @IsOptional()
+  @IsNumber()
+  @Min(0)
+  @Max(100)
+  gstRatePercent?: number
 }
 
 export interface TaxRegistrationView {
@@ -41,4 +49,5 @@ export interface TaxRegistrationView {
   fssaiLicense: string | null
   compositionScheme: boolean
   gstRegistered: boolean
+  gstRatePercent: number | null
 }
