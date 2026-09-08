@@ -113,6 +113,7 @@ export class OpsTenantsService {
 
   async provision(operator: OpsPrincipal, dto: SubmitTenantDto): Promise<ProvisionResult> {
     this.validateTaxNumber(dto)
+    this.validateGstRate(dto)
 
     const region = this.registry.homeRegion()
     const plane = this.registry.planeFor(region)
@@ -156,6 +157,8 @@ export class OpsTenantsService {
             taxProfile: dto.tax.taxProfile,
             fssaiLicense: dto.tax.fssaiLicense ?? null,
             compositionScheme: dto.tax.compositionScheme ?? false,
+            gstRegistered: dto.tax.gstRegistered ?? true,
+            gstRatePercent: dto.tax.gstRatePercent ?? null,
           },
         })
 
@@ -239,6 +242,12 @@ export class OpsTenantsService {
     if (!ok) {
       const label = country === 'IN' ? 'GSTIN (15 characters, e.g. 29ABCDE1234F1Z5)' : 'ABN (11 digits)'
       throw new BadRequestException({ code: 'validation_failed', message: `registrationNumber is not a valid ${label}` })
+    }
+  }
+
+  private validateGstRate(dto: SubmitTenantDto): void {
+    if (dto.tax.gstRatePercent !== undefined && dto.tax.gstRegistered === false) {
+      throw new BadRequestException({ code: 'validation_failed', message: 'gstRatePercent is only allowed when gstRegistered is not false' })
     }
   }
 }

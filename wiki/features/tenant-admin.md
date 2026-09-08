@@ -401,20 +401,29 @@ built here, story by story.
 - **Built** (`src/admin/tax/`, merged into `src/admin/admin.module.ts`):
   - `GET /admin/v1/tax-registration` -> `{ country, registrationType,
     registrationNumber, legalEntityName, taxProfile, fssaiLicense,
-    compositionScheme, gstRegistered }`. `country` comes from `tenants.country`;
-    `registrationType` is derived (`IN -> gstin`, otherwise `abn`). If no row
-    exists, values are returned as defaults/nulls and `gstRegistered` defaults
-    to `true` (no 404) to keep the settings UI renderable before the owner
-    saves first time.
+    compositionScheme, gstRegistered, gstRatePercent }`. `country` comes from
+    `tenants.country`; `registrationType` is derived (`IN -> gstin`, otherwise
+    `abn`). If no row exists, values are returned as defaults/nulls and
+    `gstRegistered` defaults to `true` (no 404) to keep the settings UI
+    renderable before the owner saves first time.
   - `PUT /admin/v1/tax-registration` - merge-update semantics with
     `@IsOptional()`-validated writable fields: `registrationNumber`,
     `legalEntityName`, `taxProfile`, `fssaiLicense`, `compositionScheme`,
-    `gstRegistered`.
+    `gstRegistered`, `gstRatePercent`.
     Omitted fields keep their current value; missing row is created
     transactionally using a `findFirst(owner.tenantId)` first because
     `tenant_tax_registrations.tenantId` is not `@@unique`.
     For IN tenants, `gstRegistered: false` is rejected with `400
     validation_failed` to match AUS GST-vs-India compliance assumptions.
+  - `gstRatePercent` (issue #121, `tenant_tax_registrations.gst_rate_percent
+    NUMERIC(5,2)`, nullable) overrides the statutory default GST rate
+    (`tax.ts`'s hardcoded 5% IN / 10% AU) - `null` means "use the default".
+    Rejected with `400 validation_failed` when sent alongside
+    `gstRegistered: false` (a rate with nothing to apply it to). `pos/bills/
+    tax.ts`'s `computeTax()` reads it off the loaded tax profile at bill
+    finalisation: for IN it splits the configured rate into CGST/SGST (or a
+    single IGST line for an interstate profile) instead of the fixed 2.5%/
+    2.5%; for AU it replaces the fixed 10% inclusive rate.
   - Writes are tenant-scoped through `setTenantContext` and `owner.tenantId`
     checks in an interactive transaction; `registrationType` and
     `country` are read-only inputs and are not accepted from request body.

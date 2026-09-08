@@ -10,9 +10,12 @@ import {
   IsEmail,
   IsIn,
   IsNotEmpty,
+  IsNumber,
   IsOptional,
   IsString,
+  Max,
   MaxLength,
+  Min,
   ValidateNested,
 } from 'class-validator'
 
@@ -58,6 +61,15 @@ export class TaxComplianceDto {
 
   @IsOptional() @IsBoolean()
   compositionScheme?: boolean
+
+  @IsOptional() @IsBoolean()
+  gstRegistered?: boolean
+
+  // Only meaningful when gstRegistered !== false - the service rejects it
+  // otherwise (a rate with nothing to apply it to is a validation error, not
+  // a silently-ignored field).
+  @IsOptional() @IsNumber() @Min(0) @Max(100)
+  gstRatePercent?: number
 }
 
 export class OutletDto {

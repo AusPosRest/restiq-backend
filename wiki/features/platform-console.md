@@ -109,3 +109,30 @@ unauthenticated QR scan.
 See `test/tenant-lifecycle.e2e-spec.ts` for the deactivate/reactivate
 round-trip, the soft-delete/open-activity conflict, and the
 admin/pos-realm 403 proof.
+
+## GST applicable + configurable rate (issue #121)
+
+The onboarding wizard's tax step (`TaxComplianceDto`, `src/ops/tenants/
+submit.dto.ts`) gains two optional fields alongside the existing
+`compositionScheme`:
+
+- `gstRegistered` (`boolean`) - persisted onto the new
+  `TenantTaxRegistration` row at `POST /ops/v1/tenants` submit, defaulting to
+  `true` when omitted. Mirrors the field `/admin/v1/tax-registration` (see
+  `wiki/features/tenant-admin.md`'s CAP-108 section) already exposed to
+  owners post-onboarding.
+- `gstRatePercent` (`number`, 0-100) - `TenantTaxRegistrationService.provision()`
+  (`src/ops/tenants/tenants.service.ts`) rejects it with `400
+  validation_failed` when `gstRegistered` is explicitly `false`, since a rate
+  with nothing to apply it to is a wizard-input error, not a silently-dropped
+  field. Stored as `tenant_tax_registrations.gst_rate_percent NUMERIC(5,2)`,
+  nullable - `null` (the omitted case) means "use `pos/bills/tax.ts`'s
+  statutory default" (5% IN, 10% AU).
+
+`OpsTenantsService.detail()`'s (`src/ops/tenants/directory.service.ts`)
+`taxRegistrations[]` entries now also carry `gstRegistered` and
+`gstRatePercent` for the console's tenant-detail read.
+
+See `wiki/features/tenant-admin.md`'s CAP-108 section for the
+`/admin/v1/tax-registration` GET/PUT side of the same two fields, and
+`src/pos/bills/tax.ts` for how a configured rate changes bill tax math.

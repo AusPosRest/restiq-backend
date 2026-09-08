@@ -1,5 +1,25 @@
 # Completed
 
+- **2026-09-09** - GST applicable + configurable rate for issue #121:
+  `TenantTaxRegistration` gains a nullable `gstRatePercent`
+  (`gst_rate_percent NUMERIC(5,2)`, migration
+  `20260909000000_gst_rate_percent`) - `null` means "use `pos/bills/tax.ts`'s
+  statutory default" (5% IN, 10% AU). The onboarding wizard's
+  `TaxComplianceDto` (`src/ops/tenants/submit.dto.ts`) and
+  `/admin/v1/tax-registration`'s `UpdateTaxRegistrationDto`
+  (`src/admin/tax/tax-registration.dtos.ts`) both gain `gstRegistered` (wizard
+  only - PUT already had it) and `gstRatePercent` (0-100), with both services
+  rejecting `gstRatePercent` alongside `gstRegistered: false` as `400
+  validation_failed`. `computeTax()` (`src/pos/bills/tax.ts`) takes an
+  optional `gstRatePercent`: when set, IN splits it into CGST/SGST (or a
+  single IGST line for an interstate profile) instead of the fixed 2.5%/2.5%,
+  and AU replaces the fixed 10% inclusive rate - all rate math done in
+  integer basis points so a two-decimal rate never hits floating-point
+  division. `OpsTenantsService.detail()`'s `taxRegistrations[]` entries
+  (`src/ops/tenants/directory.service.ts`) now also carry `gstRegistered` and
+  `gstRatePercent`. See `wiki/features/tenant-admin.md`'s CAP-108 section and
+  `wiki/features/platform-console.md`'s new GST section.
+
 - **2026-09-06** - Owner password login for issue #118: `POST /admin/v1/auth/login`
   (`src/admin/auth.controller.ts`, `src/admin/auth.service.ts`) looks up
   `owner_users` by normalized email across every tenant (new RLS policy

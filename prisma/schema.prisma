@@ -218,6 +218,9 @@ model TenantTaxRegistration {
   fssaiLicense       String?             @map("fssai_license")
   compositionScheme  Boolean             @default(false) @map("composition_scheme")
   gstRegistered      Boolean             @default(true) @map("gst_registered")
+  // Null means "use the profile default" (5% IN, 10% AU) - tax.ts's
+  // computeTax() only overrides the default when this is non-null.
+  gstRatePercent     Decimal?            @map("gst_rate_percent") @db.Decimal(5, 2)
   createdAt          DateTime            @default(now()) @map("created_at") @db.Timestamptz(6)
 
   tenant Tenant @relation(fields: [tenantId], references: [id])

@@ -18,6 +18,9 @@ export interface ComputeTaxParams {
   compositionScheme: boolean
   gstRegistered: boolean
   subtotalMinor: bigint
+  // Tenant-configured rate (issue #121), overriding the 5% IN / 10% AU
+  // statutory defaults below. Null/undefined means "use the default".
+  gstRatePercent?: number | null
 }
 
 export interface TaxBreakdownLine {
@@ -44,32 +47,42 @@ function isIgstProfile(taxProfile: string): boolean {
   return taxProfile.toLowerCase().includes('igst')
 }
 
+// Rate as an integer number of basis points (rate * 100) so a configured
+// rate with up to 2 decimal places (the column is NUMERIC(5,2)) never hits
+// floating-point division - roundHalfUp does the only division, once, at
+// the end, on exact bigints.
+function rateBasisPoints(gstRatePercent: number | null | undefined, defaultPercent: number): bigint {
+  return BigInt(Math.round((gstRatePercent ?? defaultPercent) * 100))
+}
+
 export function computeTax(params: ComputeTaxParams): TaxResult {
-  const { country, gstRegistered, taxProfile, compositionScheme, subtotalMinor } = params
+  const { country, gstRegistered, taxProfile, compositionScheme, subtotalMinor, gstRatePercent } = params
 
   if (country === 'IN') {
     if (compositionScheme) {
       return { taxMinor: 0n, pricesIncludeTax: false, breakdown: [], notes: [COMPOSITION_NOTE] }
     }
 
+    const rateBasis = rateBasisPoints(gstRatePercent, 5)
+
     if (isIgstProfile(taxProfile)) {
-      const amountMinor = roundHalfUp(subtotalMinor * 5n, 100n)
-      return { taxMinor: amountMinor, pricesIncludeTax: false, breakdown: [{ label: 'IGST', ratePercent: 5, amountMinor }], notes: [] }
+      const amountMinor = roundHalfUp(subtotalMinor * rateBasis, 10_000n)
+      return { taxMinor: amountMinor, pricesIncludeTax: false, breakdown: [{ label: 'IGST', ratePercent: Number(rateBasis) / 100, amountMinor }], notes: [] }
     }
 
     // CGST/SGST split: the total is rounded once (the authoritative figure),
-    // CGST is rounded independently at its own 2.5% rate, and SGST absorbs
+    // CGST is rounded independently at its own half-rate, and SGST absorbs
     // whatever the two roundings leave over - so the two lines always sum
     // exactly to taxMinor, never off by the rounding unit either way.
-    const taxMinor = roundHalfUp(subtotalMinor * 5n, 100n)
-    const cgstMinor = roundHalfUp(subtotalMinor * 25n, 1000n)
+    const taxMinor = roundHalfUp(subtotalMinor * rateBasis, 10_000n)
+    const cgstMinor = roundHalfUp(subtotalMinor * rateBasis, 20_000n)
     const sgstMinor = taxMinor - cgstMinor
     return {
       taxMinor,
       pricesIncludeTax: false,
       breakdown: [
-        { label: 'CGST', ratePercent: 2.5, amountMinor: cgstMinor },
-        { label: 'SGST', ratePercent: 2.5, amountMinor: sgstMinor },
+        { label: 'CGST', ratePercent: Number(rateBasis) / 200, amountMinor: cgstMinor },
+        { label: 'SGST', ratePercent: Number(rateBasis) / 200, amountMinor: sgstMinor },
       ],
       notes: [],
     }
@@ -79,8 +92,9 @@ export function computeTax(params: ComputeTaxParams): TaxResult {
     return { taxMinor: 0n, pricesIncludeTax: false, breakdown: [], notes: ['Not registered for GST - this is a receipt, not a tax invoice'] }
   }
 
-  // AU: GST 10%, prices tax-inclusive - subtotalMinor is the customer-facing
+  // AU: GST, prices tax-inclusive - subtotalMinor is the customer-facing
   // total, and the tax is backed out of it rather than added on top.
-  const taxMinor = subtotalMinor - roundHalfUp(subtotalMinor * 10n, 11n)
-  return { taxMinor, pricesIncludeTax: true, breakdown: [{ label: 'GST', ratePercent: 10, amountMinor: taxMinor }], notes: [] }
+  const rateBasis = rateBasisPoints(gstRatePercent, 10)
+  const taxMinor = subtotalMinor - roundHalfUp(subtotalMinor * 10_000n, 10_000n + rateBasis)
+  return { taxMinor, pricesIncludeTax: true, breakdown: [{ label: 'GST', ratePercent: Number(rateBasis) / 100, amountMinor: taxMinor }], notes: [] }
 }

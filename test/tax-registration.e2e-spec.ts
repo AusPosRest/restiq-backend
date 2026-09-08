@@ -16,6 +16,7 @@ interface TaxRegistrationBody {
   fssaiLicense: string | null
   compositionScheme: boolean
   gstRegistered: boolean
+  gstRatePercent: number | null
 }
 interface ErrorBody {
   error: { code: string; message: string }
@@ -172,6 +173,7 @@ describe('/admin/v1/tax-registration', () => {
     expect(body.fssaiLicense).toBeNull()
     expect(body.compositionScheme).toBe(false)
     expect(body.gstRegistered).toBe(true)
+    expect(body.gstRatePercent).toBeNull()
   })
 
   it('PUT merges caller-writable fields into the existing TenantTaxRegistration row', async () => {
@@ -232,6 +234,37 @@ describe('/admin/v1/tax-registration', () => {
 
     const db = await prisma.tenantTaxRegistration.findFirstOrThrow({ where: { tenantId } })
     expect(db.gstRegistered).toBe(false)
+  })
+
+  it('PUT round-trips gstRatePercent (issue #121)', async () => {
+    const { tenantId, token } = await createOwner(prisma)
+    const res = await authed(request(httpServer).put('/admin/v1/tax-registration'), token).send({
+      registrationNumber: '22AAACY1122A1ZZ',
+      legalEntityName: 'Rate Co',
+      taxProfile: 'India GST - CGST/SGST split',
+      gstRatePercent: 12,
+    })
+    expect(res.status).toBe(200)
+    expect((res.body as TaxRegistrationBody).gstRatePercent).toBe(12)
+
+    const getRes = await authed(request(httpServer).get('/admin/v1/tax-registration'), token)
+    expect((getRes.body as TaxRegistrationBody).gstRatePercent).toBe(12)
+
+    const db = await prisma.tenantTaxRegistration.findFirstOrThrow({ where: { tenantId } })
+    expect(Number(db.gstRatePercent)).toBe(12)
+  })
+
+  it('rejects gstRatePercent when gstRegistered is false', async () => {
+    const { token } = await createOwner(prisma, 'Tenant AU Rejected', 'AU')
+    const res = await authed(request(httpServer).put('/admin/v1/tax-registration'), token).send({
+      registrationNumber: '22AAAZZ1111A1ZZ',
+      legalEntityName: 'Tenant AU Rejected',
+      taxProfile: 'Australia GST',
+      gstRegistered: false,
+      gstRatePercent: 15,
+    })
+    expect(res.status).toBe(400)
+    expect((res.body as ErrorBody).error.code).toBe('validation_failed')
   })
 
   it('creates a TenantTaxRegistration row on PUT when one did not exist', async () => {

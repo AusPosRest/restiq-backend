@@ -32,6 +32,7 @@ export interface TenantTaxProfile {
   taxProfile: string
   compositionScheme: boolean
   gstRegistered: boolean
+  gstRatePercent: number | null
   legalEntityName: string | null
   registrationNumber: string | null
   fssaiLicense: string | null
@@ -70,6 +71,7 @@ export async function loadTenantTaxProfile(tx: Tx, tenantId: string): Promise<Te
     taxProfile: registration?.taxProfile ?? '',
     compositionScheme: registration?.compositionScheme ?? false,
     gstRegistered: registration?.gstRegistered ?? true,
+    gstRatePercent: registration?.gstRatePercent != null ? Number(registration.gstRatePercent) : null,
     legalEntityName: registration?.legalEntityName ?? tenant.name,
     registrationNumber: registration?.registrationNumber ?? null,
     fssaiLicense: registration?.fssaiLicense ?? null,
@@ -229,6 +231,7 @@ export async function createOrGetBillRecord(tx: Tx, params: CreateBillParams): P
     taxProfile: taxContext.taxProfile,
     compositionScheme: taxContext.compositionScheme,
     gstRegistered: taxContext.gstRegistered,
+    gstRatePercent: taxContext.gstRatePercent,
     subtotalMinor,
   })
 
