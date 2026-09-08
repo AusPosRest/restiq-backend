@@ -57,9 +57,10 @@ interface OrderBody {
   status: 'open' | 'sent' | 'closed'
 }
 interface InvoiceBody {
-  invoiceNumber: string
+  status: 'open' | 'finalized'
+  invoiceNumber: string | null
   title: string
-  issuedAt: string
+  issuedAt: string | null
   currency: string
   seller: {
     legalEntityName: string
@@ -673,20 +674,34 @@ describe('/pos/v1 bill and settle (e2e)', () => {
   })
 
   describe('GET /pos/v1/bills/:id/invoice (issue #103)', () => {
-    it('409s before finalize, 200s after with the exact InvoiceView shape and real tenders', async () => {
+    it('200s with a pro-forma "Bill" before finalize (issue #125), then 200s with the exact InvoiceView shape and real tenders after', async () => {
       const tenantId = await createTenant(prisma)
       await createTaxRegistration(prisma, tenantId, { taxProfile: 'India GST - CGST/SGST split', registrationType: 'gstin', legalEntityName: 'Spice Route Hospitality Pvt Ltd' })
       const outletId = await createOutlet(prisma, tenantId)
-      const { orderId, ownerToken } = await setUpSentOrder(tenantId, outletId, 10000)
+      const { orderId, ownerToken } = await setUpSentOrder(tenantId, outletId, 10000) // 2 x 10000 = 20000 subtotal
       const created = await authed(request(httpServer).post(`/pos/v1/orders/${orderId}/bill`), ownerToken).send()
       const billId = (created.body as BillBody).id
 
-      const beforeFinalize = await authed(request(httpServer).get(`/pos/v1/bills/${billId}/invoice`), ownerToken)
-      expect(beforeFinalize.status).toBe(409)
-      expect((beforeFinalize.body as ErrorBody).error.code).toBe('not_finalized')
+      // Issue #123: an open bill's totals are re-derived from the order's
+      // current lines on every read - a line added after bill creation must
+      // show up on the pro-forma invoice's subtotal/tax too.
+      const itemId = await createItemWithPrice(prisma, tenantId, 5000)
+      await authed(request(httpServer).post(`/pos/v1/orders/${orderId}/lines`), ownerToken).send({ itemId, quantity: 1 })
+
+      const proforma = await authed(request(httpServer).get(`/pos/v1/bills/${billId}/invoice`), ownerToken)
+      expect(proforma.status).toBe(200)
+      const proformaInvoice = proforma.body as InvoiceBody
+      expect(proformaInvoice.title).toBe('Bill')
+      expect(proformaInvoice.invoiceNumber).toBeNull()
+      expect(proformaInvoice.issuedAt).toBeNull()
+      expect(proformaInvoice.subtotalMinor).toBe(25000)
+      expect(proformaInvoice.taxMinor).toBe(1250)
+      expect(proformaInvoice.totalMinor).toBe(26250)
+      expect(proformaInvoice.tenders).toEqual([])
+      expect(proformaInvoice.creditNotes).toEqual([])
 
       const finalized = await authed(request(httpServer).post(`/pos/v1/bills/${billId}/finalize`), ownerToken).send({
-        tenders: [{ method: 'cash', amountMinor: 21000 }],
+        tenders: [{ method: 'cash', amountMinor: 26250 }],
       })
       expect(finalized.status).toBe(200)
 
@@ -705,13 +720,16 @@ describe('/pos/v1 bill and settle (e2e)', () => {
         outletName: 'Indiranagar',
         outletAddress: 'A1',
       })
-      expect(invoice.lines).toEqual([{ name: expect.any(String) as string, quantity: 2, unitPriceMinor: 10000, lineTotalMinor: 20000 }])
-      expect(invoice.subtotalMinor).toBe(20000)
-      expect(invoice.taxMinor).toBe(1000)
+      expect(invoice.lines).toEqual([
+        { name: expect.any(String) as string, quantity: 2, unitPriceMinor: 10000, lineTotalMinor: 20000 },
+        { name: expect.any(String) as string, quantity: 1, unitPriceMinor: 5000, lineTotalMinor: 5000 },
+      ])
+      expect(invoice.subtotalMinor).toBe(25000)
+      expect(invoice.taxMinor).toBe(1250)
       expect(invoice.taxBreakdown.reduce((sum, l) => sum + l.amountMinor, 0)).toBe(invoice.taxMinor)
-      expect(invoice.totalMinor).toBe(21000)
+      expect(invoice.totalMinor).toBe(26250)
       expect(invoice.pricesIncludeTax).toBe(false)
-      expect(invoice.tenders).toEqual([{ id: expect.any(String) as string, method: 'cash', amountMinor: 21000, createdAt: expect.any(String) as string }])
+      expect(invoice.tenders).toEqual([{ id: expect.any(String) as string, method: 'cash', amountMinor: 26250, createdAt: expect.any(String) as string }])
       expect(invoice.creditNotes).toEqual([])
       expect(invoice.notes).toEqual([])
     })

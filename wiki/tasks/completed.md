@@ -1,5 +1,24 @@
 # Completed
 
+- **2026-09-09** - Pro-forma invoice for an open bill, issue #125:
+  `buildInvoiceView` (`src/pos/bills/bill-core.ts`) no longer 409s
+  `not_finalized` on a still-`open` bill - it first refreshes the bill's
+  totals from the order's current lines (`refreshOpenBillTotals`, issue
+  #123) and then returns the same `InvoiceView` with `status: "open"`,
+  `invoiceNumber`/`issuedAt` both `null`, `tenders: []` and `creditNotes: []`,
+  and `title: "Bill"` regardless of country; a finalized bill's behaviour
+  (`"Invoice"`/`"Tax Invoice"`/`"Receipt"` title, real `invoiceNumber`,
+  tenders) is unchanged. `InvoiceView` gains `status: BillStatus` and
+  `invoiceNumber`/`issuedAt` are now `string | null`
+  (`src/pos/bills/bills.dtos.ts`). This applies to the POS realm's `GET
+  /pos/v1/bills/:id/invoice` only - the guest realm's `getInvoice`
+  (`src/guest/bills/bills.service.ts`) still gates on `status === 'finalized'`
+  itself (409 `not_finalized`, unchanged) since a guest only ever pays
+  through `pay-all`/`payShare` and has no pro-forma use for this endpoint.
+  Covered in `test/pos-bills.e2e-spec.ts`'s "GET .../invoice" describe block.
+  See `wiki/features/pos-cashier-waiter.md`'s "Print bill before payment"
+  note in the invoice section.
+
 - **2026-09-09** - GST applicable + configurable rate for issue #121:
   `TenantTaxRegistration` gains a nullable `gstRatePercent`
   (`gst_rate_percent NUMERIC(5,2)`, migration

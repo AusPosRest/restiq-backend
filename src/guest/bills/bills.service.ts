@@ -127,6 +127,12 @@ export class GuestBillsService {
    * payShare/payAll below (loadBill by id, then confirm the bill's order
    * belongs to this guest's own session), not getBill's orderId-scoped
    * lookup, since the invoice is addressed by billId like those two.
+   *
+   * Issue #125: buildInvoiceView itself now serves a pro-forma view for an
+   * open bill (staff use this for a "print bill before payment" pro-forma),
+   * but a guest still only pays through pay-all/payShare below and has no
+   * pro-forma use for this endpoint - kept gated on 'finalized' here, at the
+   * caller, rather than in buildInvoiceView.
    */
   async getInvoice(guest: GuestPrincipal, billId: string): Promise<InvoiceView> {
     const plane = this.plane()
@@ -134,6 +140,9 @@ export class GuestBillsService {
       await setTenantContext(tx, guest.tenantId)
       const bill = await loadBill(tx, guest.tenantId, billId)
       await loadOrderForSession(tx, guest.tenantId, guest.sessionId, bill.orderId)
+      if (bill.status !== 'finalized') {
+        throw new ConflictException({ code: 'not_finalized', message: 'This bill has not been finalized yet' })
+      }
       return buildInvoiceView(tx, guest.tenantId, billId)
     })
   }

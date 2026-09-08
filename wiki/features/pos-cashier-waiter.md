@@ -791,7 +791,8 @@ against a real Postgres test DB)
   POST /pos/v1/orders/:orderId/bill          -> 201 BillView (empty body), first call for this order
                                               -> 200 BillView, every later call for this order (idempotent - #98)
   GET  /pos/v1/bills/:id                     -> 200 BillView
-  GET  /pos/v1/bills/:id/invoice             -> 200 InvoiceView, or 409 not_finalized if the bill is still open
+  GET  /pos/v1/bills/:id/invoice             -> 200 InvoiceView (a pro-forma "Bill" if still open - issue #125, the
+                                                 real invoice/tax invoice/receipt once finalized)
   POST /pos/v1/bills/:id/finalize            -> 200 BillView
     body: { discountMinor?, discountReason?, managerPin?,
             tenders: [{ method: "cash"|"upi_manual", amountMinor }] }
@@ -799,22 +800,38 @@ against a real Postgres test DB)
   // above) and `tenders: TenderView[]` - never persisted as its own column.
   ```
 - **`GET /pos/v1/bills/:id/invoice` (issue #103) - a read-only, customer-
-  facing projection of an already-finalized Bill, built fresh on every call
-  (never itself persisted).** Same auth/ownership as `GET /pos/v1/bills/:id`
-  (owner-unrestricted, like that endpoint - unlike `create`). `409
-  not_finalized` against a still-`open` bill (its tax breakdown is
-  provisional and it carries no `billNumber`/`finalizedAt` yet, both of
-  which this view is built around); `404` across tenants, same as every
-  other bill read. Also exposed, unchanged in shape, at guest realm `GET
-  /guest/v1/bills/:id/invoice` (ownership check: the bill's order must
-  belong to the calling guest's own session, the same rule `payShare`/
-  `payAll` already use).
+  facing projection of a Bill, built fresh on every call (never itself
+  persisted).** Same auth/ownership as `GET /pos/v1/bills/:id`
+  (owner-unrestricted, like that endpoint - unlike `create`). `404` across
+  tenants, same as every other bill read. Also exposed, unchanged in shape,
+  at guest realm `GET /guest/v1/bills/:id/invoice` (ownership check: the
+  bill's order must belong to the calling guest's own session, the same
+  rule `payShare`/`payAll` already use) - **but the guest realm still gates
+  this endpoint on `finalized` itself** (409 `not_finalized`, unchanged from
+  issue #103): a guest pays through `pay-all`/`payShare`, never sees a
+  pro-forma bill.
+
+  **"Print bill before payment" (issue #125):** on the POS realm only, this
+  endpoint now also serves a still-`open` bill, so a waiter can print/show a
+  pro-forma bill before the guest pays. Totals are re-derived from the
+  order's current lines first, the same refresh `GET /pos/v1/bills/:id` does
+  (issue #123), so the pro-forma subtotal/tax reflect lines added after the
+  bill was created. On that pro-forma view: `status: "open"`, `title: "Bill"`
+  regardless of country, `invoiceNumber`/`issuedAt` both `null` (no
+  `billNumber`/`finalizedAt` exist yet), `tenders: []` (even if a guest has
+  already paid some shares pre-finalize - a pro-forma bill shows no
+  payments), `creditNotes: []` (a `CreditNote` can only exist against an
+  already-finalized bill). Once finalized, the exact same endpoint returns
+  the real invoice/tax invoice/receipt, unchanged from issue #103.
   ```
   InvoiceView {
-    invoiceNumber: string       // the gapless bill number, formatted as-is
+    status: "open" | "finalized"  // issue #125 - lets the client gate legal-document
+                                  // behaviour without parsing title text
+    invoiceNumber: string | null // the gapless bill number, formatted as-is; null pre-finalize
     title: string                // "Tax Invoice" for AU ABN sellers that are GST-registered,
-                                  // "Receipt" for unregistered AU tenants, "Invoice" otherwise
-    issuedAt: string             // Bill.finalizedAt
+                                  // "Receipt" for unregistered AU tenants, "Invoice" otherwise,
+                                  // "Bill" for a still-open bill's pro-forma view (issue #125)
+    issuedAt: string | null      // Bill.finalizedAt; null pre-finalize
     currency: string             // "INR" | "AUD", derived from Tenant.country
     seller: {
       legalEntityName: string
@@ -864,8 +881,11 @@ real Postgres test DB)
   tests): IN CGST/SGST splitting to `taxMinor`, IN IGST as a single line, IN
   composition scheme as zero tax with the statutory note, AU inclusive GST
   (`totalMinor === subtotalMinor`), and the invoice endpoint's exact shape -
-  409 before finalize, 200 with real tenders after, `"Tax Invoice"` title
-  for AU, the composition note carried through, and cross-tenant 404.
+  a pro-forma `"Bill"` (200, null `invoiceNumber`/`issuedAt`, empty
+  `tenders`/`creditNotes`) before finalize whose totals pick up a line added
+  after bill creation (issue #125), 200 with real tenders after finalize,
+  `"Tax Invoice"` title for AU, the composition note carried through, and
+  cross-tenant 404.
 - A non-owner cannot create a bill (403, naming the current owner).
 - A second `POST` for the same order returns the same Bill idempotently
   (200, same id, no second row) - see issue #98's dedicated test.

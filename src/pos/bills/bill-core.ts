@@ -394,15 +394,21 @@ function currencyForCountry(country: TaxCountry): string {
  * seller detail (legalEntityName/registrationNumber/fssaiLicense, outlet
  * name/address) - the seller's own registered details are a live legal fact,
  * unlike the tax breakdown, which is frozen at bill-creation time (see
- * StoredTaxBreakdown's comment). 409 not_finalized on a still-open bill: its
- * tax breakdown is provisional and it carries no billNumber/finalizedAt yet,
- * both of which this view requires.
+ * StoredTaxBreakdown's comment).
+ *
+ * Issue #125: also servable pre-finalize as a pro-forma "Bill" - the caller
+ * decides whether an open bill should 404/409 instead (see e.g.
+ * guest/bills/bills.service.ts's getInvoice, which still gates guests on
+ * 'finalized' itself); this function no longer gates on status. An open
+ * bill's totals are refreshed the same way GET .../bills/:id does (issue
+ * #123) so the pro-forma subtotal/tax reflect the order's current lines, and
+ * it's rendered with no invoiceNumber/issuedAt/tenders yet (those don't
+ * exist until finalize) - a guest's partial pre-finalize tenders included in
+ * this figure would look like a paid pro-forma bill, which it isn't.
  */
 export async function buildInvoiceView(tx: Tx, tenantId: string, billId: string): Promise<InvoiceView> {
-  const bill = await loadBill(tx, tenantId, billId)
-  if (bill.status !== 'finalized' || !bill.billNumber || !bill.finalizedAt) {
-    throw new ConflictException({ code: 'not_finalized', message: 'This bill has not been finalized yet' })
-  }
+  const bill = await refreshOpenBillTotals(tx, await loadBill(tx, tenantId, billId))
+  const isFinalized = bill.status === 'finalized'
 
   const [orderLines, outlet, taxContext, creditNotes] = await Promise.all([
     tx.orderLine.findMany({ where: { orderId: bill.orderId }, include: { item: true, modifiers: true }, orderBy: { createdAt: 'asc' } }),
@@ -432,9 +438,10 @@ export async function buildInvoiceView(tx: Tx, tenantId: string, billId: string)
   const discountMinor = bill.discountMinor ?? 0n
 
   return {
-    invoiceNumber: String(bill.billNumber),
-    title: taxContext.country === 'AU' ? (taxContext.gstRegistered ? 'Tax Invoice' : 'Receipt') : 'Invoice',
-    issuedAt: bill.finalizedAt.toISOString(),
+    status: bill.status,
+    invoiceNumber: isFinalized ? String(bill.billNumber) : null,
+    title: isFinalized ? (taxContext.country === 'AU' ? (taxContext.gstRegistered ? 'Tax Invoice' : 'Receipt') : 'Invoice') : 'Bill',
+    issuedAt: isFinalized ? bill.finalizedAt!.toISOString() : null,
     currency: currencyForCountry(taxContext.country),
     seller: {
       legalEntityName: taxContext.legalEntityName ?? '',
@@ -455,7 +462,7 @@ export async function buildInvoiceView(tx: Tx, tenantId: string, billId: string)
     taxMinor: Number(bill.taxMinor),
     totalMinor: Number(computeTotalMinor(bill.subtotalMinor, bill.taxMinor, discountMinor, bill.pricesIncludeTax)),
     pricesIncludeTax: bill.pricesIncludeTax,
-    tenders: bill.tenders.map(toTenderView),
+    tenders: isFinalized ? bill.tenders.map(toTenderView) : [],
     creditNotes: creditNoteViews,
     notes,
   }

@@ -138,12 +138,10 @@ export interface CreditNoteView {
 }
 
 // issue #103: GET .../bills/:id/invoice - a read-only, customer-facing
-// projection of an already-finalized Bill (never itself persisted; built
-// fresh from the Bill's own snapshot plus the order's lines and the
-// tenant's tax registration). 409 not_finalized before finalize - an open
-// Bill's tax breakdown is not yet the final one (see createOrGetBillRecord)
-// and it carries no billNumber/finalizedAt yet, both of which this view is
-// built around.
+// projection of a Bill (never itself persisted; built fresh from the Bill's
+// own snapshot plus the order's lines and the tenant's tax registration).
+// issue #125: also servable pre-finalize as a pro-forma "Bill" - see
+// bill-core.ts's buildInvoiceView for what's null/empty on that path.
 export interface InvoiceLineView {
   name: string
   quantity: number
@@ -173,13 +171,20 @@ export interface InvoiceCreditNoteView {
 }
 
 export interface InvoiceView {
+  // issue #125: 'open' for a still-open bill's pro-forma view, 'finalized'
+  // once billed - lets the client gate legal-document behaviour (e.g.
+  // printing as a final receipt) without parsing title text.
+  status: BillStatus
   // The gapless bill number, formatted as-is (no leading zeros or prefix
-  // invented here - a future receipt-template story owns any of that).
-  invoiceNumber: string
+  // invented here - a future receipt-template story owns any of that). Null
+  // on the pro-forma view - an open bill has none yet.
+  invoiceNumber: string | null
   // "Tax Invoice" for an AU/ABN seller (AU's GST law requires the literal
-  // phrase on a compliant tax invoice), "Invoice" otherwise.
+  // phrase on a compliant tax invoice), "Invoice" otherwise; "Bill" for an
+  // open bill's pro-forma view, regardless of country (issue #125).
   title: string
-  issuedAt: string
+  // Null on the pro-forma view - an open bill has no finalizedAt yet.
+  issuedAt: string | null
   currency: string
   seller: InvoiceSellerView
   footerMessage: string | null
@@ -191,6 +196,8 @@ export interface InvoiceView {
   taxMinor: number
   totalMinor: number
   pricesIncludeTax: boolean
+  // Empty on the pro-forma view even if a guest has partially paid shares
+  // pre-finalize (issue #125) - a pro-forma bill shows no payments.
   tenders: TenderView[]
   creditNotes: InvoiceCreditNoteView[]
   notes: string[]
