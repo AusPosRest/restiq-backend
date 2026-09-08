@@ -33,12 +33,12 @@
 // concrete default threshold value (still an open question there); this
 // story picks 20% of the bill's subtotal, the example the spec's own memlog
 // floated ("any discount over 20%") - see DISCOUNT_THRESHOLD_FRACTION.
-import { BadRequestException, ConflictException, Injectable } from '@nestjs/common'
+import { BadRequestException, ConflictException, ForbiddenException, Injectable, NotFoundException } from '@nestjs/common'
 import { ManagerApproval, ManagerAuthService, PosPrincipal, RegionRegistryService, uuidv7 } from '../../platform'
 import { setTenantContext } from '../tenant-context'
 import { assertOwner, loadOrder } from '../orders/orders.service'
 import { buildInvoiceView, commitFinalize, createOrGetBillRecord, createTenderRecord, loadBill, refreshOpenBillTotals, toBillView } from './bill-core'
-import { BillView, CreditNoteLineView, CreditNoteView, FinalizeBillDto, InvoiceView, RefundBillDto } from './bills.dtos'
+import { BillView, CreditNoteLineView, CreditNoteView, FinalizeBillDto, InvoiceView, PrintJobView, RefundBillDto } from './bills.dtos'
 import type { Prisma } from '../../generated/prisma/client'
 
 // SPEC.md's Assumptions section defers the actual discount-above-threshold
@@ -134,6 +134,46 @@ export class BillsService {
     return plane.$transaction(async (tx) => {
       await setTenantContext(tx, staff.tenantId)
       return buildInvoiceView(tx, staff.tenantId, billId)
+    })
+  }
+
+  // --- Simulated printer spool (issue #127). The web's /pos/printer screen
+  // polls listPendingPrintJobs and acks each rendered job via markPrinted.
+
+  /** POST .../bills/:id/print - snapshots the bill's current InvoiceView into a spooled job for the outlet's printer device. */
+  async printBill(staff: PosPrincipal, billId: string): Promise<PrintJobView> {
+    const plane = this.plane()
+    return plane.$transaction(async (tx) => {
+      await setTenantContext(tx, staff.tenantId)
+      const bill = await loadBill(tx, staff.tenantId, billId)
+      const payload = await buildInvoiceView(tx, staff.tenantId, billId)
+      const job = await tx.printJob.create({
+        data: { id: uuidv7(), tenantId: staff.tenantId, outletId: bill.outletId, billId, payload: payload as unknown as Prisma.InputJsonValue },
+      })
+      return toPrintJobView(job)
+    })
+  }
+
+  /** GET .../outlets/:outletId/print-jobs - unprinted jobs, oldest first. Staff only see their own outlet's spool. */
+  async listPendingPrintJobs(staff: PosPrincipal, outletId: string): Promise<PrintJobView[]> {
+    if (outletId !== staff.outletId) throw new ForbiddenException({ code: 'outlet_mismatch', message: 'Not your outlet' })
+    const plane = this.plane()
+    return plane.$transaction(async (tx) => {
+      await setTenantContext(tx, staff.tenantId)
+      const jobs = await tx.printJob.findMany({ where: { tenantId: staff.tenantId, outletId, printedAt: null }, orderBy: { createdAt: 'asc' } })
+      return jobs.map(toPrintJobView)
+    })
+  }
+
+  /** POST .../print-jobs/:id/printed - idempotent: a second ack returns the job unchanged. */
+  async markPrinted(staff: PosPrincipal, jobId: string): Promise<PrintJobView> {
+    const plane = this.plane()
+    return plane.$transaction(async (tx) => {
+      await setTenantContext(tx, staff.tenantId)
+      await tx.printJob.updateMany({ where: { id: jobId, tenantId: staff.tenantId, printedAt: null }, data: { printedAt: new Date() } })
+      const job = await tx.printJob.findFirst({ where: { id: jobId, tenantId: staff.tenantId } })
+      if (!job) throw new NotFoundException({ code: 'not_found', message: 'No such print job' })
+      return toPrintJobView(job)
     })
   }
 
@@ -304,4 +344,8 @@ export class BillsService {
       return toCreditNoteView(created, bill.pricesIncludeTax)
     })
   }
+}
+
+function toPrintJobView(job: { id: string; billId: string; payload: unknown; createdAt: Date; printedAt: Date | null }): PrintJobView {
+  return { id: job.id, billId: job.billId, payload: job.payload as InvoiceView, createdAt: job.createdAt.toISOString(), printedAt: job.printedAt?.toISOString() ?? null }
 }

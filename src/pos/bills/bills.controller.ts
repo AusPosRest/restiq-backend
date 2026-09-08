@@ -2,7 +2,7 @@ import { Body, Controller, Get, HttpCode, Param, Post, Res } from '@nestjs/commo
 import type { Response } from 'express'
 import { CurrentStaff, PosPrincipal } from '../../platform'
 import { BillsService } from './bills.service'
-import { BillView, CreditNoteView, FinalizeBillDto, InvoiceView, RefundBillDto } from './bills.dtos'
+import { BillView, CreditNoteView, FinalizeBillDto, InvoiceView, PrintJobView, RefundBillDto } from './bills.dtos'
 
 @Controller('pos/v1')
 export class PosBillsController {
@@ -40,5 +40,24 @@ export class PosBillsController {
   @HttpCode(201)
   refund(@CurrentStaff() staff: PosPrincipal, @Param('id') id: string, @Body() dto: RefundBillDto): Promise<CreditNoteView> {
     return this.bills.refund(staff, id, dto)
+  }
+
+  // Simulated printer spool (issue #127). Same owner-unrestricted auth as
+  // getInvoice - any staff member at the outlet can send a bill to print.
+  @Post('bills/:id/print')
+  @HttpCode(201)
+  print(@CurrentStaff() staff: PosPrincipal, @Param('id') id: string): Promise<PrintJobView> {
+    return this.bills.printBill(staff, id)
+  }
+
+  @Get('outlets/:outletId/print-jobs')
+  listPrintJobs(@CurrentStaff() staff: PosPrincipal, @Param('outletId') outletId: string): Promise<PrintJobView[]> {
+    return this.bills.listPendingPrintJobs(staff, outletId)
+  }
+
+  @Post('print-jobs/:id/printed')
+  @HttpCode(200)
+  markPrinted(@CurrentStaff() staff: PosPrincipal, @Param('id') id: string): Promise<PrintJobView> {
+    return this.bills.markPrinted(staff, id)
   }
 }

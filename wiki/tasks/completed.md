@@ -1,5 +1,15 @@
 # Completed
 
+- **2026-09-09** - Print-job spool + `printer` DeviceType, issue #127 (backend half of
+  restiq-web#172's simulated receipt printer): `DeviceType`/`DEVICE_TYPES` gain `printer`;
+  new `print_jobs` table (`PrintJob` model, tenant/outlet scoped, RLS mirroring `bill_shares`,
+  cascades with its bill) holding an `InvoiceView` snapshot as `payload`. Three POS-realm
+  routes on `PosBillsController`: `POST bills/:id/print` (201, snapshots via
+  `buildInvoiceView` so a later line change does not alter what was sent),
+  `GET outlets/:outletId/print-jobs` (unprinted, oldest first, 403 `outlet_mismatch` for
+  another outlet), `POST print-jobs/:id/printed` (idempotent, 404 unknown). One e2e case in
+  `pos-bills.e2e-spec.ts` covers the whole lifecycle; typecheck/lint/e2e clean.
+
 - **2026-09-09** - Pro-forma invoice for an open bill, issue #125:
   `buildInvoiceView` (`src/pos/bills/bill-core.ts`) no longer 409s
   `not_finalized` on a still-`open` bill - it first refreshes the bill's
