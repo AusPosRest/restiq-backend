@@ -257,6 +257,37 @@ describe('/pos/v1 QSR counter and token mode (e2e)', () => {
   })
 
   describe('the full counter-service flow, composed over the real order-line and bill endpoints', () => {
+    it('recomputes an open bill created before any lines were added (issue #123)', async () => {
+      const tenantId = await createTenant(prisma)
+      const outletId = await createOutlet(prisma, tenantId)
+      const staff = await createStaff(prisma, tenantId, outletId)
+      const itemId = await createItemWithPrice(prisma, tenantId, 15000)
+      const created = await authed(request(httpServer).post(`/pos/v1/outlets/${outletId}/counter-orders`), staff.token).send()
+      const order = created.body as OrderBody
+
+      // Counter mode opens the bill immediately, on an empty order.
+      const emptyBill = await authed(request(httpServer).post(`/pos/v1/orders/${order.id}/bill`), staff.token).send()
+      expect(emptyBill.status).toBe(201)
+      expect((emptyBill.body as BillBody).subtotalMinor).toBe(0)
+
+      await authed(request(httpServer).post(`/pos/v1/orders/${order.id}/lines`), staff.token).send({ itemId, quantity: 2 })
+
+      const again = await authed(request(httpServer).post(`/pos/v1/orders/${order.id}/bill`), staff.token).send()
+      expect(again.status).toBe(200)
+      expect((again.body as BillBody).id).toBe((emptyBill.body as BillBody).id)
+      expect((again.body as BillBody).subtotalMinor).toBe(30000)
+      expect((again.body as BillBody).totalMinor).toBeGreaterThan(30000)
+
+      const fetched = await authed(request(httpServer).get(`/pos/v1/bills/${(again.body as BillBody).id}`), staff.token)
+      expect((fetched.body as BillBody).subtotalMinor).toBe(30000)
+
+      const finalized = await authed(request(httpServer).post(`/pos/v1/bills/${(again.body as BillBody).id}/finalize`), staff.token).send({
+        tenders: [{ method: 'cash', amountMinor: (again.body as BillBody).totalMinor }],
+      })
+      expect(finalized.status).toBe(200)
+      expect((finalized.body as BillBody).subtotalMinor).toBe(30000)
+    })
+
     it('rings up and settles a counter order in one continuous sequence: create -> add lines -> bill -> finalize', async () => {
       const tenantId = await createTenant(prisma)
       const outletId = await createOutlet(prisma, tenantId)

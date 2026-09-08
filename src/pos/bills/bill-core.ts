@@ -19,7 +19,7 @@ import { BadRequestException, ConflictException, NotFoundException } from '@nest
 import type { Prisma } from '../../generated/prisma/client'
 import { uuidv7 } from '../../platform'
 import { BillView, InvoiceCreditNoteView, InvoiceLineView, InvoiceView, TaxBreakdownLineView, TenderView } from './bills.dtos'
-import { computeTax, TaxBreakdownLine, TaxCountry } from './tax'
+import { computeTax, TaxBreakdownLine, TaxCountry, TaxResult } from './tax'
 
 type Tx = Prisma.TransactionClient
 
@@ -214,18 +214,9 @@ export interface CreateOrGetBillResult {
  * comment) so it calls this directly after its own session/order-active
  * check.
  */
-export async function createOrGetBillRecord(tx: Tx, params: CreateBillParams): Promise<CreateOrGetBillResult> {
-  const existing = await tx.bill.findUnique({ where: { orderId: params.orderId }, include: BILL_INCLUDE })
-  if (existing) {
-    return { bill: existing, created: false }
-  }
-
-  if (params.orderClosed) {
-    throw new ConflictException({ code: 'conflict', message: 'This order is already closed' })
-  }
-
-  const subtotalMinor = await computeSubtotal(tx, params.orderId)
-  const taxContext = await loadTenantTaxProfile(tx, params.tenantId)
+async function computeBillTotals(tx: Tx, tenantId: string, orderId: string): Promise<{ subtotalMinor: bigint; tax: TaxResult }> {
+  const subtotalMinor = await computeSubtotal(tx, orderId)
+  const taxContext = await loadTenantTaxProfile(tx, tenantId)
   const tax = computeTax({
     country: taxContext.country,
     taxProfile: taxContext.taxProfile,
@@ -234,6 +225,43 @@ export async function createOrGetBillRecord(tx: Tx, params: CreateBillParams): P
     gstRatePercent: taxContext.gstRatePercent,
     subtotalMinor,
   })
+  return { subtotalMinor, tax }
+}
+
+/**
+ * Counter mode creates the Bill the moment the order opens (empty, subtotal
+ * 0) and keeps adding lines afterwards, so an open Bill's stored totals are
+ * only a snapshot of the lines at creation time. Re-derive them from the
+ * current lines on every read/finalize of an open bill; a finalized bill is
+ * immutable and returned as-is.
+ */
+export async function refreshOpenBillTotals(tx: Tx, bill: BillWithTenders): Promise<BillWithTenders> {
+  if (bill.status !== 'open') return bill
+  const { subtotalMinor, tax } = await computeBillTotals(tx, bill.tenantId, bill.orderId)
+  if (subtotalMinor === bill.subtotalMinor && tax.taxMinor === bill.taxMinor) return bill
+  return tx.bill.update({
+    where: { id: bill.id },
+    data: {
+      subtotalMinor,
+      taxMinor: tax.taxMinor,
+      taxBreakdown: toStoredTaxBreakdown(tax.breakdown, tax.notes) as unknown as Prisma.InputJsonValue,
+      pricesIncludeTax: tax.pricesIncludeTax,
+    },
+    include: BILL_INCLUDE,
+  })
+}
+
+export async function createOrGetBillRecord(tx: Tx, params: CreateBillParams): Promise<CreateOrGetBillResult> {
+  const existing = await tx.bill.findUnique({ where: { orderId: params.orderId }, include: BILL_INCLUDE })
+  if (existing) {
+    return { bill: await refreshOpenBillTotals(tx, existing), created: false }
+  }
+
+  if (params.orderClosed) {
+    throw new ConflictException({ code: 'conflict', message: 'This order is already closed' })
+  }
+
+  const { subtotalMinor, tax } = await computeBillTotals(tx, params.tenantId, params.orderId)
 
   const savepoint = `sp_bill_${uuidv7().replace(/-/g, '')}`
   await tx.$executeRawUnsafe(`SAVEPOINT "${savepoint}"`)
