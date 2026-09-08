@@ -24,7 +24,7 @@ export class PosBillsController {
     return this.bills.getBill(staff, id)
   }
 
-  // issue #103: 409 not_finalized before finalize (bill-core.ts's buildInvoiceView) - same auth/ownership as getOne above (owner-unrestricted, unlike create).
+  // issue #125: 200s with a pro-forma view before finalize too (bill-core.ts's buildInvoiceView) - same auth/ownership as getOne above (owner-unrestricted, unlike create).
   @Get('bills/:id/invoice')
   getInvoice(@CurrentStaff() staff: PosPrincipal, @Param('id') id: string): Promise<InvoiceView> {
     return this.bills.getInvoice(staff, id)

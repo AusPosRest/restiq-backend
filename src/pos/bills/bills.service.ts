@@ -128,7 +128,7 @@ export class BillsService {
     })
   }
 
-  /** GET .../bills/:id/invoice - see bill-core.ts's buildInvoiceView for the 404/409 rules. */
+  /** GET .../bills/:id/invoice - see bill-core.ts's buildInvoiceView for the 404 rule and the open/finalized pro-forma split (issue #125). */
   async getInvoice(staff: PosPrincipal, billId: string): Promise<InvoiceView> {
     const plane = this.plane()
     return plane.$transaction(async (tx) => {
