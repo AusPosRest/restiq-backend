@@ -37,7 +37,7 @@ import { BadRequestException, ConflictException, Injectable } from '@nestjs/comm
 import { ManagerApproval, ManagerAuthService, PosPrincipal, RegionRegistryService, uuidv7 } from '../../platform'
 import { setTenantContext } from '../tenant-context'
 import { assertOwner, loadOrder } from '../orders/orders.service'
-import { buildInvoiceView, commitFinalize, createOrGetBillRecord, createTenderRecord, loadBill, toBillView } from './bill-core'
+import { buildInvoiceView, commitFinalize, createOrGetBillRecord, createTenderRecord, loadBill, refreshOpenBillTotals, toBillView } from './bill-core'
 import { BillView, CreditNoteLineView, CreditNoteView, FinalizeBillDto, InvoiceView, RefundBillDto } from './bills.dtos'
 import type { Prisma } from '../../generated/prisma/client'
 
@@ -123,7 +123,7 @@ export class BillsService {
     const plane = this.plane()
     return plane.$transaction(async (tx) => {
       await setTenantContext(tx, staff.tenantId)
-      const bill = await loadBill(tx, staff.tenantId, billId)
+      const bill = await refreshOpenBillTotals(tx, await loadBill(tx, staff.tenantId, billId))
       return toBillView(bill)
     })
   }
@@ -154,7 +154,7 @@ export class BillsService {
     const plane = this.plane()
     return plane.$transaction(async (tx) => {
       await setTenantContext(tx, staff.tenantId)
-      const bill = await loadBill(tx, staff.tenantId, billId)
+      const bill = await refreshOpenBillTotals(tx, await loadBill(tx, staff.tenantId, billId))
       if (bill.status === 'finalized') {
         throw new ConflictException({ code: 'already_finalized', message: 'This bill has already been finalised' })
       }
@@ -208,7 +208,7 @@ export class BillsService {
     const plane = this.plane()
     return plane.$transaction(async (tx) => {
       await setTenantContext(tx, staff.tenantId)
-      const bill = await loadBill(tx, staff.tenantId, billId)
+      const bill = await refreshOpenBillTotals(tx, await loadBill(tx, staff.tenantId, billId))
       if (bill.status !== 'finalized') {
         throw new ConflictException({ code: 'bill_not_finalized', message: 'Only a finalized bill can be refunded' })
       }
