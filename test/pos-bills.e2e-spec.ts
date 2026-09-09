@@ -772,7 +772,7 @@ describe('/pos/v1 bill and settle (e2e)', () => {
       expect(invoice.taxBreakdown.reduce((sum, l) => sum + l.amountMinor, 0)).toBe(invoice.taxMinor)
       expect(invoice.totalMinor).toBe(26250)
       expect(invoice.pricesIncludeTax).toBe(false)
-      expect(invoice.tenders).toEqual([{ id: expect.any(String) as string, method: 'cash', amountMinor: 26250, createdAt: expect.any(String) as string }])
+      expect(invoice.tenders).toEqual([{ id: expect.any(String) as string, method: 'cash', amountMinor: 26250, paymentIntentId: null, riskAcknowledged: false, createdAt: expect.any(String) as string }])
       expect(invoice.creditNotes).toEqual([])
       expect(invoice.notes).toEqual([])
     })

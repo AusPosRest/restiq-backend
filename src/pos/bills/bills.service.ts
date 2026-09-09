@@ -214,7 +214,13 @@ export class BillsService {
       }
 
       for (const tender of dto.tenders) {
-        await createTenderRecord(tx, { tenantId: staff.tenantId, billId, method: tender.method, amountMinor: BigInt(tender.amountMinor) })
+        await createTenderRecord(tx, {
+          tenantId: staff.tenantId,
+          billId,
+          method: tender.method,
+          amountMinor: BigInt(tender.amountMinor),
+          riskAcknowledged: tender.riskAcknowledged,
+        })
       }
 
       const final = await commitFinalize(tx, {

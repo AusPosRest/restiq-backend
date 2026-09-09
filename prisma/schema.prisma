@@ -166,6 +166,7 @@ model Tenant {
   bills               Bill[]
   printJobs           PrintJob[]
   tenders             Tender[]
+  paymentIntents      PaymentIntent[]
   billShares          BillShare[]
   billNumberCounters  BillNumberCounter[]
   creditNotes         CreditNote[]
@@ -274,6 +275,7 @@ model Outlet {
   shifts              Shift[]
   bills               Bill[]
   printJobs           PrintJob[]
+  paymentIntents      PaymentIntent[]
   billNumberCounter   BillNumberCounter?
   tokenNumberCounter  TokenNumberCounter?
   tableSessions       TableSession[]
@@ -704,6 +706,7 @@ model StaffUser {
   billsFinalized    Bill[]         @relation("BillFinalizedBy")
   creditNotesCreated  CreditNote[] @relation("CreditNoteCreatedBy")
   creditNotesApproved CreditNote[] @relation("CreditNoteApprovedBy")
+  paymentIntentsCreated PaymentIntent[]
 
   @@index([tenantId])
   @@map("staff_users")
@@ -1026,6 +1029,9 @@ enum DeviceType {
   // A simulated receipt printer (issue #127): a browser tab that drains the
   // outlet's print_jobs spool and renders each job as a receipt.
   printer
+  // A simulated card terminal (issue #130): a browser tab that polls the
+  // outlet's pending payment_intents and approves or declines each one.
+  terminal
 }
 
 enum DeviceRole {
@@ -1471,6 +1477,7 @@ model Bill {
   // pos-created Bill, which settles as a single Tender list with no
   // per-guest split. See BillShare below.
   shares           BillShare[]
+  paymentIntents   PaymentIntent[]
 
   // Gapless numbering's uniqueness guarantee. A plain (non-partial) unique
   // index is enough here - Postgres treats every NULL as distinct from every
@@ -1507,9 +1514,17 @@ model PrintJob {
   @@map("print_jobs")
 }
 
+// cash / upi_manual are cashier-asserted; the four electronic methods are
+// provider-confirmed and can only exist with a payment_intent_id (issue
+// #130, epic #129 / ADR-001) - enforced by the tenders_electronic_needs_intent
+// CHECK in the migration, which Prisma's DSL cannot express.
 enum TenderMethod {
   cash
   upi_manual
+  upi_intent
+  upi_qr
+  card_online
+  card_terminal
 }
 
 // Multiple tenders per bill = split payment (SPEC CAP-7's N-way/amount split,
@@ -1522,10 +1537,19 @@ model Tender {
   billId      String       @map("bill_id") @db.Uuid
   method      TenderMethod
   amountMinor BigInt       @map("amount_minor")
+  // Set only by confirmIntent (src/pos/payments/intent-core.ts) - the one
+  // code path that turns a provider-confirmed intent into money on the
+  // bill. Null for cash / upi_manual, by CHECK constraint.
+  paymentIntentId  String?  @unique @map("payment_intent_id") @db.Uuid
+  // FR-52: a manual UPI tender is the cashier's own verification; true once
+  // the risk-acknowledgement checkbox lands (web W4). Stored, not yet
+  // enforced (B5 makes it 400 risk_ack_required).
+  riskAcknowledged Boolean  @default(false) @map("risk_acknowledged")
   createdAt   DateTime     @default(now()) @map("created_at") @db.Timestamptz(6)
 
-  tenant Tenant      @relation(fields: [tenantId], references: [id])
-  bill   Bill        @relation(fields: [billId], references: [id])
+  tenant        Tenant         @relation(fields: [tenantId], references: [id])
+  bill          Bill           @relation(fields: [billId], references: [id])
+  paymentIntent PaymentIntent? @relation(fields: [paymentIntentId], references: [id])
   // qr-self-order/CAP-5 (issue #80): the BillShare(s) this Tender settles -
   // one for a per-guest share payment, or every outstanding share at once for
   // the one-payment ("pay-all") mode. Empty for every pos-created Tender.
@@ -1534,6 +1558,81 @@ model Tender {
   @@index([tenantId])
   @@index([billId])
   @@map("tenders")
+}
+
+// ---------------------------------------------------------------------------
+// Payments (epic #129, first slice issue #130 - the simulated card terminal).
+// The pre-tender row (ADR-001 in restiq-web/docs/DECISIONS.md): an
+// electronic payment is created here first, and a Tender is inserted ONLY
+// inside the transaction that moves this row to `succeeded` - so a Tender
+// always means money actually moved. Status is the one mutable column set
+// (plus the timestamps that record it); amounts never change. One ACTIVE
+// intent per target, by the partial unique index payment_intents_one_active
+// in the migration (bill_id + share_id-or-nil-uuid WHERE status IN
+// ('created','pending')). Full design: restiq-web/wiki/features/payments.md.
+// ---------------------------------------------------------------------------
+
+enum PaymentRail {
+  upi_intent
+  upi_qr
+  card_online
+  card_terminal
+}
+
+enum PaymentIntentStatus {
+  created
+  pending
+  succeeded
+  failed
+  expired
+  cancelled
+}
+
+enum PaymentProviderKind {
+  simulated
+  razorpay
+}
+
+model PaymentIntent {
+  id               String              @id @default(uuid(7)) @db.Uuid
+  tenantId         String              @map("tenant_id") @db.Uuid
+  outletId         String              @map("outlet_id") @db.Uuid
+  billId           String              @map("bill_id") @db.Uuid
+  // A guest's BillShare for a per-guest intent (epic #129 B4); null for a
+  // whole-bill intent. Plain column for now - the relation lands with B4.
+  shareId          String?             @map("share_id") @db.Uuid
+  rail             PaymentRail
+  provider         PaymentProviderKind
+  amountMinor      BigInt              @map("amount_minor")
+  // 'INR' | 'AUD' from the tenant's country at creation.
+  currency         String
+  status           PaymentIntentStatus @default(created)
+  // Idempotency: a retried create with the same key returns the same row.
+  clientKey        String              @map("client_key")
+  // The provider's own id for this attempt (order id, QR id) - never a
+  // secret. Null on the simulated provider.
+  providerRef      String?             @map("provider_ref")
+  // What the browser needs to hand the payer off - `{ simulated: true }`
+  // here; a hosted-checkout or QR payload for a real provider.
+  clientPayload    Json                @map("client_payload")
+  failureReason    String?             @map("failure_reason")
+  expiresAt        DateTime            @map("expires_at") @db.Timestamptz(6)
+  succeededAt      DateTime?           @map("succeeded_at") @db.Timestamptz(6)
+  createdByStaffId String?             @map("created_by_staff_id") @db.Uuid
+  createdAt        DateTime            @default(now()) @map("created_at") @db.Timestamptz(6)
+  updatedAt        DateTime            @updatedAt @map("updated_at") @db.Timestamptz(6)
+
+  tenant         Tenant     @relation(fields: [tenantId], references: [id])
+  outlet         Outlet     @relation(fields: [outletId], references: [id])
+  bill           Bill       @relation(fields: [billId], references: [id])
+  createdByStaff StaffUser? @relation(fields: [createdByStaffId], references: [id])
+  tender         Tender?
+
+  @@unique([tenantId, clientKey])
+  @@index([tenantId])
+  @@index([billId, status])
+  @@index([outletId, status])
+  @@map("payment_intents")
 }
 
 enum BillShareStatus {

@@ -126,7 +126,14 @@ export const BILL_INCLUDE = { tenders: { orderBy: { createdAt: 'asc' as const } 
 export type BillWithTenders = Prisma.BillGetPayload<{ include: typeof BILL_INCLUDE }>
 
 function toTenderView(t: BillWithTenders['tenders'][number]): TenderView {
-  return { id: t.id, method: t.method, amountMinor: Number(t.amountMinor), createdAt: t.createdAt.toISOString() }
+  return {
+    id: t.id,
+    method: t.method,
+    amountMinor: Number(t.amountMinor),
+    paymentIntentId: t.paymentIntentId,
+    riskAcknowledged: t.riskAcknowledged,
+    createdAt: t.createdAt.toISOString(),
+  }
 }
 
 export function toBillView(bill: BillWithTenders): BillView {
@@ -297,10 +304,28 @@ export async function createOrGetBillRecord(tx: Tx, params: CreateBillParams): P
 /** Inserts one Tender row against an open Bill - a real payment (AD-14), never UPDATEd or DELETEd once written. Returns the created row (its id links a guest BillShare to the Tender that settled it). */
 export async function createTenderRecord(
   tx: Tx,
-  params: { tenantId: string; billId: string; method: BillWithTenders['tenders'][number]['method']; amountMinor: bigint },
+  params: {
+    tenantId: string
+    billId: string
+    method: BillWithTenders['tenders'][number]['method']
+    amountMinor: bigint
+    // Set only by src/pos/payments' confirmIntent (issue #130) - the DB
+    // CHECK tenders_electronic_needs_intent rejects an electronic method
+    // without it and a cash / manual one with it.
+    paymentIntentId?: string
+    riskAcknowledged?: boolean
+  },
 ): Promise<BillWithTenders['tenders'][number]> {
   return tx.tender.create({
-    data: { id: uuidv7(), tenantId: params.tenantId, billId: params.billId, method: params.method, amountMinor: params.amountMinor },
+    data: {
+      id: uuidv7(),
+      tenantId: params.tenantId,
+      billId: params.billId,
+      method: params.method,
+      amountMinor: params.amountMinor,
+      paymentIntentId: params.paymentIntentId ?? null,
+      riskAcknowledged: params.riskAcknowledged ?? false,
+    },
   })
 }
 
@@ -327,6 +352,20 @@ export async function commitFinalize(tx: Tx, params: CommitFinalizeParams): Prom
   const { bill } = params
   if (bill.status === 'finalized') {
     throw new ConflictException({ code: 'already_finalized', message: 'This bill has already been finalised' })
+  }
+
+  // Issue #130 (ADR-001): a bill cannot finalise while a payment is still
+  // waiting on a provider - the tender that intent would write is neither
+  // counted nor countable yet. An intent past its expiresAt no longer
+  // blocks (the read path will flip it to expired on its next look).
+  const pendingIntents = await tx.paymentIntent.count({
+    where: { billId: bill.id, status: { in: ['created', 'pending'] }, expiresAt: { gt: new Date() } },
+  })
+  if (pendingIntents > 0) {
+    throw new ConflictException({
+      code: 'payment_pending',
+      message: 'A payment is still waiting on the terminal - wait for it to complete or cancel it before finalising',
+    })
   }
 
   const totalMinor = computeTotalMinor(bill.subtotalMinor, bill.taxMinor, params.discountMinor ?? 0n, bill.pricesIncludeTax)
