@@ -263,7 +263,7 @@ describe('/admin/v1/outlets/:outletId/devices (e2e)', () => {
     it('rejects an unknown device type', async () => {
       const { tenantId, token } = await createOwner(prisma)
       const outletId = await createOutlet(prisma, tenantId)
-      const res = await authed(request(httpServer).post(`${devicesBase(outletId)}/enrolment-codes`), token).send({ deviceType: 'printer' })
+      const res = await authed(request(httpServer).post(`${devicesBase(outletId)}/enrolment-codes`), token).send({ deviceType: 'toaster' })
       expect(res.status).toBe(400)
     })
 
