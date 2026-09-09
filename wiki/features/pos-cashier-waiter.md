@@ -793,6 +793,10 @@ against a real Postgres test DB)
   GET  /pos/v1/bills/:id                     -> 200 BillView
   GET  /pos/v1/bills/:id/invoice             -> 200 InvoiceView (a pro-forma "Bill" if still open - issue #125, the
                                                  real invoice/tax invoice/receipt once finalized)
+  POST /pos/v1/bills/:id/print               -> 201 PrintJobView (issue #127: spools the current InvoiceView snapshot
+                                                 for the outlet's simulated `printer` device)
+  GET  /pos/v1/outlets/:outletId/print-jobs  -> 200 PrintJobView[] (unprinted, oldest first; 403 for another outlet)
+  POST /pos/v1/print-jobs/:id/printed        -> 200 PrintJobView (idempotent ack; 404 unknown)
   POST /pos/v1/bills/:id/finalize            -> 200 BillView
     body: { discountMinor?, discountReason?, managerPin?,
             tenders: [{ method: "cash"|"upi_manual", amountMinor }] }

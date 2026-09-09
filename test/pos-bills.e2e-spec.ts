@@ -93,6 +93,7 @@ async function wipe(prisma: PrismaClient): Promise<void> {
   // cascades to its own CreditNoteLine rows - deleted first so later
   // bill/order_line/staff_user deletes below never hit a live FK.
   await prisma.creditNote.deleteMany()
+  await prisma.printJob.deleteMany()
   await prisma.orderLineModifier.deleteMany()
   await prisma.ticketLine.deleteMany()
   await prisma.orderLine.deleteMany()
@@ -670,6 +671,48 @@ describe('/pos/v1 bill and settle (e2e)', () => {
       expect(bill.taxMinor).toBe(0)
       expect(bill.taxBreakdown).toEqual([])
       expect(bill.totalMinor).toBe(11000)
+    })
+  })
+
+  describe('simulated printer spool (issue #127)', () => {
+    it('spools a bill snapshot, lists it for the outlet until acked, and acks idempotently', async () => {
+      const tenantId = await createTenant(prisma)
+      await createTaxRegistration(prisma, tenantId, { taxProfile: 'India GST - CGST/SGST split', registrationType: 'gstin', legalEntityName: 'Spice Route Hospitality Pvt Ltd' })
+      const outletId = await createOutlet(prisma, tenantId)
+      const { orderId, ownerToken } = await setUpSentOrder(tenantId, outletId, 10000)
+      const created = await authed(request(httpServer).post(`/pos/v1/orders/${orderId}/bill`), ownerToken).send()
+      const billId = (created.body as BillBody).id
+
+      const printed = await authed(request(httpServer).post(`/pos/v1/bills/${billId}/print`), ownerToken).send()
+      expect(printed.status).toBe(201)
+      const job = printed.body as { id: string; billId: string; printedAt: string | null; payload: InvoiceBody }
+      expect(job.billId).toBe(billId)
+      expect(job.printedAt).toBeNull()
+      expect(job.payload.title).toBe('Bill')
+      expect(job.payload.totalMinor).toBe(21000)
+
+      // The snapshot is what was sent - a line added afterwards does not change it.
+      const itemId = await createItemWithPrice(prisma, tenantId, 5000)
+      await authed(request(httpServer).post(`/pos/v1/orders/${orderId}/lines`), ownerToken).send({ itemId, quantity: 1 })
+
+      const pending = await authed(request(httpServer).get(`/pos/v1/outlets/${outletId}/print-jobs`), ownerToken)
+      expect(pending.status).toBe(200)
+      expect((pending.body as { id: string; payload: InvoiceBody }[]).map((j) => [j.id, j.payload.totalMinor])).toEqual([[job.id, 21000]])
+
+      // Another outlet's staff cannot read this spool.
+      const otherOutletId = await createOutlet(prisma, tenantId, 'Koramangala')
+      const outsider = await createStaff(prisma, tenantId, otherOutletId, 'Ravi')
+      expect((await authed(request(httpServer).get(`/pos/v1/outlets/${outletId}/print-jobs`), outsider.token)).status).toBe(403)
+
+      const acked = await authed(request(httpServer).post(`/pos/v1/print-jobs/${job.id}/printed`), ownerToken).send()
+      expect(acked.status).toBe(200)
+      const firstPrintedAt = (acked.body as { printedAt: string | null }).printedAt
+      expect(firstPrintedAt).not.toBeNull()
+      const again = await authed(request(httpServer).post(`/pos/v1/print-jobs/${job.id}/printed`), ownerToken).send()
+      expect((again.body as { printedAt: string | null }).printedAt).toBe(firstPrintedAt)
+
+      expect((await authed(request(httpServer).get(`/pos/v1/outlets/${outletId}/print-jobs`), ownerToken)).body).toEqual([])
+      expect((await authed(request(httpServer).post(`/pos/v1/print-jobs/${uuidv7()}/printed`), ownerToken).send()).status).toBe(404)
     })
   })
 

@@ -202,3 +202,14 @@ export interface InvoiceView {
   creditNotes: InvoiceCreditNoteView[]
   notes: string[]
 }
+
+// A spooled print job for the simulated `printer` device (issue #127).
+// `payload` is the InvoiceView exactly as it stood when "Send to printer"
+// was pressed - the printer renders the snapshot, not a live re-read.
+export interface PrintJobView {
+  id: string
+  billId: string
+  payload: InvoiceView
+  createdAt: string
+  printedAt: string | null
+}

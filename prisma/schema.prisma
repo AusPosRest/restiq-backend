@@ -164,6 +164,7 @@ model Tenant {
   shifts              Shift[]
   cashMovements       CashMovement[]
   bills               Bill[]
+  printJobs           PrintJob[]
   tenders             Tender[]
   billShares          BillShare[]
   billNumberCounters  BillNumberCounter[]
@@ -272,6 +273,7 @@ model Outlet {
   orders              Order[]
   shifts              Shift[]
   bills               Bill[]
+  printJobs           PrintJob[]
   billNumberCounter   BillNumberCounter?
   tokenNumberCounter  TokenNumberCounter?
   tableSessions       TableSession[]
@@ -1021,6 +1023,9 @@ enum DeviceType {
   kds
   kiosk
   cds
+  // A simulated receipt printer (issue #127): a browser tab that drains the
+  // outlet's print_jobs spool and renders each job as a receipt.
+  printer
 }
 
 enum DeviceRole {
@@ -1457,6 +1462,7 @@ model Bill {
   order            Order        @relation(fields: [orderId], references: [id])
   createdByStaff   StaffUser?   @relation("BillCreatedBy", fields: [createdByStaffId], references: [id])
   finalizedByStaff StaffUser?   @relation("BillFinalizedBy", fields: [finalizedByStaffId], references: [id])
+  printJobs        PrintJob[]
   tenders          Tender[]
   creditNotes      CreditNote[]
   // qr-self-order/CAP-5 (issue #80): per-guest settlement breakdown - present
@@ -1475,6 +1481,30 @@ model Bill {
   @@index([tenantId])
   @@index([outletId])
   @@map("bills")
+}
+
+// Print-job spool for the simulated `printer` device (issue #127). A POS
+// "Send to printer" snapshots the bill's InvoiceView into `payload` at print
+// time - the printer renders exactly what was sent, even if the open bill's
+// lines change afterwards. Tenant/outlet scoped like bills; RLS in the
+// migration mirrors bill_shares. Cascades with its bill so test wipes and
+// bill deletes never trip over a spooled job.
+model PrintJob {
+  id        String    @id @default(uuid(7)) @db.Uuid
+  tenantId  String    @map("tenant_id") @db.Uuid
+  outletId  String    @map("outlet_id") @db.Uuid
+  billId    String    @map("bill_id") @db.Uuid
+  payload   Json
+  createdAt DateTime  @default(now()) @map("created_at") @db.Timestamptz(6)
+  printedAt DateTime? @map("printed_at") @db.Timestamptz(6)
+
+  tenant Tenant @relation(fields: [tenantId], references: [id])
+  outlet Outlet @relation(fields: [outletId], references: [id])
+  bill   Bill   @relation(fields: [billId], references: [id], onDelete: Cascade)
+
+  @@index([tenantId])
+  @@index([outletId, printedAt])
+  @@map("print_jobs")
 }
 
 enum TenderMethod {

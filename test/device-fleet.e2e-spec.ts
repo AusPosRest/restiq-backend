@@ -208,7 +208,7 @@ describe('/ops/v1/devices (e2e)', () => {
     })
 
     it('rejects an unknown device type', async () => {
-      expect((await generateCode({ deviceType: 'printer' })).status).toBe(400)
+      expect((await generateCode({ deviceType: 'toaster' })).status).toBe(400)
     })
 
     it('rejects without an ops token', async () => {

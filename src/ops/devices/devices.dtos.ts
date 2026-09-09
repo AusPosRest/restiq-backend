@@ -3,7 +3,7 @@
 // the wizard-submit pattern - the O6 render collects no reason for either).
 import { IsIn, IsInt, IsNotEmpty, IsOptional, IsString, IsUUID, Max, MaxLength, Min } from 'class-validator'
 
-export const DEVICE_TYPES = ['pos', 'kds', 'kiosk', 'cds'] as const
+export const DEVICE_TYPES = ['pos', 'kds', 'kiosk', 'cds', 'printer'] as const
 export type DeviceTypeValue = (typeof DEVICE_TYPES)[number]
 
 export const DEVICE_STATUSES = ['active', 'revoked'] as const
