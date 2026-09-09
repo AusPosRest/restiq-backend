@@ -599,6 +599,14 @@ built here, story by story.
   revoked PIN to actually stop authenticating; the e2e suite asserts the DB
   state and the argon2 hash directly instead.
 
+## Agreement - read and sign the platform agreement (issue #132)
+
+- `GET admin/v1/agreement` and `POST admin/v1/agreement/:versionId/sign`
+  (`src/admin/agreement/agreement.controller.ts`) - the owner side of the
+  versioned platform agreement. The service, data model, error codes and
+  evidence hash are documented once, in
+  [platform-console.md](platform-console.md#agreements---versioned-platform-agreement-owner-signed-issue-132-srcopsagreements).
+
 ## Integration points for story 6+ and beyond
 
 - None of CAP-4's tables are read by another CAP yet. A future POS/QR

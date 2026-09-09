@@ -8,3 +8,7 @@ export { DevicesService } from './devices/devices.service'
 export type { DeviceListItem, DeviceListResult, DeviceView, EnrollActor } from './devices/devices.service'
 export { DEVICE_TYPES } from './devices/devices.dtos'
 export type { DeviceTypeValue } from './devices/devices.dtos'
+// #132: one agreements implementation, published from /ops and signed from /admin.
+export { AgreementsService } from './agreements/agreements.service'
+export { SignAgreementDto } from './agreements/agreements.dtos'
+export type { AgreementSignatureView, OwnerAgreementView } from './agreements/agreements.dtos'

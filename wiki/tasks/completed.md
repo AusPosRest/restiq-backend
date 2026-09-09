@@ -1,5 +1,17 @@
 # Completed
 
+- **2026-09-09** - Versioned platform agreement + owner digital signature, issue #132
+  (backend half of restiq-web#192): `agreement_versions` (immutable, gap-free numbered,
+  body sha256 fixed at publish, no RLS) and `agreement_signatures` (one per tenant per
+  version, RLS mirroring `print_jobs`, typed signer name + sha256 evidence hash over
+  body/tenant/signer/timestamp). `AgreementsService` in `src/ops/agreements/` serves
+  `GET/POST ops/v1/agreements`, `GET ops/v1/agreements/:id`,
+  `GET ops/v1/tenants/:id/agreements`, and - exported AD-12 style - the admin realm's
+  `GET admin/v1/agreement` / `POST admin/v1/agreement/:versionId/sign` (409
+  `stale_version` / `already_signed`). Publish audits on the control plane with the reason;
+  signing audits on the tenant plane. `test/agreements.e2e-spec.ts` + an RLS probe case;
+  typecheck/lint clean.
+
 - **2026-09-09** - Print-job spool + `printer` DeviceType, issue #127 (backend half of
   restiq-web#172's simulated receipt printer): `DeviceType`/`DEVICE_TYPES` gain `printer`;
   new `print_jobs` table (`PrintJob` model, tenant/outlet scoped, RLS mirroring `bill_shares`,

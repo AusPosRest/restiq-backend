@@ -136,3 +136,41 @@ submit.dto.ts`) gains two optional fields alongside the existing
 See `wiki/features/tenant-admin.md`'s CAP-108 section for the
 `/admin/v1/tax-registration` GET/PUT side of the same two fields, and
 `src/pos/bills/tax.ts` for how a configured rate changes bill tax math.
+
+## Agreements - versioned platform agreement, owner-signed (issue #132, `src/ops/agreements/`)
+
+- **Intent:** the platform publishes numbered, immutable agreement versions;
+  each tenant owner signs the current one from the owner console; operators
+  see per-tenant standing (signed / pending) and the signature record.
+- **Data:** `agreement_versions` (no `tenant_id`, no RLS - every tenant reads
+  the same text; `version` unique, `body_sha256` fixed at publish) and
+  `agreement_signatures` (one row per tenant per version, RLS mirrors
+  `print_jobs`, cascades with its tenant, RESTRICT on its version). A
+  signature stores the typed `signer_name` (the signature itself), signer
+  owner id/email, `signed_at`, and `evidence_sha256` = sha256 of
+  `bodySha256 \n tenantId \n ownerId \n ownerEmail \n signerName \n signedAt`
+  - tamper-evident proof of exactly what was accepted, by whom, when. No
+  update or delete route exists for either table.
+- **Routes (ops realm):** `GET ops/v1/agreements` (newest first, with
+  `signatureCount`), `POST ops/v1/agreements` `{ title, body, reason }` → 201
+  with the next gap-free version (a `pg_advisory_xact_lock` serialises
+  concurrent publishes) and a control-plane audit row `agreement.published`
+  carrying the reason; `GET ops/v1/agreements/:id` (full body);
+  `GET ops/v1/tenants/:tenantId/agreements` → `{ current, status:
+  'signed' | 'pending' | 'no_agreement', signatures[] }`.
+- **Routes (admin realm, `src/admin/agreement/`):** `GET admin/v1/agreement`
+  → `{ current (with body) | null, signature | null, history[] }`;
+  `POST admin/v1/agreement/:versionId/sign` `{ signerName, accepted: true }`
+  → 201 `{ signature }`. `accepted` must be literally `true`; a blank name
+  is 400; signing a non-current version is 409 `stale_version`; a second
+  signature on the same version is 409 `already_signed`; an unknown version
+  is 404. Signing writes a tenant `audit_events` row `agreement.signed`.
+- **One service, two callers (AD-12):** `AgreementsService` lives in the ops
+  module and is exported for `AdminAgreementController`, the same shape as
+  `DevicesService`.
+- **Tests:** `test/agreements.e2e-spec.ts` (publish/list/audit, sign/repeat/
+  stale/new-version reopen, cross-tenant isolation, unauthenticated) and an
+  `agreement_signatures` probe case in `test/rls.e2e-spec.ts`.
+- **Not built (by design):** platform countersignature, gating go-live on a
+  signature, PDF export, third-party e-sign. The typed-name-plus-hash record
+  is the evidence; swap in a provider if a legal review asks for one.

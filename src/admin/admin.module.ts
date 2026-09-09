@@ -1,6 +1,7 @@
 import { Module } from '@nestjs/common'
 import { OpsModule } from '../ops'
 import { PlatformModule } from '../platform'
+import { AdminAgreementController } from './agreement/agreement.controller'
 import { AdminAuthController } from './auth.controller'
 import { AdminAuthService } from './auth.service'
 import { AdminBrandingController } from './branding/branding.controller'
@@ -56,6 +57,7 @@ import { StaffService } from './staff/staff.service'
     AdminRolesController,
     AdminReportsController,
     AdminTaxController,
+    AdminAgreementController,
   ],
   providers: [
     AdminAuthService,
