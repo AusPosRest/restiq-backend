@@ -2,9 +2,12 @@
 // request body - they come from the signed-in pos session, same posture as
 // every other pos DTO (AD-5).
 import { Type } from 'class-transformer'
-import { ArrayMinSize, IsArray, IsIn, IsInt, IsOptional, IsString, IsUUID, Min, MinLength, ValidateNested } from 'class-validator'
+import { ArrayMinSize, IsArray, IsBoolean, IsIn, IsInt, IsOptional, IsString, IsUUID, Min, MinLength, ValidateNested } from 'class-validator'
 import type { BillStatus, TenderMethod } from '../../generated/prisma/client'
 
+// Only the cashier-asserted methods are postable here. The electronic ones
+// (card_terminal, ...) are written by src/pos/payments' confirmIntent when
+// the provider confirms, never by this DTO (issue #130, ADR-001).
 export const TENDER_METHODS = ['cash', 'upi_manual'] as const
 
 export class TenderDto {
@@ -14,6 +17,12 @@ export class TenderDto {
   // A tender is a real payment - zero or negative isn't one.
   @IsInt() @Min(1)
   amountMinor!: number
+
+  // FR-52: the cashier's own verification of a manual UPI payment. Stored
+  // as given (default false); enforcement (400 risk_ack_required for
+  // upi_manual without it) lands with epic #129 B5 once the web sends it.
+  @IsOptional() @IsBoolean()
+  riskAcknowledged?: boolean
 }
 
 // discountMinor/discountReason are optional, but only together - a bare
@@ -33,7 +42,10 @@ export class FinalizeBillDto {
   @IsOptional() @IsString() @MinLength(1)
   managerPin?: string
 
-  @IsArray() @ArrayMinSize(1) @ValidateNested({ each: true }) @Type(() => TenderDto)
+  // May be empty (issue #130): when the terminal already covered the whole
+  // total, the cashier has nothing left to key - commitFinalize's tender-sum
+  // check is what guarantees coverage, not this array's length.
+  @IsArray() @ValidateNested({ each: true }) @Type(() => TenderDto)
   tenders!: TenderDto[]
 }
 
@@ -41,6 +53,10 @@ export interface TenderView {
   id: string
   method: TenderMethod
   amountMinor: number
+  // The confirmed intent this tender came from (issue #130) - null for cash
+  // / upi_manual, always set for an electronic method (DB CHECK).
+  paymentIntentId: string | null
+  riskAcknowledged: boolean
   createdAt: string
 }
 

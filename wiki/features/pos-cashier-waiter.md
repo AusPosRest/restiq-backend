@@ -1301,6 +1301,65 @@ a real Postgres test DB)
   mocked: true }`.
 - No pos session -> `401`; another tenant's outlet -> `404`.
 
+## Payments, first slice - the simulated card terminal (issue #130, epic #129)
+
+- **Intent:** the first concrete piece of the payments architecture
+  (restiq-web/wiki/features/payments.md, ADR-001..012 in
+  restiq-web/docs/DECISIONS.md): an electronic payment is a
+  `payment_intents` row first, and a `Tender` is inserted only inside the
+  transaction that moves that row to `succeeded`. Rail `card_terminal`,
+  provider `simulated` - the /pos/terminal device's Approve is the
+  provider's "webhook".
+- **Schema (migration `20260909200000_payment_intents_terminal`):**
+  `DeviceType` += `terminal`; `TenderMethod` += `upi_intent | upi_qr |
+  card_online | card_terminal`; enums `PaymentRail`, `PaymentIntentStatus`
+  (`created pending succeeded failed expired cancelled`),
+  `PaymentProviderKind` (`simulated razorpay`); table `payment_intents`
+  (tenant/outlet/bill, nullable `share_id` for B4, rail, provider,
+  `amount_minor`, `currency`, status, `client_key` unique per tenant,
+  `provider_ref`, `client_payload`, `failure_reason`, `expires_at`,
+  `succeeded_at`, `created_by_staff_id`) with forced RLS mirroring
+  print_jobs and the partial unique index `payment_intents_one_active`
+  (one active intent per bill-or-share); `tenders.payment_intent_id`
+  (unique, FK) and `tenders.risk_acknowledged`; CHECK
+  `tenders_electronic_needs_intent` - `(method IN ('cash','upi_manual')) =
+  (payment_intent_id IS NULL)`.
+- **Module:** `src/pos/payments/` - `intents.dtos.ts`
+  (`CreatePaymentIntentDto { rail: 'card_terminal', amountMinor, clientKey
+  }`, `SimulateIntentDto { outcome }`, `PaymentIntentView` mirroring
+  restiq-web's `src/lib/payment-intent.ts`), `intent-core.ts`
+  (framework-free `confirmIntent` - CAS out of created/pending/**expired**
+  then `createTenderRecord` with `paymentIntentId`; `failIntent`;
+  `expireIfDue` lazy expiry), `intents.service.ts`, `intents.controller.ts`.
+  Lives inside the pos module for now (the design's `src/payments/`
+  bounded context is where it moves once the guest path B4 needs it through
+  a scoped barrel, exactly as `pos/bills` did for guest checkout).
+- **Routes (pos realm):** `POST pos/v1/bills/:id/intents` (201, 200 for a
+  repeated `clientKey`; 400 `amount_exceeds_remaining`; 409 `intent_active`,
+  `already_finalized`, `client_key_reused`), `GET pos/v1/payment-intents/:id`
+  (expires lazily), `POST …/cancel` (idempotent; 409 `already_succeeded`),
+  `POST …/simulate { outcome }` (404 unless provider is `simulated`; 409
+  `already_terminal` on a contradictory second tap; idempotent on the same
+  outcome), `GET pos/v1/outlets/:outletId/payment-intents` (own outlet
+  only, 403 `outlet_mismatch`; sweeps expiry first). `commitFinalize` now
+  409s `payment_pending` while an intent is active and unexpired;
+  `FinalizeBillDto.tenders` may be empty (the terminal may have covered the
+  whole bill); `TenderView` gained `paymentIntentId` and `riskAcknowledged`
+  (stored from `TenderDto.riskAcknowledged`, not yet enforced - B5).
+- **Key decisions:** TTL 5 min (a constant, `INTENT_TTL_MS`); a capture
+  after expiry still records the tender (ADR-011 - `simulate success` on
+  an expired intent succeeds); the `online_payments` capability gate is
+  deferred to B8 so the demo works without a settings step; the guest
+  share path, real providers, refunds through the terminal are later
+  stories of epic #129.
+- **Tests:** `test/pos-payment-intents.e2e-spec.ts` (12) - create /
+  idempotent / one-active / amount cap / DTO rejects, terminal poll + 403,
+  Approve → tender → finalise with remaining cash, `payment_pending`,
+  Decline / cancel / expiry leave no tender, late capture after expiry,
+  terminal-only finalise with `tenders: []`, the DB CHECK both ways,
+  finalised-bill refusal and cross-tenant 404. `pos-bills` invoice test
+  updated for the two new `TenderView` fields.
+
 ## Data model
 
 - `clock_events` (CAP-1, new table) - `id`, `tenantId`, `staffId`,

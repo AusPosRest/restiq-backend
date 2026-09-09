@@ -774,3 +774,16 @@
   redeems within the limit. See
   [wiki/features/platform-console.md](../features/platform-console.md).
   Issue AusPosRest/restiq-backend#95.
+- **2026-09-09** - Payments, first slice: `terminal` DeviceType + payment
+  intents for a simulated card terminal (issue #130, epic #129).
+  `payment_intents` table with RLS and a one-active partial unique index,
+  `tenders.payment_intent_id` / `risk_acknowledged`, `TenderMethod` widened,
+  the `tenders_electronic_needs_intent` CHECK, and `src/pos/payments/`
+  (create / get / cancel / simulate / outlet poll) with `intent-core.ts`'s
+  `confirmIntent` as the only writer of an electronic Tender.
+  `commitFinalize` refuses with 409 `payment_pending` while an intent is
+  open; `FinalizeBillDto.tenders` may be empty. 12 new e2e tests in
+  `test/pos-payment-intents.e2e-spec.ts`; bills / refunds / guest-checkout /
+  counter-orders suites green. See
+  [wiki/features/pos-cashier-waiter.md](../features/pos-cashier-waiter.md)
+  (Payments, first slice).

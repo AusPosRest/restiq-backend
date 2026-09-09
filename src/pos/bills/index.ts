@@ -15,6 +15,7 @@ export {
   isUniqueViolation,
   loadBill,
   loadTenantTaxProfile,
+  refreshOpenBillTotals,
   toBillView,
 } from './bill-core'
 export type { BillWithTenders, CommitFinalizeParams, CreateBillParams, CreateOrGetBillResult, TenantTaxProfile } from './bill-core'
