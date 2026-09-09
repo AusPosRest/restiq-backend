@@ -144,6 +144,7 @@ model Tenant {
   menuImportDrafts    MenuImportDraft[]
   ownerInvites        OwnerInvite[]
   ownerUsers          OwnerUser[]
+  agreementSignatures AgreementSignature[]
   capabilities        TenantCapability[]
   outletCapabilities  OutletCapability[]
   devices             Device[]
@@ -1812,4 +1813,42 @@ model TicketEvent {
   @@index([tenantId])
   @@index([ticketId])
   @@map("ticket_events")
+}
+
+// Platform agreements (issue #132): immutable, platform-wide, monotonically
+// numbered versions published by an operator, and one signature row per
+// tenant per version written only by the tenant owner. No RLS on versions
+// (every tenant reads the same text); signatures mirror print_jobs' RLS.
+model AgreementVersion {
+  id          String   @id @default(uuid(7)) @db.Uuid
+  version     Int      @unique
+  title       String
+  body        String
+  bodySha256  String   @map("body_sha256")
+  publishedBy String   @map("published_by")
+  publishedAt DateTime @default(now()) @map("published_at") @db.Timestamptz(6)
+
+  signatures AgreementSignature[]
+
+  @@map("agreement_versions")
+}
+
+model AgreementSignature {
+  id                 String   @id @default(uuid(7)) @db.Uuid
+  tenantId           String   @map("tenant_id") @db.Uuid
+  agreementVersionId String   @map("agreement_version_id") @db.Uuid
+  signerOwnerId      String   @map("signer_owner_id") @db.Uuid
+  signerName         String   @map("signer_name")
+  signerEmail        String   @map("signer_email")
+  // sha256 over body hash + tenant + signer + signedAt: tamper-evident
+  // record of exactly what was accepted, by whom, when.
+  evidenceSha256     String   @map("evidence_sha256")
+  signedAt           DateTime @map("signed_at") @db.Timestamptz(6)
+
+  tenant  Tenant           @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+  version AgreementVersion @relation(fields: [agreementVersionId], references: [id])
+
+  @@unique([tenantId, agreementVersionId])
+  @@index([tenantId])
+  @@map("agreement_signatures")
 }

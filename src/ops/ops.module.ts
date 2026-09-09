@@ -1,5 +1,7 @@
 import { Module } from '@nestjs/common'
 import { PlatformModule } from '../platform'
+import { OpsAgreementsController } from './agreements/agreements.controller'
+import { AgreementsService } from './agreements/agreements.service'
 import { OpsAuthController } from './auth.controller'
 import { OpsAuthService } from './auth.service'
 import { OpsDashboardController } from './dashboard.controller'
@@ -26,6 +28,7 @@ import { OpsTenantsService } from './tenants/tenants.service'
     OpsSubscriptionsController,
     OpsSyncHealthController,
     OpsDlqController,
+    OpsAgreementsController,
   ],
   providers: [
     OpsAuthService,
@@ -35,11 +38,13 @@ import { OpsTenantsService } from './tenants/tenants.service'
     SubscriptionsService,
     SyncHealthService,
     DlqService,
+    AgreementsService,
     { provide: ALERT_CHANNEL, useClass: LogAlertChannel },
   ],
   // DevicesService is exported for tenant-admin/CAP-6 (AD-12: one enrolment
   // implementation, two callers) - admin/devices calls it directly rather
   // than reimplementing enrolment-code generation or fleet queries.
-  exports: [DevicesService],
+  // AgreementsService likewise: admin/agreement signs through the same service that ops publishes with (#132).
+  exports: [DevicesService, AgreementsService],
 })
 export class OpsModule {}
