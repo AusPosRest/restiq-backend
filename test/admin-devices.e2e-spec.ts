@@ -314,6 +314,78 @@ describe('/admin/v1/outlets/:outletId/devices (e2e)', () => {
     })
   })
 
+  describe('PATCH /admin/v1/outlets/:outletId/devices/:deviceId/pairing (device topology, issue #134)', () => {
+    async function device(
+      tenantId: string,
+      outletId: string,
+      type: 'pos' | 'printer' | 'terminal' | 'kds',
+      status: 'active' | 'revoked' = 'active',
+    ): Promise<{ id: string }> {
+      return prisma.device.create({
+        data: { id: uuidv7(), tenantId, outletId, label: `${type}-${uuidv7().slice(-6)}`, type, status, hardwareKeyFingerprint: `fp-${uuidv7()}`, enrolledAt: new Date() },
+        select: { id: true },
+      })
+    }
+
+    function pairing(outletId: string, deviceId: string): string {
+      return `${devicesBase(outletId)}/${deviceId}/pairing`
+    }
+
+    it('links a printer to a POS, shows the link in the device list, and unlinks it with null', async () => {
+      const { tenantId, token } = await createOwner(prisma)
+      const outletId = await createOutlet(prisma, tenantId)
+      const pos = await device(tenantId, outletId, 'pos')
+      const printer = await device(tenantId, outletId, 'printer')
+
+      const linked = await authed(request(httpServer).patch(pairing(outletId, printer.id)), token).send({ posDeviceId: pos.id })
+      expect(linked.status).toBe(200)
+      expect(linked.body).toEqual({ id: printer.id, pairedPosId: pos.id })
+      const listed = (await authed(request(httpServer).get(devicesBase(outletId)), token)).body as { devices: (DeviceView & { pairedPosId: string | null })[] }
+      expect(listed.devices.find((d) => d.id === printer.id)?.pairedPosId).toBe(pos.id)
+      expect(listed.devices.find((d) => d.id === pos.id)?.pairedPosId).toBeNull()
+
+      const unlinked = await authed(request(httpServer).patch(pairing(outletId, printer.id)), token).send({ posDeviceId: null })
+      expect(unlinked.status).toBe(200)
+      expect((await prisma.device.findUniqueOrThrow({ where: { id: printer.id } })).pairedPosId).toBeNull()
+    })
+
+    it('allows one printer and one terminal per POS, links only printers/terminals, and only to an active POS', async () => {
+      const { tenantId, token } = await createOwner(prisma)
+      const outletId = await createOutlet(prisma, tenantId)
+      const pos = await device(tenantId, outletId, 'pos')
+      const printer = await device(tenantId, outletId, 'printer')
+      const secondPrinter = await device(tenantId, outletId, 'printer')
+      const terminal = await device(tenantId, outletId, 'terminal')
+      const kds = await device(tenantId, outletId, 'kds')
+      const revokedPos = await device(tenantId, outletId, 'pos', 'revoked')
+      const link = (deviceId: string, posDeviceId: string) => authed(request(httpServer).patch(pairing(outletId, deviceId)), token).send({ posDeviceId })
+
+      expect((await link(printer.id, pos.id)).status).toBe(200)
+      const taken = await link(secondPrinter.id, pos.id)
+      expect(taken.status).toBe(409)
+      expect((taken.body as { error: { code: string } }).error.code).toBe('pos_already_linked')
+      // A terminal fills a different slot on the same POS.
+      expect((await link(terminal.id, pos.id)).status).toBe(200)
+
+      expect((await link(kds.id, pos.id)).status).toBe(400)
+      expect((await link(secondPrinter.id, printer.id)).status).toBe(404)
+      expect((await link(secondPrinter.id, revokedPos.id)).status).toBe(404)
+      expect((await link(secondPrinter.id, 'not-a-uuid')).status).toBe(400)
+    })
+
+    it('404s for another tenant\'s outlet and device (cross-tenant isolation)', async () => {
+      const ownerA = await createOwner(prisma, 'Tenant A')
+      const ownerB = await createOwner(prisma, 'Tenant B')
+      const outletBId = await createOutlet(prisma, ownerB.tenantId)
+      const pos = await device(ownerB.tenantId, outletBId, 'pos')
+      const printer = await device(ownerB.tenantId, outletBId, 'printer')
+
+      const res = await authed(request(httpServer).patch(pairing(outletBId, printer.id)), ownerA.token).send({ posDeviceId: pos.id })
+      expect(res.status).toBe(404)
+      expect((await prisma.device.findUniqueOrThrow({ where: { id: printer.id } })).pairedPosId).toBeNull()
+    })
+  })
+
   describe('printer render-mode (story 5\'s printers table, GET/PATCH)', () => {
     it('lists and patches a printer\'s render mode, scoped to the outlet', async () => {
       const { tenantId, token } = await createOwner(prisma)

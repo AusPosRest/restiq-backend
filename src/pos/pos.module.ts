@@ -10,6 +10,8 @@ import { PosBillsController } from './bills/bills.controller'
 import { BillsService } from './bills/bills.service'
 import { PosClockController } from './clock/clock.controller'
 import { ClockService } from './clock/clock.service'
+import { PosDevicesController } from './devices/devices.controller'
+import { PosDevicesService } from './devices/devices.service'
 import { PosMenuController } from './menu/menu.controller'
 import { MenuService } from './menu/menu.service'
 import { OrderLinesService } from './orders/order-lines.service'
@@ -33,7 +35,19 @@ import { PosTablesController } from './tables/tables.controller'
     PosBillsController,
     PosPaymentIntentsController,
     PosTablesController,
+    PosDevicesController,
   ],
-  providers: [PosAuthService, ClockService, MenuService, AttendanceService, OrdersService, OrderLinesService, ShiftsService, BillsService, PaymentIntentsService],
+  providers: [
+    PosAuthService,
+    ClockService,
+    MenuService,
+    AttendanceService,
+    OrdersService,
+    OrderLinesService,
+    ShiftsService,
+    BillsService,
+    PaymentIntentsService,
+    PosDevicesService,
+  ],
 })
 export class PosModule {}

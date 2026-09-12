@@ -26,6 +26,8 @@ export interface DeviceView {
   status: string
   enrolledAt: string
   revokedAt: string | null
+  // Device topology (issue #134): the POS a printer/terminal is linked to.
+  pairedPosId: string | null
 }
 
 // Who to hold accountable for the enroll() audit_events row - an ops
@@ -110,6 +112,7 @@ function toDeviceView(device: {
   status: string
   enrolledAt: Date
   revokedAt: Date | null
+  pairedPosId: string | null
 }): DeviceView {
   return {
     id: device.id,
@@ -121,6 +124,7 @@ function toDeviceView(device: {
     status: device.status,
     enrolledAt: device.enrolledAt.toISOString(),
     revokedAt: device.revokedAt ? device.revokedAt.toISOString() : null,
+    pairedPosId: device.pairedPosId,
   }
 }
 

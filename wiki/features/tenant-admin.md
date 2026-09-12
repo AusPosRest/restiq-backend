@@ -540,6 +540,22 @@ built here, story by story.
   - **Checklist integration:** see CAP-2 above - the flip lives inside the
     shared `enroll()` method itself, not in this module, so it fires
     regardless of which realm's token redeemed the code.
+  - **Device topology (issue #134):** `PATCH /admin/v1/outlets/:outletId/
+    devices/:deviceId/pairing` `{ posDeviceId: uuid | null }` ->
+    `{ id, pairedPosId }`. Links an active printer or card terminal to one
+    active POS at the same outlet (`devices.paired_pos_id`), or back to the
+    whole outlet with null. One printer and one terminal per POS (409
+    `pos_already_linked`); only printer/terminal can be linked (400); a
+    foreign, revoked or non-POS target is 404. Unprinted jobs and open
+    intents targeted at the device fall back to the outlet queue in the same
+    transaction. The device list now carries `pairedPosId`. Routing lives in
+    `src/pos/device-routing.ts`: `printBill` / `createIntent` take the
+    sending POS tab's `deviceId` and target its linked peripheral;
+    `GET .../print-jobs` and `GET .../payment-intents` take `?deviceId=` -
+    a linked printer/terminal drains only its own queue, everything else
+    the untargeted (outlet-wide) one. `POST /pos/v1/devices/:id/heartbeat`
+    (staff session, own tenant + outlet, 204) lets the web POS / printer /
+    terminal tabs stamp `lastContactAt`.
 - **Deviation:** `DevicesService.list()` runs under operator RLS context
   (`setOperatorContext`, a cross-tenant read bypass) even when called from
   `/admin` - unchanged from Platform Console's original behaviour, since
