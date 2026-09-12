@@ -344,6 +344,13 @@ describe('/admin/v1/outlets/:outletId/devices (e2e)', () => {
       expect(listed.devices.find((d) => d.id === printer.id)?.pairedPosId).toBe(pos.id)
       expect(listed.devices.find((d) => d.id === pos.id)?.pairedPosId).toBeNull()
 
+      // The heartbeat snapshot reaches the owner's list (online/offline dot).
+      const seenAt = new Date('2026-09-12T10:00:00.000Z')
+      await prisma.device.update({ where: { id: pos.id }, data: { lastContactAt: seenAt, appVersion: 'web-1' } })
+      const relisted = (await authed(request(httpServer).get(devicesBase(outletId)), token)).body as { devices: (DeviceView & { lastContactAt: string | null; appVersion: string | null })[] }
+      expect(relisted.devices.find((d) => d.id === pos.id)).toMatchObject({ lastContactAt: seenAt.toISOString(), appVersion: 'web-1' })
+      expect(relisted.devices.find((d) => d.id === printer.id)).toMatchObject({ lastContactAt: null, appVersion: null })
+
       const unlinked = await authed(request(httpServer).patch(pairing(outletId, printer.id)), token).send({ posDeviceId: null })
       expect(unlinked.status).toBe(200)
       expect((await prisma.device.findUniqueOrThrow({ where: { id: printer.id } })).pairedPosId).toBeNull()

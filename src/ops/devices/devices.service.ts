@@ -43,6 +43,10 @@ export interface EnrollActor {
 export interface DeviceListItem extends DeviceView {
   tenantName: string
   outletName: string | null
+  // Latest heartbeat snapshot (CAP-6): the owner topology's online/offline
+  // dot and the Devices table's "Last seen" / "App version" (#134 follow-up).
+  lastContactAt: string | null
+  appVersion: string | null
 }
 
 export interface DeviceListResult {
@@ -185,7 +189,13 @@ export class DevicesService {
     const nextCursor = rows.length > limit && last ? encodeCursor({ v: last.enrolledAt.toISOString(), id: last.id }) : null
 
     return {
-      devices: page.map((row) => ({ ...toDeviceView(row), tenantName: row.tenant.name, outletName: row.outlet?.name ?? null })),
+      devices: page.map((row) => ({
+        ...toDeviceView(row),
+        tenantName: row.tenant.name,
+        outletName: row.outlet?.name ?? null,
+        lastContactAt: row.lastContactAt ? row.lastContactAt.toISOString() : null,
+        appVersion: row.appVersion,
+      })),
       nextCursor,
       total,
     }
