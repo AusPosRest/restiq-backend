@@ -16,7 +16,8 @@ export interface GuestPrincipal {
   sessionId: string
   tenantId: string
   outletId: string
-  tableId: string
+  // null for a kiosk session (issue #138) - no table, the order gets a token number.
+  tableId: string | null
   name: string
 }
 
@@ -44,13 +45,13 @@ export function verifyGuestToken(token: string): GuestPrincipal | null {
     const sessionId: unknown = payload.sessionId
     const tenantId: unknown = payload.tenantId
     const outletId: unknown = payload.outletId
-    const tableId: unknown = payload.tableId
+    const tableId: unknown = payload.tableId ?? null
     const name: unknown = payload.name
     if (
       typeof sessionId !== 'string' ||
       typeof tenantId !== 'string' ||
       typeof outletId !== 'string' ||
-      typeof tableId !== 'string' ||
+      (tableId !== null && typeof tableId !== 'string') ||
       typeof name !== 'string'
     ) {
       return null

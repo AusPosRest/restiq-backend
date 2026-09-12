@@ -73,7 +73,7 @@ export interface PaymentRow {
   outletId: string
   outletName: string
   orderId: string
-  source: 'pos' | 'qr'
+  source: 'pos' | 'qr' | 'kiosk'
   tableLabel: string | null
   tokenNumber: number | null
   cashierName: string | null

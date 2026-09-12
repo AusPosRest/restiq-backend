@@ -823,7 +823,9 @@ model TableSession {
   id       String              @id @default(uuid(7)) @db.Uuid
   tenantId String              @map("tenant_id") @db.Uuid
   outletId String              @map("outlet_id") @db.Uuid
-  tableId  String              @map("table_id") @db.Uuid
+  // Nullable since issue #138: a kiosk session has no table - the order it
+  // places gets a token number instead (see Order.tokenNumber).
+  tableId  String?             @map("table_id") @db.Uuid
   status   TableSessionStatus  @default(open)
   // 4-digit PIN gating who can join this table's shared cart - deliberately
   // NOT credential-grade (SPEC qr-self-order Constraints; AD-17). It protects
@@ -845,7 +847,7 @@ model TableSession {
 
   tenant    Tenant      @relation(fields: [tenantId], references: [id])
   outlet    Outlet      @relation(fields: [outletId], references: [id])
-  table     DiningTable @relation(fields: [tableId], references: [id])
+  table     DiningTable? @relation(fields: [tableId], references: [id])
   guests    Guest[]
   cartLines CartLine[]
   // qr-self-order/CAP-4 (issue #77): the real Order(s) placed from this
@@ -1202,6 +1204,8 @@ enum OrderStatus {
 enum OrderSource {
   pos
   qr
+  // Issue #138: placed from a self-service kiosk (a table-less guest session).
+  kiosk
 }
 
 model Order {
