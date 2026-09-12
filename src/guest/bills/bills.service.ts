@@ -226,7 +226,10 @@ export class GuestBillsService {
       }
 
       if (dto.simulatedOutcome === 'success') {
-        const totalMinor = bill.subtotalMinor + bill.taxMinor
+        // The bill's real total, as POS card intents charge it - subtotal + tax
+        // overcharges a tax-inclusive (AU GST) menu and finalise then refuses
+        // the tenders (issue #144).
+        const totalMinor = BigInt(toBillView(bill).totalMinor)
         // Issue #144: a kiosk (table-less) session pays on the kiosk's own card
         // reader; a table's QR checkout stays a manual UPI tender.
         const tenderId =
