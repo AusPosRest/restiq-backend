@@ -3,6 +3,7 @@
 import 'dotenv/config'
 import 'reflect-metadata'
 import { NestFactory } from '@nestjs/core'
+import type { NestExpressApplication } from '@nestjs/platform-express'
 import { AppModule } from './app.module'
 
 async function bootstrap(): Promise<void> {
@@ -12,7 +13,10 @@ async function bootstrap(): Promise<void> {
     throw new Error('WEB_ORIGIN is not set - it must name the site allowed to call this API')
   }
 
-  const app = await NestFactory.create(AppModule)
+  const app = await NestFactory.create<NestExpressApplication>(AppModule)
+  // Uploaded item photos travel inline as data:image URLs (issue #142, up to
+  // ~280 KB of base64) - above Express's 100 KB JSON default.
+  app.useBodyParser('json', { limit: '512kb' })
   // credentials: the operator's session cookie rides this same path.
   app.enableCors({ origin: webOrigin, credentials: true })
 

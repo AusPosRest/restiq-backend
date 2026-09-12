@@ -1,11 +1,20 @@
 import { Type } from 'class-transformer'
-import { ArrayUnique, IsArray, IsBoolean, IsDateString, IsEnum, IsInt, IsOptional, IsString, IsUUID, Length, MaxLength, Min, MinLength, ValidateNested } from 'class-validator'
+import { ArrayUnique, IsArray, IsBoolean, IsDateString, IsEnum, IsInt, IsOptional, IsString, IsUUID, Length, Matches, MaxLength, Min, MinLength, ValidateNested } from 'class-validator'
 import type { PriceChannel, VegMarker } from '../../generated/prisma/client'
 import { AllergenView } from './allergens.dtos'
 import { ModifierGroupView } from './modifier-groups.dtos'
 
 const PRICE_CHANNELS = ['dine_in', 'takeaway', 'delivery', 'qr', 'aggregator'] as const
 const VEG_MARKERS = ['veg', 'non_veg'] as const
+
+// Item photo (issue #142): an https URL, or a photo the owner uploaded from
+// the admin drawer - resized in the browser and sent inline as a data:image
+// URL. ponytail: no object storage yet; ~200 KB per photo rides the guest
+// menu payload, move to a bucket + URL if menus grow past a few dozen photos.
+// null clears it (IsOptional skips validation for null).
+const PHOTO_URL = /^(https:\/\/\S{1,2040}|data:image\/(jpeg|png|webp);base64,[A-Za-z0-9+/]+={0,2})$/
+const PHOTO_URL_MAX = 280_000
+const PHOTO_URL_MESSAGE = 'photoUrl must be an https URL or a data:image (jpeg, png or webp) photo under 200 KB'
 
 export class CreateVariantDto {
   @IsString() @MinLength(1)
@@ -25,8 +34,8 @@ export class CreateItemDto {
   @IsString() @MinLength(1)
   shortName!: string
 
-  @IsOptional() @IsString() @MaxLength(2048)
-  photoUrl?: string
+  @IsOptional() @IsString() @MaxLength(PHOTO_URL_MAX) @Matches(PHOTO_URL, { message: PHOTO_URL_MESSAGE })
+  photoUrl?: string | null
 
   @IsOptional() @IsString() @MinLength(1)
   nameHindi?: string
@@ -60,8 +69,8 @@ export class UpdateItemDto {
   @IsOptional() @IsUUID()
   categoryId?: string
 
-  @IsOptional() @IsString() @MaxLength(2048)
-  photoUrl?: string
+  @IsOptional() @IsString() @MaxLength(PHOTO_URL_MAX) @Matches(PHOTO_URL, { message: PHOTO_URL_MESSAGE })
+  photoUrl?: string | null
 
   @IsOptional() @IsString() @MinLength(1)
   nameHindi?: string
