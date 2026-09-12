@@ -332,6 +332,26 @@ describe('/admin/v1/menu (e2e)', () => {
       expect(res.status).toBe(404)
     })
 
+    it('accepts an uploaded data:image photo, clears it with null, and rejects other schemes (issue #142)', async () => {
+      const { token } = await createOwner(prisma)
+      const category = await createCategory(token)
+      const item = await createItem(token, category.id)
+      const photo = `data:image/jpeg;base64,${'A'.repeat(4000)}`
+
+      const set = await authed(request(httpServer).patch(`/admin/v1/menu/items/${item.id}`), token).send({ photoUrl: photo })
+      expect(set.status).toBe(200)
+      expect((set.body as ItemBody).photoUrl).toBe(photo)
+
+      const cleared = await authed(request(httpServer).patch(`/admin/v1/menu/items/${item.id}`), token).send({ photoUrl: null })
+      expect(cleared.status).toBe(200)
+      expect((cleared.body as ItemBody).photoUrl).toBeNull()
+
+      for (const bad of ['javascript:alert(1)', 'http://cdn.example.com/a.jpg', 'data:text/html;base64,PGgxPg==']) {
+        const res = await authed(request(httpServer).patch(`/admin/v1/menu/items/${item.id}`), token).send({ photoUrl: bad })
+        expect(res.status).toBe(400)
+      }
+    })
+
     it('creates an item with photoUrl, nameHindi, and vegMarker, and reads them back', async () => {
       const { token } = await createOwner(prisma)
       const category = await createCategory(token)
