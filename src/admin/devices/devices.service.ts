@@ -14,6 +14,12 @@ export interface DevicePairingView {
   pairedPosId: string | null
 }
 
+export interface DeviceRevokeView {
+  id: string
+  status: 'revoked'
+  revokedAt: string
+}
+
 @Injectable()
 export class AdminDevicesService {
   constructor(
@@ -83,6 +89,38 @@ export class AdminDevicesService {
       })
       const updated = await tx.device.update({ where: { id: deviceId }, data: { pairedPosId: posDeviceId } })
       return { id: updated.id, pairedPosId: updated.pairedPosId }
+    })
+  }
+
+  /**
+   * POST .../devices/:deviceId/revoke (issue #140): the owner's "Remove
+   * device". Same write as the ops realm's revoke (status flips, the row and
+   * its history stay - never a delete), scoped to the owner's tenant and the
+   * outlet in the path, with the owner as the audit actor. Topology cleanup
+   * in the same transaction: a revoked POS's linked printer/terminal fall
+   * back to the outlet, and work still queued for the device goes to the
+   * outlet-wide queue (same fallback setPairing above uses).
+   */
+  async revoke(owner: AdminPrincipal, outletId: string, deviceId: string, reason: string): Promise<DeviceRevokeView> {
+    const plane = this.registry.planeFor(this.registry.homeRegion())
+    return plane.$transaction(async (tx) => {
+      await setTenantContext(tx, owner.tenantId)
+      const device = await tx.device.findFirst({ where: { id: deviceId, tenantId: owner.tenantId, outletId } })
+      if (!device) throw new NotFoundException({ code: 'not_found', message: 'No such device at this outlet' })
+      if (device.status === 'revoked') throw new ConflictException({ code: 'conflict', message: 'This device is already revoked' })
+
+      await tx.device.updateMany({ where: { tenantId: owner.tenantId, pairedPosId: deviceId }, data: { pairedPosId: null } })
+      await tx.printJob.updateMany({ where: { tenantId: owner.tenantId, targetDeviceId: deviceId, printedAt: null }, data: { targetDeviceId: null } })
+      await tx.paymentIntent.updateMany({
+        where: { tenantId: owner.tenantId, targetDeviceId: deviceId, status: { in: ['created', 'pending'] } },
+        data: { targetDeviceId: null },
+      })
+      const revokedAt = new Date()
+      const updated = await tx.device.update({ where: { id: deviceId }, data: { status: 'revoked', revokedAt, pairedPosId: null } })
+      await tx.auditEvent.create({
+        data: { tenantId: owner.tenantId, actorId: owner.id, actorEmail: owner.email, action: 'device.revoked', reason, occurredAt: revokedAt },
+      })
+      return { id: updated.id, status: 'revoked', revokedAt: revokedAt.toISOString() }
     })
   }
 }

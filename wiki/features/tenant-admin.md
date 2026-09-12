@@ -566,6 +566,14 @@ built here, story by story.
   this one read doesn't get AD-5's RLS defense-in-depth layer the rest of
   `/admin` has. Flagged for a follow-up if a future story wants to close
   that gap.
+- **Owner-side removal (issue #140):** `POST admin/v1/outlets/:outletId/devices/:deviceId/revoke { reason }`
+  → `{ id, status: 'revoked', revokedAt }`. Revoke, never delete (the row
+  and its history stay, same as the ops realm's revoke); 404 for another
+  tenant's or outlet's device, 409 `conflict` if already revoked, 400 without
+  a reason. One transaction: status + `revokedAt`, `pairedPosId` cleared on
+  the device and on every peripheral linked to it, pending print jobs /
+  payment intents targeted at it fall back to the outlet queue, and an
+  `audit_events` row `device.revoked` with the owner as actor (AD-6).
 
 ## CAP-7 - Staff & roles
 
