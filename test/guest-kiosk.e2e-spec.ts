@@ -203,6 +203,35 @@ describe('/guest/v1/kiosk kiosk ordering (e2e)', () => {
     expect(found).toMatchObject({ source: 'kiosk', tokenNumber: 1, ownerId: null })
   })
 
+  it('pays a kiosk order by card at the kiosk and serves the receipt invoice (issue #144)', async () => {
+    const tenantId = await createTenant(prisma)
+    const outletId = await createOutlet(prisma, tenantId)
+    await setCapability(prisma, tenantId, outletId, 'kiosk', true)
+    const deviceId = await createDevice(prisma, tenantId, outletId, 'kiosk')
+    const item = await createItemWithPrice(prisma, tenantId, 12000)
+
+    const { token } = (await request(httpServer).post('/guest/v1/kiosk/sessions').send({ outletId, deviceId })).body as KioskStartBody
+    await authed(request(httpServer).post('/guest/v1/cart/lines'), token).send({ itemId: item, quantity: 1 }).expect(201)
+    const placed = (await authed(request(httpServer).post('/guest/v1/orders'), token).send({})).body as PlacedOrderBody
+
+    const billRes = await authed(request(httpServer).post(`/guest/v1/orders/${placed.orderId}/bill`), token)
+    expect(billRes.status).toBe(201)
+    const bill = billRes.body as { id: string; totalMinor: number }
+
+    const paid = await authed(request(httpServer).post(`/guest/v1/bills/${bill.id}/pay-all`), token).send({ simulatedOutcome: 'success' })
+    expect(paid.status).toBe(200)
+    expect(paid.body).toMatchObject({ status: 'finalized' })
+
+    // The session is settled now, but the kiosk can still fetch the invoice to print.
+    const invoice = await authed(request(httpServer).get(`/guest/v1/bills/${bill.id}/invoice`), token)
+    expect(invoice.status).toBe(200)
+    expect((invoice.body as { tenders: Array<{ method: string; amountMinor: number }> }).tenders).toEqual([
+      expect.objectContaining({ method: 'card_terminal', amountMinor: bill.totalMinor }),
+    ])
+    // The card money went through a confirmed payment intent, like the POS card terminal's.
+    expect(await prisma.paymentIntent.count({ where: { billId: bill.id, rail: 'card_terminal', status: 'succeeded' } })).toBe(1)
+  })
+
   it('refuses a revoked, non-kiosk, other-outlet or unknown device as 404, and a disabled capability as 403', async () => {
     const tenantId = await createTenant(prisma)
     const outletId = await createOutlet(prisma, tenantId)
