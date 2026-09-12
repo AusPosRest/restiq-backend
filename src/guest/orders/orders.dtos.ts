@@ -25,9 +25,11 @@ export interface PlacedOrderLineView {
 
 export interface PlacedOrderView {
   orderId: string
-  tableId: string
+  // null for a kiosk order (issue #138), which carries tokenNumber instead.
+  tableId: string | null
   status: 'sent'
-  source: 'qr'
+  source: 'qr' | 'kiosk'
+  tokenNumber: number | null
   sessionId: string
   lines: PlacedOrderLineView[]
 }
@@ -51,6 +53,8 @@ export interface GuestOrderStatusView {
   // present for a qr-source order in practice, since guest placement always
   // sets it from the table session, but the type stays honest to Order's own.
   tableId: string | null
+  // Set for a kiosk order (issue #138) - the pickup number the counter calls.
+  tokenNumber: number | null
   // The furthest step this order has reached - what the stepper highlights.
   step: GuestOrderStep
   steps: GuestOrderStepView[]
