@@ -214,7 +214,7 @@ export class GuestBillsService {
       if (bill.status === 'finalized') {
         throw new ConflictException({ code: 'already_finalized', message: 'This bill has already been finalised' })
       }
-      await assertSessionActive(tx, guest.tenantId, guest.sessionId)
+      const session = await assertSessionActive(tx, guest.tenantId, guest.sessionId)
 
       const shares = await tx.billShare.findMany({ where: { billId } })
       if (shares.some((s) => s.status === 'paid')) {
@@ -226,7 +226,10 @@ export class GuestBillsService {
 
       if (dto.simulatedOutcome === 'success') {
         const totalMinor = bill.subtotalMinor + bill.taxMinor
-        const tender = await createTenderRecord(tx, { tenantId: guest.tenantId, billId, method: 'upi_manual', amountMinor: totalMinor })
+        // Issue #144: a kiosk (table-less) session pays on the kiosk's own card
+        // reader, so its tender is card_terminal; a table's QR checkout stays UPI.
+        const method = session.tableId === null ? 'card_terminal' : 'upi_manual'
+        const tender = await createTenderRecord(tx, { tenantId: guest.tenantId, billId, method, amountMinor: totalMinor })
         await tx.billShare.updateMany({
           where: { billId },
           data: { status: 'paid', payerPhone: dto.payerPhone ?? null, tenderId: tender.id, paidAt: new Date() },
