@@ -714,6 +714,33 @@ describe('/pos/v1 bill and settle (e2e)', () => {
       expect((await authed(request(httpServer).get(`/pos/v1/outlets/${outletId}/print-jobs`), ownerToken)).body).toEqual([])
       expect((await authed(request(httpServer).post(`/pos/v1/print-jobs/${uuidv7()}/printed`), ownerToken).send()).status).toBe(404)
     })
+
+    it('routes to a linked printer (issue #134): it drains only its POS\'s jobs; every other printer keeps the outlet-wide queue', async () => {
+      const tenantId = await createTenant(prisma)
+      await createTaxRegistration(prisma, tenantId, { taxProfile: 'India GST - CGST/SGST split', registrationType: 'gstin', legalEntityName: 'Spice Route Hospitality Pvt Ltd' })
+      const outletId = await createOutlet(prisma, tenantId)
+      const { orderId, ownerToken } = await setUpSentOrder(tenantId, outletId, 10000)
+      const billId = ((await authed(request(httpServer).post(`/pos/v1/orders/${orderId}/bill`), ownerToken).send()).body as BillBody).id
+      const device = (type: 'pos' | 'printer', pairedPosId: string | null = null) =>
+        prisma.device.create({
+          data: { id: uuidv7(), tenantId, outletId, label: `${type}-${uuidv7().slice(-6)}`, type, hardwareKeyFingerprint: `fp-${uuidv7()}`, enrolledAt: new Date(), pairedPosId },
+          select: { id: true },
+        })
+      const pos = await device('pos')
+      const otherPos = await device('pos')
+      const linkedPrinter = await device('printer', pos.id)
+      const sharedPrinter = await device('printer')
+
+      const fromLinkedPos = (await authed(request(httpServer).post(`/pos/v1/bills/${billId}/print`), ownerToken).send({ deviceId: pos.id })).body as { id: string }
+      const fromOtherPos = (await authed(request(httpServer).post(`/pos/v1/bills/${billId}/print`), ownerToken).send({ deviceId: otherPos.id })).body as { id: string }
+      const queue = async (deviceId?: string): Promise<string[]> =>
+        ((await authed(request(httpServer).get(`/pos/v1/outlets/${outletId}/print-jobs${deviceId ? `?deviceId=${deviceId}` : ''}`), ownerToken)).body as { id: string }[]).map((j) => j.id)
+
+      expect(await queue(linkedPrinter.id)).toEqual([fromLinkedPos.id])
+      expect(await queue(sharedPrinter.id)).toEqual([fromOtherPos.id])
+      expect(await queue()).toEqual([fromOtherPos.id])
+      expect((await authed(request(httpServer).get(`/pos/v1/outlets/${outletId}/print-jobs?deviceId=nope`), ownerToken)).status).toBe(400)
+    })
   })
 
   describe('GET /pos/v1/bills/:id/invoice (issue #103)', () => {

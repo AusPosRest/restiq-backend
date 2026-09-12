@@ -1,6 +1,7 @@
-import { Body, Controller, Get, HttpCode, Param, Post, Res } from '@nestjs/common'
+import { Body, Controller, Get, HttpCode, Param, ParseUUIDPipe, Post, Query, Res } from '@nestjs/common'
 import type { Response } from 'express'
 import { CurrentStaff, PosPrincipal } from '../../platform'
+import { DeviceSourceDto } from '../devices/devices.dtos'
 import { BillsService } from './bills.service'
 import { BillView, CreditNoteView, FinalizeBillDto, InvoiceView, PrintJobView, RefundBillDto } from './bills.dtos'
 
@@ -46,13 +47,19 @@ export class PosBillsController {
   // getInvoice - any staff member at the outlet can send a bill to print.
   @Post('bills/:id/print')
   @HttpCode(201)
-  print(@CurrentStaff() staff: PosPrincipal, @Param('id') id: string): Promise<PrintJobView> {
-    return this.bills.printBill(staff, id)
+  print(@CurrentStaff() staff: PosPrincipal, @Param('id') id: string, @Body() dto?: DeviceSourceDto): Promise<PrintJobView> {
+    // No body at all (older clients) arrives as undefined, not {}.
+    return this.bills.printBill(staff, id, dto?.deviceId)
   }
 
+  // ?deviceId= is the polling printer (issue #134): a linked printer drains only its own queue.
   @Get('outlets/:outletId/print-jobs')
-  listPrintJobs(@CurrentStaff() staff: PosPrincipal, @Param('outletId') outletId: string): Promise<PrintJobView[]> {
-    return this.bills.listPendingPrintJobs(staff, outletId)
+  listPrintJobs(
+    @CurrentStaff() staff: PosPrincipal,
+    @Param('outletId') outletId: string,
+    @Query('deviceId', new ParseUUIDPipe({ optional: true })) deviceId?: string,
+  ): Promise<PrintJobView[]> {
+    return this.bills.listPendingPrintJobs(staff, outletId, deviceId)
   }
 
   @Post('print-jobs/:id/printed')

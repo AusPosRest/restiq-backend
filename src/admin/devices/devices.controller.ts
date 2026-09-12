@@ -1,8 +1,8 @@
-import { Body, Controller, Get, HttpCode, Param, Post } from '@nestjs/common'
+import { Body, Controller, Get, HttpCode, Param, ParseUUIDPipe, Patch, Post } from '@nestjs/common'
 import { AdminPrincipal, CurrentOwner } from '../../platform'
 import { DeviceListResult } from '../../ops'
-import { AdminGenerateCodeDto } from './devices.dtos'
-import { AdminDevicesService } from './devices.service'
+import { AdminDevicePairingDto, AdminGenerateCodeDto } from './devices.dtos'
+import { AdminDevicesService, DevicePairingView } from './devices.service'
 
 @Controller('admin/v1/outlets/:outletId/devices')
 export class AdminDevicesController {
@@ -21,5 +21,16 @@ export class AdminDevicesController {
     @Body() dto: AdminGenerateCodeDto,
   ): Promise<{ code: string; deviceType: string; expiresAt: string }> {
     return this.devices.generateCode(owner, outletId, dto)
+  }
+
+  // Device topology (issue #134).
+  @Patch(':deviceId/pairing')
+  setPairing(
+    @CurrentOwner() owner: AdminPrincipal,
+    @Param('outletId', ParseUUIDPipe) outletId: string,
+    @Param('deviceId', ParseUUIDPipe) deviceId: string,
+    @Body() dto: AdminDevicePairingDto,
+  ): Promise<DevicePairingView> {
+    return this.devices.setPairing(owner, outletId, deviceId, dto.posDeviceId)
   }
 }

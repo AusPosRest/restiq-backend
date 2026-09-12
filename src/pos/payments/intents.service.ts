@@ -15,6 +15,7 @@ import type { Prisma } from '../../generated/prisma/client'
 import { PosPrincipal, RegionRegistryService, uuidv7 } from '../../platform'
 import { isUniqueViolation, loadBill, refreshOpenBillTotals, toBillView } from '../bills'
 import { setTenantContext } from '../tenant-context'
+import { linkedPeripheral, queueFor } from '../device-routing'
 import { ACTIVE_INTENT_STATUSES, confirmIntent, expireIfDue, failIntent, INTENT_INCLUDE, IntentRow, isIntentActive, toPaymentIntentView } from './intent-core'
 import { CreatePaymentIntentDto, PaymentIntentView, SimulateIntentDto } from './intents.dtos'
 
@@ -98,6 +99,8 @@ export class PaymentIntentsService {
             clientPayload: { simulated: true },
             expiresAt: new Date(Date.now() + INTENT_TTL_MS),
             createdByStaffId: staff.id,
+            // Issue #134: a POS with a linked terminal charges only there.
+            targetDeviceId: await linkedPeripheral(tx, staff.tenantId, dto.deviceId, 'terminal'),
           },
           include: INTENT_INCLUDE,
         })
@@ -139,7 +142,7 @@ export class PaymentIntentsService {
   }
 
   /** GET outlets/:outletId/payment-intents - the terminal device's poll: this outlet's still-open requests, oldest first. Staff only see their own outlet, like the print spool. */
-  async listPendingForOutlet(staff: PosPrincipal, outletId: string): Promise<PaymentIntentView[]> {
+  async listPendingForOutlet(staff: PosPrincipal, outletId: string, deviceId?: string): Promise<PaymentIntentView[]> {
     if (outletId !== staff.outletId) throw new ForbiddenException({ code: 'outlet_mismatch', message: 'Not your outlet' })
     const plane = this.plane()
     return plane.$transaction(async (tx) => {
@@ -149,8 +152,10 @@ export class PaymentIntentsService {
         where: { tenantId: staff.tenantId, outletId, status: { in: [...ACTIVE_INTENT_STATUSES] }, expiresAt: { lte: new Date() } },
         data: { status: 'expired', failureReason: 'timed_out' },
       })
+      // Issue #134: a linked terminal drains only its own queue.
+      const targetDeviceId = await queueFor(tx, staff.tenantId, deviceId, 'terminal')
       const rows = await tx.paymentIntent.findMany({
-        where: { tenantId: staff.tenantId, outletId, status: { in: [...ACTIVE_INTENT_STATUSES] } },
+        where: { tenantId: staff.tenantId, outletId, status: { in: [...ACTIVE_INTENT_STATUSES] }, targetDeviceId },
         include: INTENT_INCLUDE,
         orderBy: { createdAt: 'asc' },
       })

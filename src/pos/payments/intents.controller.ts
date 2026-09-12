@@ -1,4 +1,4 @@
-import { Body, Controller, Get, HttpCode, Param, Post, Res } from '@nestjs/common'
+import { Body, Controller, Get, HttpCode, Param, ParseUUIDPipe, Post, Query, Res } from '@nestjs/common'
 import type { Response } from 'express'
 import { CurrentStaff, PosPrincipal } from '../../platform'
 import { CreatePaymentIntentDto, PaymentIntentView, SimulateIntentDto } from './intents.dtos'
@@ -43,8 +43,13 @@ export class PosPaymentIntentsController {
     return this.intents.simulate(staff, id, dto)
   }
 
+  // ?deviceId= is the polling terminal (issue #134): a linked terminal drains only its own queue.
   @Get('outlets/:outletId/payment-intents')
-  listPending(@CurrentStaff() staff: PosPrincipal, @Param('outletId') outletId: string): Promise<PaymentIntentView[]> {
-    return this.intents.listPendingForOutlet(staff, outletId)
+  listPending(
+    @CurrentStaff() staff: PosPrincipal,
+    @Param('outletId') outletId: string,
+    @Query('deviceId', new ParseUUIDPipe({ optional: true })) deviceId?: string,
+  ): Promise<PaymentIntentView[]> {
+    return this.intents.listPendingForOutlet(staff, outletId, deviceId)
   }
 }

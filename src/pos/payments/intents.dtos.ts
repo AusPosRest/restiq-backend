@@ -1,7 +1,7 @@
 // Payments, first slice (issue #130 / epic #129): the simulated card
 // terminal. staffId/tenantId/outletId never come from the body (AD-5) - the
 // bill's outlet and the signed-in staff are the only sources.
-import { IsIn, IsInt, IsString, MaxLength, Min, MinLength } from 'class-validator'
+import { IsIn, IsInt, IsOptional, IsString, IsUUID, MaxLength, Min, MinLength } from 'class-validator'
 import type { PaymentIntentStatus, PaymentProviderKind, PaymentRail } from '../../generated/prisma/client'
 
 // Only the terminal rail exists yet. upi_qr / upi_intent / card_online
@@ -22,6 +22,11 @@ export class CreatePaymentIntentDto {
   // returns the same intent (200) instead of charging twice.
   @IsString() @MinLength(1) @MaxLength(128)
   clientKey!: string
+
+  // Device topology (issue #134): the sending POS tab's device - routes the
+  // intent to that POS's linked terminal. Absent = the outlet-wide queue.
+  @IsOptional() @IsUUID()
+  deviceId?: string
 }
 
 export const SIMULATED_OUTCOMES = ['success', 'failure'] as const

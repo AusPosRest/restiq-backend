@@ -414,6 +414,43 @@ describe('/pos/v1 payment intents - simulated card terminal (e2e)', () => {
     })
   })
 
+  describe('device topology (issue #134)', () => {
+    async function device(tenantId: string, outletId: string, type: 'pos' | 'terminal', pairedPosId: string | null = null): Promise<{ id: string }> {
+      return prisma.device.create({
+        data: { id: uuidv7(), tenantId, outletId, label: `${type}-${uuidv7().slice(-6)}`, type, hardwareKeyFingerprint: `fp-${uuidv7()}`, enrolledAt: new Date(), pairedPosId },
+        select: { id: true },
+      })
+    }
+
+    it('a POS with a linked terminal sends only to it; an unlinked terminal keeps the outlet-wide queue', async () => {
+      const { tenantId, outletId, billId, token } = await setUpOpenBill()
+      const pos = await device(tenantId, outletId, 'pos')
+      const linked = await device(tenantId, outletId, 'terminal', pos.id)
+      const shared = await device(tenantId, outletId, 'terminal')
+
+      const sent = await authed(request(httpServer).post(`/pos/v1/bills/${billId}/intents`), token).send({ rail: 'card_terminal', amountMinor: 100, clientKey: uuidv7(), deviceId: pos.id })
+      expect(sent.status).toBe(201)
+      const queue = async (deviceId?: string): Promise<string[]> =>
+        ((await authed(request(httpServer).get(`/pos/v1/outlets/${outletId}/payment-intents${deviceId ? `?deviceId=${deviceId}` : ''}`), token)).body as IntentBody[]).map((i) => i.id)
+
+      expect(await queue(linked.id)).toEqual([(sent.body as IntentBody).id])
+      expect(await queue(shared.id)).toEqual([])
+      expect(await queue()).toEqual([])
+    })
+
+    it('a heartbeat stamps lastContactAt only for an active device at the staff member\'s own outlet', async () => {
+      const { tenantId, outletId, token } = await setUpOpenBill()
+      const terminal = await device(tenantId, outletId, 'terminal')
+      const heartbeat = (id: string) => authed(request(httpServer).post(`/pos/v1/devices/${id}/heartbeat`), token).send()
+
+      expect((await heartbeat(terminal.id)).status).toBe(204)
+      expect((await prisma.device.findUniqueOrThrow({ where: { id: terminal.id } })).lastContactAt).not.toBeNull()
+      expect((await heartbeat(uuidv7())).status).toBe(404)
+      const elsewhere = await device(tenantId, await createOutlet(prisma, tenantId, 'Koramangala'), 'terminal')
+      expect((await heartbeat(elsewhere.id)).status).toBe(404)
+    })
+  })
+
   describe('money-path invariants', () => {
     it('the database refuses an electronic tender with no intent behind it, and a cash tender that claims one', async () => {
       const { tenantId, billId, token } = await setUpOpenBill()

@@ -36,6 +36,7 @@
 import { BadRequestException, ConflictException, ForbiddenException, Injectable, NotFoundException } from '@nestjs/common'
 import { ManagerApproval, ManagerAuthService, PosPrincipal, RegionRegistryService, uuidv7 } from '../../platform'
 import { setTenantContext } from '../tenant-context'
+import { linkedPeripheral, queueFor } from '../device-routing'
 import { assertOwner, loadOrder } from '../orders/orders.service'
 import { buildInvoiceView, commitFinalize, createOrGetBillRecord, createTenderRecord, loadBill, refreshOpenBillTotals, toBillView } from './bill-core'
 import { BillView, CreditNoteLineView, CreditNoteView, FinalizeBillDto, InvoiceView, PrintJobView, RefundBillDto } from './bills.dtos'
@@ -141,26 +142,29 @@ export class BillsService {
   // polls listPendingPrintJobs and acks each rendered job via markPrinted.
 
   /** POST .../bills/:id/print - snapshots the bill's current InvoiceView into a spooled job for the outlet's printer device. */
-  async printBill(staff: PosPrincipal, billId: string): Promise<PrintJobView> {
+  async printBill(staff: PosPrincipal, billId: string, sourceDeviceId?: string): Promise<PrintJobView> {
     const plane = this.plane()
     return plane.$transaction(async (tx) => {
       await setTenantContext(tx, staff.tenantId)
       const bill = await loadBill(tx, staff.tenantId, billId)
       const payload = await buildInvoiceView(tx, staff.tenantId, billId)
+      // Issue #134: a POS with a linked printer prints only there.
+      const targetDeviceId = await linkedPeripheral(tx, staff.tenantId, sourceDeviceId, 'printer')
       const job = await tx.printJob.create({
-        data: { id: uuidv7(), tenantId: staff.tenantId, outletId: bill.outletId, billId, payload: payload as unknown as Prisma.InputJsonValue },
+        data: { id: uuidv7(), tenantId: staff.tenantId, outletId: bill.outletId, billId, targetDeviceId, payload: payload as unknown as Prisma.InputJsonValue },
       })
       return toPrintJobView(job)
     })
   }
 
   /** GET .../outlets/:outletId/print-jobs - unprinted jobs, oldest first. Staff only see their own outlet's spool. */
-  async listPendingPrintJobs(staff: PosPrincipal, outletId: string): Promise<PrintJobView[]> {
+  async listPendingPrintJobs(staff: PosPrincipal, outletId: string, deviceId?: string): Promise<PrintJobView[]> {
     if (outletId !== staff.outletId) throw new ForbiddenException({ code: 'outlet_mismatch', message: 'Not your outlet' })
     const plane = this.plane()
     return plane.$transaction(async (tx) => {
       await setTenantContext(tx, staff.tenantId)
-      const jobs = await tx.printJob.findMany({ where: { tenantId: staff.tenantId, outletId, printedAt: null }, orderBy: { createdAt: 'asc' } })
+      const targetDeviceId = await queueFor(tx, staff.tenantId, deviceId, 'printer')
+      const jobs = await tx.printJob.findMany({ where: { tenantId: staff.tenantId, outletId, printedAt: null, targetDeviceId }, orderBy: { createdAt: 'asc' } })
       return jobs.map(toPrintJobView)
     })
   }

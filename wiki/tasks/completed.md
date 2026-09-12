@@ -1,5 +1,13 @@
 # Completed
 
+- **2026-09-12** - Device topology, issue #134. `devices.paired_pos_id`,
+  `print_jobs.target_device_id`, `payment_intents.target_device_id`
+  (migration `20260912120000_device_topology`, FKs `ON DELETE SET NULL`);
+  owner `PATCH .../devices/:deviceId/pairing`; print and card-terminal
+  routing to a POS's linked peripheral (`src/pos/device-routing.ts`); POS
+  realm heartbeat `POST /pos/v1/devices/:id/heartbeat`. New e2e cases in
+  `admin-devices`, `pos-bills` and `pos-payment-intents`. See
+  [wiki/features/tenant-admin.md](../features/tenant-admin.md) (CAP-6).
 - **2026-09-09** - Versioned platform agreement + owner digital signature, issue #132
   (backend half of restiq-web#192): `agreement_versions` (immutable, gap-free numbered,
   body sha256 fixed at publish, no RLS) and `agreement_signatures` (one per tenant per

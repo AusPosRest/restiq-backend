@@ -1056,6 +1056,9 @@ model Device {
   hardwareKeyFingerprint String       @map("hardware_key_fingerprint")
   enrolledAt             DateTime     @map("enrolled_at") @db.Timestamptz(6)
   revokedAt              DateTime?    @map("revoked_at") @db.Timestamptz(6)
+  // Device topology (issue #134): a printer/terminal linked to one POS
+  // serves only that POS; null = it serves the whole outlet.
+  pairedPosId            String?      @map("paired_pos_id") @db.Uuid
 
   // CAP-6 sync health: latest-heartbeat snapshot, not an event log (NFR-15 -
   // metadata only, there is no payload field to begin with). A device that
@@ -1070,9 +1073,14 @@ model Device {
   tenant      Tenant           @relation(fields: [tenantId], references: [id])
   outlet      Outlet?          @relation(fields: [outletId], references: [id])
   deadLetters SyncDeadLetter[]
+  pairedPos              Device?         @relation("DevicePairing", fields: [pairedPosId], references: [id], onDelete: SetNull)
+  pairedPeripherals      Device[]        @relation("DevicePairing")
+  targetedPrintJobs      PrintJob[]
+  targetedPaymentIntents PaymentIntent[]
 
   @@index([tenantId])
   @@index([outletId])
+  @@index([pairedPosId])
   @@map("devices")
 }
 
@@ -1505,13 +1513,18 @@ model PrintJob {
   payload   Json
   createdAt DateTime  @default(now()) @map("created_at") @db.Timestamptz(6)
   printedAt DateTime? @map("printed_at") @db.Timestamptz(6)
+  // Device topology (issue #134): the printer linked to the sending POS, or
+  // null for the outlet-wide queue.
+  targetDeviceId String? @map("target_device_id") @db.Uuid
 
-  tenant Tenant @relation(fields: [tenantId], references: [id])
-  outlet Outlet @relation(fields: [outletId], references: [id])
-  bill   Bill   @relation(fields: [billId], references: [id], onDelete: Cascade)
+  tenant       Tenant  @relation(fields: [tenantId], references: [id])
+  outlet       Outlet  @relation(fields: [outletId], references: [id])
+  bill         Bill    @relation(fields: [billId], references: [id], onDelete: Cascade)
+  targetDevice Device? @relation(fields: [targetDeviceId], references: [id], onDelete: SetNull)
 
   @@index([tenantId])
   @@index([outletId, printedAt])
+  @@index([targetDeviceId])
   @@map("print_jobs")
 }
 
@@ -1628,11 +1641,16 @@ model PaymentIntent {
   bill           Bill       @relation(fields: [billId], references: [id])
   createdByStaff StaffUser? @relation(fields: [createdByStaffId], references: [id])
   tender         Tender?
+  // Device topology (issue #134): the terminal linked to the sending POS, or
+  // null for the outlet-wide queue.
+  targetDeviceId String?             @map("target_device_id") @db.Uuid
+  targetDevice   Device?             @relation(fields: [targetDeviceId], references: [id], onDelete: SetNull)
 
   @@unique([tenantId, clientKey])
   @@index([tenantId])
   @@index([billId, status])
   @@index([outletId, status])
+  @@index([targetDeviceId])
   @@map("payment_intents")
 }
 
