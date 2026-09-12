@@ -19,6 +19,7 @@ import { ConflictException, GoneException, Injectable, NotFoundException } from 
 import type { Order, Prisma, TableSession } from '../../generated/prisma/client'
 import { buildInvoiceView, commitFinalize, createOrGetBillRecord, createTenderRecord, loadBill, toBillView } from '../../pos/bills'
 import type { BillWithTenders, InvoiceView } from '../../pos/bills'
+import { confirmIntent } from '../../pos/payments'
 import { GuestPrincipal, RegionRegistryService, uuidv7 } from '../../platform'
 import { isSessionInactive } from '../sessions/sessions.service'
 import { setTenantContext } from '../tenant-context'
@@ -227,18 +228,52 @@ export class GuestBillsService {
       if (dto.simulatedOutcome === 'success') {
         const totalMinor = bill.subtotalMinor + bill.taxMinor
         // Issue #144: a kiosk (table-less) session pays on the kiosk's own card
-        // reader, so its tender is card_terminal; a table's QR checkout stays UPI.
-        const method = session.tableId === null ? 'card_terminal' : 'upi_manual'
-        const tender = await createTenderRecord(tx, { tenantId: guest.tenantId, billId, method, amountMinor: totalMinor })
+        // reader; a table's QR checkout stays a manual UPI tender.
+        const tenderId =
+          session.tableId === null
+            ? await this.payByKioskCard(tx, guest.tenantId, bill, totalMinor)
+            : (await createTenderRecord(tx, { tenantId: guest.tenantId, billId, method: 'upi_manual', amountMinor: totalMinor })).id
         await tx.billShare.updateMany({
           where: { billId },
-          data: { status: 'paid', payerPhone: dto.payerPhone ?? null, tenderId: tender.id, paidAt: new Date() },
+          data: { status: 'paid', payerPhone: dto.payerPhone ?? null, tenderId, paidAt: new Date() },
         })
         await this.completeBill(tx, guest.tenantId, bill, order)
       }
 
       return this.buildView(tx, guest.tenantId, billId)
     })
+  }
+
+  /**
+   * Issue #144: card money needs a payment intent - the tenders CHECK
+   * constraint (tenders_electronic_needs_intent) requires one on every
+   * electronic tender - so the kiosk's card goes through the same intent +
+   * confirmIntent path as the POS card terminal. The kiosk's reader is
+   * simulated, so the intent is raised and confirmed in this one transaction
+   * (it never sits in a terminal queue). Returns the card_terminal tender id.
+   */
+  private async payByKioskCard(tx: Tx, tenantId: string, bill: BillWithTenders, amountMinor: bigint): Promise<string> {
+    const tenant = await tx.tenant.findUniqueOrThrow({ where: { id: tenantId }, select: { country: true } })
+    const intent = await tx.paymentIntent.create({
+      data: {
+        id: uuidv7(),
+        tenantId,
+        outletId: bill.outletId,
+        billId: bill.id,
+        rail: 'card_terminal',
+        provider: 'simulated',
+        amountMinor,
+        currency: tenant.country === 'AU' ? 'AUD' : 'INR',
+        status: 'pending',
+        // One whole-bill payment per bill: pay-all finalises it, so this key never repeats.
+        clientKey: `kiosk:${bill.id}`,
+        clientPayload: { simulated: true },
+        expiresAt: new Date(Date.now() + 60_000),
+      },
+    })
+    const confirmed = await confirmIntent(tx, { tenantId, intentId: intent.id })
+    if (!confirmed.tender) throw new Error(`confirmIntent wrote no tender for intent ${intent.id}`)
+    return confirmed.tender.id
   }
 
   private async writeShares(tx: Tx, tenantId: string, bill: BillWithTenders): Promise<BillShareView[]> {

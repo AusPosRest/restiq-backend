@@ -228,6 +228,8 @@ describe('/guest/v1/kiosk kiosk ordering (e2e)', () => {
     expect((invoice.body as { tenders: Array<{ method: string; amountMinor: number }> }).tenders).toEqual([
       expect.objectContaining({ method: 'card_terminal', amountMinor: bill.totalMinor }),
     ])
+    // The card money went through a confirmed payment intent, like the POS card terminal's.
+    expect(await prisma.paymentIntent.count({ where: { billId: bill.id, rail: 'card_terminal', status: 'succeeded' } })).toBe(1)
   })
 
   it('refuses a revoked, non-kiosk, other-outlet or unknown device as 404, and a disabled capability as 403', async () => {
