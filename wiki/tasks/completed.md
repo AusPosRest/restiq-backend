@@ -807,3 +807,12 @@
   counter-orders suites green. See
   [wiki/features/pos-cashier-waiter.md](../features/pos-cashier-waiter.md)
   (Payments, first slice).
+- **2026-09-12** - Admin devices: owner-scoped revoke (issue #140).
+  `POST admin/v1/outlets/:outletId/devices/:deviceId/revoke { reason }` on
+  `AdminDevicesService` - status → revoked with `revokedAt`, peripherals
+  linked to a revoked POS fall back to the outlet, queued print jobs /
+  payment intents for the device go to the outlet-wide queue, audit row
+  `device.revoked` with the owner as actor; 404 cross-tenant/outlet, 409 on a
+  second revoke, 400 without a reason. 3 new e2e tests in
+  `test/admin-devices.e2e-spec.ts`. See
+  [wiki/features/tenant-admin.md](../features/tenant-admin.md) CAP-6.

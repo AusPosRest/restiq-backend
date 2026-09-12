@@ -2,7 +2,7 @@
 // request body - they come from the signed-in owner's session and the
 // :outletId path segment respectively (AD-5), unlike the ops-realm
 // GenerateCodeDto which trusts an operator to name any tenant.
-import { IsIn, IsOptional, IsString, IsUUID, MaxLength, ValidateIf } from 'class-validator'
+import { IsIn, IsNotEmpty, IsOptional, IsString, IsUUID, MaxLength, ValidateIf } from 'class-validator'
 import { DEVICE_TYPES, DeviceTypeValue } from '../../ops'
 
 // Device topology (issue #134): the POS a printer/terminal serves, or null
@@ -10,6 +10,14 @@ import { DEVICE_TYPES, DeviceTypeValue } from '../../ops'
 export class AdminDevicePairingDto {
   @ValidateIf((_, value) => value !== null) @IsUUID()
   posDeviceId!: string | null
+}
+
+// Owner-side removal (issue #140): revoke, never delete. The reason is
+// mandatory - it lands in audit_events (AD-6), same as every other owner
+// mutation with a confirm-and-reason step.
+export class AdminRevokeDeviceDto {
+  @IsString() @IsNotEmpty() @MaxLength(500)
+  reason!: string
 }
 
 export class AdminGenerateCodeDto {
