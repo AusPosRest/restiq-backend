@@ -425,7 +425,7 @@ export async function commitFinalize(tx: Tx, params: CommitFinalizeParams): Prom
 // provisioning to price the tenant's seed menu - Tenant carries no currency
 // column of its own, so this is the one place that rule is re-derived rather
 // than read back.
-function currencyForCountry(country: TaxCountry): string {
+export function currencyForCountry(country: TaxCountry): string {
   return country === 'IN' ? 'INR' : 'AUD'
 }
 

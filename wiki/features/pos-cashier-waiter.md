@@ -1576,3 +1576,23 @@ a real Postgres test DB)
   connectivity status", singular and static, with no real device driver
   call in this prototype; wiring it to real `Printer` rows would imply a
   liveness check this codebase has nowhere to perform.
+
+## Payment history - today's payments at the outlet (issue #158)
+
+- **Intent:** a cashier sees every payment taken at their outlet today, who
+  took it, and per-method totals - without opening the owner's reports.
+- **Route:** `GET pos/v1/outlets/:outletId/payments` (pos realm; the outlet
+  must belong to the token's tenant, else 404) →
+  `{ outletId, date, asOf, currency, totalMinor, count, byMethod[], payments[] }`.
+  `payments[]` is every `tenders` row on a **finalized** bill at the outlet
+  whose `created_at` falls on today in `outlet.timezone` (48 h lookback +
+  `clock.util.ts#localDateKey`, the same "today" attendance uses), newest
+  first: `{ id, billId, billNumber, orderId, tableLabel, tokenNumber,
+  method, amountMinor, reference, takenBy: { staffId, name } | null,
+  createdAt }`. `takenBy` is the bill's finalising staff member.
+  `byMethod[]` is `{ method, count, amountMinor }` sorted by amount.
+- **Built in:** `bills.service.ts#listPaymentsToday`, `bills.dtos.ts`
+  `PaymentHistoryView`. `bill-core.ts#currencyForCountry` is now exported.
+- **Tests:** `pos-bills.e2e-spec.ts` ▸ "GET /pos/v1/outlets/:outletId/payments".
+- **Not built (by design):** refunds/credit notes in the list (separate
+  ledger), pagination, a date picker (today only, per the ask).
