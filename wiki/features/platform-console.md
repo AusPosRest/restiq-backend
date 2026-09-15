@@ -174,3 +174,37 @@ See `wiki/features/tenant-admin.md`'s CAP-108 section for the
 - **Not built (by design):** platform countersignature, gating go-live on a
   signature, PDF export, third-party e-sign. The typed-name-plus-hash record
   is the evidence; swap in a provider if a legal review asks for one.
+
+## Product directory - platform catalog tenants copy from (issue #153, `src/ops/catalog/`)
+
+- **Intent:** operators curate one platform-wide list of products (name,
+  short name, Hindi name, veg marker, photo URL, category, suggested price,
+  free-form tags). An owner searches it and imports a selection as copies
+  into their own menu, then edits freely - nothing links back, so tenant
+  edits never touch the directory and directory edits never touch a tenant.
+- **Data:** `catalog_products` (migration `20260916100000_catalog_products`).
+  No `tenant_id`, no RLS (same shape as `agreement_versions`). `tags` is a
+  native `TEXT[]`, normalised to trimmed lower-case on write. `currency`
+  (`INR` | `AUD`) doubles as the market: a tenant only sees products priced
+  in the currency its country maps to.
+- **Routes (ops realm):** `GET ops/v1/catalog/products?q=&tag=&currency=`
+  (`q` matches name, category or an exact tag, case-insensitive);
+  `GET ops/v1/catalog/products/tags?currency=` → distinct sorted tags;
+  `POST ops/v1/catalog/products` → 201 `{ product }`; `PATCH .../:id`;
+  `DELETE .../:id` → 204. Each write records a control-plane audit row
+  (`catalog.product.created|updated|deleted`).
+- **Routes (admin realm, `src/admin/menu/directory.controller.ts`):**
+  `GET admin/v1/menu/directory?q=&tag=` and `GET .../tags` (currency-scoped
+  to the tenant); `POST admin/v1/menu/directory/import { productIds[] }` →
+  201 `{ categories[], items[] }` - the same shape as the menu-import commit.
+  A product outside the tenant's currency is 400; a copy that collides with
+  an existing item name in the same category is 409 `conflict`; the whole
+  import is one transaction plus a tenant `audit_events` row `menu.imported`.
+- **Shared write path:** `src/admin/menu/commit-items.ts#commitItems` is the
+  one find-or-create-category + insert-item + insert-first-price loop, used
+  by both the CAP-3 menu-import commit and the directory import.
+- **Tests:** `test/product-directory.e2e-spec.ts`.
+- **Not built (by design):** a link from an imported item back to its
+  product (add when "already imported" badges or push-updates are wanted),
+  allergens/modifier groups on products (tags cover dietary labels), bulk
+  CSV upload into the directory, a GIN index on `tags`.
