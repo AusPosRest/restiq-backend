@@ -866,3 +866,10 @@ built here, story by story.
   (CAP-2) rather than a new column - the value already exists in the audit
   trail; adding a dedicated `Tenant.goLiveAt` column would duplicate it
   with no independent source of truth.
+
+## Menu photos setting (issue #148)
+
+Outlet capability `menu_photos` (free-text key on `outlet_capabilities`, no
+migration). **Absent row = on**; only an explicit `enabled: false` hides photos.
+`pos/menu` and `guest/menu` (list + item) return `photoUrl: null` when off. Admin
+menu reads always return the stored photo.

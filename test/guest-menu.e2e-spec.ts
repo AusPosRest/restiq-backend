@@ -361,4 +361,22 @@ describe('/guest/v1/menu (e2e)', () => {
     expect(singleItem.nameHindi).toBe('पनीर टिक्का')
     expect(singleItem.vegMarker).toBe('veg')
   })
+
+  it('nulls photoUrl on the menu and item detail when the outlet turns menu_photos off (#148)', async () => {
+    const tenantId = await createTenant(prisma)
+    const outletId = await createOutlet(prisma, tenantId)
+    const tableId = await createTable(prisma, tenantId, outletId)
+    const category = await prisma.menuCategory.create({ data: { tenantId, name: 'Starters', sortOrder: 0 } })
+    const item = await prisma.menuItem.create({
+      data: { tenantId, categoryId: category.id, name: 'Masala Dosa', shortName: 'MD', photoUrl: 'https://cdn.example.com/dosa.jpg' },
+    })
+    await prisma.outletCapability.create({ data: { tenantId, outletId, key: 'menu_photos', enabled: false } })
+
+    const { token } = guestTokenFor(tenantId, outletId, tableId)
+    const menuRes = await request(httpServer).get('/guest/v1/menu').set('Authorization', `Bearer ${token}`)
+    expect((menuRes.body as GuestMenuBody).categories[0].items[0].photoUrl).toBeNull()
+
+    const itemRes = await request(httpServer).get(`/guest/v1/menu/items/${item.id}`).set('Authorization', `Bearer ${token}`)
+    expect((itemRes.body as MenuItemBody).photoUrl).toBeNull()
+  })
 })

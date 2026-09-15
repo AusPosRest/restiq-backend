@@ -222,6 +222,21 @@ describe('/pos/v1/menu (e2e)', () => {
     expect(body.items[0]).toMatchObject({ id: itemId, categoryId, priceMinor: 19000, variants: [], available: true })
   })
 
+  it('carries photoUrl by default, and nulls it once the outlet turns menu_photos off (#148)', async () => {
+    const tenantId = await createTenant(prisma)
+    const outletId = await createOutlet(prisma, tenantId)
+    const waiter = await createStaff(prisma, tenantId, outletId, 'Asha')
+    const { itemId } = await createItemWithPrice(prisma, tenantId, 19000)
+    await prisma.menuItem.update({ where: { id: itemId }, data: { photoUrl: 'https://cdn.example.com/dosa.jpg' } })
+
+    const on = await authed(request(httpServer).get('/pos/v1/menu'), waiter.token)
+    expect(on.body).toMatchObject({ items: [{ id: itemId, photoUrl: 'https://cdn.example.com/dosa.jpg' }] })
+
+    await prisma.outletCapability.create({ data: { tenantId, outletId, key: 'menu_photos', enabled: false } })
+    const off = await authed(request(httpServer).get('/pos/v1/menu'), waiter.token)
+    expect(off.body).toMatchObject({ items: [{ id: itemId, photoUrl: null }] })
+  })
+
   it('prices a varianted item per-variant, with a null base price', async () => {
     const tenantId = await createTenant(prisma)
     const outletId = await createOutlet(prisma, tenantId)

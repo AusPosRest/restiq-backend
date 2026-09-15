@@ -28,6 +28,8 @@ export interface MenuItemView {
   categoryId: string
   name: string
   shortName: string
+  /** Null when the item has none, or the outlet turned `menu_photos` off. */
+  photoUrl: string | null
   available: boolean
   /** Base price when the item has no variants; null when priced per-variant (see variants[].priceMinor instead). */
   priceMinor: number | null

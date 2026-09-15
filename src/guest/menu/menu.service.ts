@@ -50,7 +50,13 @@ function resolveAvailability(item: Pick<ItemWithRelations, 'available' | 'outlet
   return override ? override.available : item.available
 }
 
-async function toItemView(tx: Tx, tenantId: string, outletId: string, item: ItemWithRelations): Promise<MenuItemView> {
+/** Outlet capability `menu_photos` - absent row = on; only an explicit off hides photos. */
+async function showPhotos(tx: Tx, outletId: string): Promise<boolean> {
+  const row = await tx.outletCapability.findUnique({ where: { outletId_key: { outletId, key: 'menu_photos' } } })
+  return row?.enabled !== false
+}
+
+async function toItemView(tx: Tx, tenantId: string, outletId: string, item: ItemWithRelations, photos: boolean): Promise<MenuItemView> {
   const hasVariants = item.variants.length > 0
   let priceMinor: number | null = null
   let currency: string | null = null
@@ -78,7 +84,7 @@ async function toItemView(tx: Tx, tenantId: string, outletId: string, item: Item
     categoryId: item.categoryId,
     name: item.name,
     shortName: item.shortName,
-    photoUrl: item.photoUrl,
+    photoUrl: photos ? item.photoUrl : null,
     nameHindi: item.nameHindi,
     vegMarker: item.vegMarker,
     available: resolveAvailability(item, outletId),
@@ -113,13 +119,14 @@ export class GuestMenuService {
         include: { items: { include: ITEM_INCLUDE, orderBy: { createdAt: 'asc' } } },
         orderBy: { sortOrder: 'asc' },
       })
+      const photos = await showPhotos(tx, guest.outletId)
 
       const categoryViews: MenuCategoryView[] = await Promise.all(
         categories.map(async (category) => ({
           id: category.id,
           name: category.name,
           sortOrder: category.sortOrder,
-          items: await Promise.all(category.items.map((item) => toItemView(tx, guest.tenantId, guest.outletId, item))),
+          items: await Promise.all(category.items.map((item) => toItemView(tx, guest.tenantId, guest.outletId, item, photos))),
         })),
       )
 
@@ -135,7 +142,7 @@ export class GuestMenuService {
       if (!item || item.tenantId !== guest.tenantId) {
         throw new NotFoundException({ code: 'not_found', message: 'No such menu item' })
       }
-      return toItemView(tx, guest.tenantId, guest.outletId, item)
+      return toItemView(tx, guest.tenantId, guest.outletId, item, await showPhotos(tx, guest.outletId))
     })
   }
 }
