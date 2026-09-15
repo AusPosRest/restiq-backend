@@ -1,5 +1,11 @@
 # Completed
 
+- **2026-09-16** - Product directory, issue #153. `catalog_products` (migration
+  `20260916100000_catalog_products`, platform-wide, `TEXT[]` tags, currency as market);
+  ops CRUD `ops/v1/catalog/products`; owner `admin/v1/menu/directory` list/tags/import.
+  Menu-import commit loop extracted to `src/admin/menu/commit-items.ts` and shared.
+  e2e in `product-directory.e2e-spec.ts`. Web: restiq-web#245.
+
 - **2026-09-15** - External payment tender, issue #146. `TenderMethod.external` +
   `tenders.reference` (migration `20260915120000_external_tender`; CHECKs: external needs no
   intent and must carry a reference). `TenderDto.reference` required for external (1-64 chars,

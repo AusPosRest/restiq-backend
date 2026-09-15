@@ -12,3 +12,7 @@ export type { DeviceTypeValue } from './devices/devices.dtos'
 export { AgreementsService } from './agreements/agreements.service'
 export { SignAgreementDto } from './agreements/agreements.dtos'
 export type { AgreementSignatureView, OwnerAgreementView } from './agreements/agreements.dtos'
+// #153: one product-directory implementation, curated from /ops and imported from /admin.
+export { CatalogService } from './catalog/catalog.service'
+export { ImportCatalogProductsDto } from './catalog/catalog.dtos'
+export type { CatalogProductView } from './catalog/catalog.dtos'

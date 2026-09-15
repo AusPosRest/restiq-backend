@@ -623,6 +623,13 @@ built here, story by story.
   evidence hash are documented once, in
   [platform-console.md](platform-console.md#agreements---versioned-platform-agreement-owner-signed-issue-132-srcopsagreements).
 
+## Product directory - import from the platform catalog (issue #153)
+
+- Owner-side read/import of the operator-curated product directory. Routes
+  live under `admin/v1/menu/directory` (`src/admin/menu/directory.controller.ts`)
+  and call the ops module's `CatalogService`; full write-up under
+  [platform-console.md](platform-console.md#product-directory---platform-catalog-tenants-copy-from-issue-153-srcopscatalog).
+
 ## Integration points for story 6+ and beyond
 
 - None of CAP-4's tables are read by another CAP yet. A future POS/QR

@@ -1974,3 +1974,28 @@ model AgreementSignature {
   @@index([tenantId])
   @@map("agreement_signatures")
 }
+
+// Product directory (issue #153): a platform-wide library operators curate
+// and tenants copy from. No tenant_id, no RLS - every tenant browses the
+// same rows (same shape as agreement_versions). An import is a copy into
+// menu_items/item_prices; nothing links back, so tenant edits never touch
+// the directory and directory edits never touch a tenant.
+model CatalogProduct {
+  id                  String     @id @default(uuid(7)) @db.Uuid
+  name                String
+  shortName           String     @map("short_name")
+  nameHindi           String?    @map("name_hindi")
+  vegMarker           VegMarker? @map("veg_marker")
+  photoUrl            String?    @map("photo_url")
+  category            String
+  suggestedPriceMinor BigInt     @map("suggested_price_minor")
+  // ponytail: the currency doubles as the market (INR = India, AUD =
+  // Australia); a tenant only sees products priced in its own currency.
+  currency            String     @db.Char(3)
+  tags                String[]   @default([])
+  createdAt           DateTime   @default(now()) @map("created_at") @db.Timestamptz(6)
+  updatedAt           DateTime   @updatedAt @map("updated_at") @db.Timestamptz(6)
+
+  @@index([currency])
+  @@map("catalog_products")
+}
