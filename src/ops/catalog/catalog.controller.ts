@@ -30,7 +30,7 @@ export class OpsCatalogController {
 
   @Delete(':id')
   @HttpCode(204)
-  remove(@CurrentOperator() operator: OpsPrincipal, @Param('id', ParseUUIDPipe) id: string): Promise<void> {
-    return this.catalog.remove(operator, id)
+  remove(@CurrentOperator() operator: OpsPrincipal, @Param('id', ParseUUIDPipe) id: string, @Query('reason') reason?: string): Promise<void> {
+    return this.catalog.remove(operator, id, reason)
   }
 }

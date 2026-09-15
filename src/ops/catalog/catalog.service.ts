@@ -100,10 +100,17 @@ export class CatalogService {
     return { product: toView(row) }
   }
 
-  async remove(operator: OpsPrincipal, id: string): Promise<void> {
+  async remove(operator: OpsPrincipal, id: string, reason?: string): Promise<void> {
     const row = await this.mustExist(id)
     await this.plane.catalogProduct.delete({ where: { id } })
-    await this.audit.record({ actorId: operator.id, actorEmail: operator.email, action: 'catalog.product.deleted', reason: row.name, occurredAt: new Date() })
+    const why = reason?.trim().slice(0, 500)
+    await this.audit.record({
+      actorId: operator.id,
+      actorEmail: operator.email,
+      action: 'catalog.product.deleted',
+      reason: why ? `${row.name}: ${why}` : row.name,
+      occurredAt: new Date(),
+    })
   }
 
   // --- Owner realm -------------------------------------------------------

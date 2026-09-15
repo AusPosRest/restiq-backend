@@ -109,7 +109,9 @@ describe('product directory (e2e)', () => {
     expect(edited.product.tags).toEqual(['veg'])
 
     await request(httpServer).post('/ops/v1/catalog/products').set('Authorization', `Bearer ${opsToken}`).send({ ...PANEER, currency: 'USD' }).expect(400)
-    await request(httpServer).delete(`/ops/v1/catalog/products/${paneer.id}`).set('Authorization', `Bearer ${opsToken}`).expect(204)
+    await request(httpServer).delete(`/ops/v1/catalog/products/${paneer.id}?reason=Discontinued`).set('Authorization', `Bearer ${opsToken}`).expect(204)
+    const deleted = await prisma.controlPlaneAuditEvent.findFirst({ where: { action: 'catalog.product.deleted' }, orderBy: { occurredAt: 'desc' } })
+    expect(deleted?.reason).toBe('Paneer Tikka: Discontinued')
     await request(httpServer).delete(`/ops/v1/catalog/products/${paneer.id}`).set('Authorization', `Bearer ${opsToken}`).expect(404)
     await request(httpServer).get('/ops/v1/catalog/products').expect(401)
   })
