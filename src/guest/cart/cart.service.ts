@@ -56,7 +56,7 @@ type CartLineWithRelations = Prisma.CartLineGetPayload<{ include: typeof LINE_IN
 
 async function loadItemForCartLine(tx: Tx, tenantId: string, itemId: string): Promise<ItemForCartLine> {
   const item = await tx.menuItem.findUnique({ where: { id: itemId }, include: ITEM_INCLUDE })
-  if (!item || item.tenantId !== tenantId) {
+  if (!item || item.tenantId !== tenantId || item.archivedAt) {
     throw new BadRequestException({ code: 'validation_failed', message: 'No such menu item' })
   }
   return item

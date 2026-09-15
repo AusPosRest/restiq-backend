@@ -44,7 +44,7 @@ const ITEM_INCLUDE = {
 
 async function loadItemForOrderLine(tx: Tx, tenantId: string, itemId: string): Promise<ItemForOrderLine> {
   const item = await tx.menuItem.findUnique({ where: { id: itemId }, include: ITEM_INCLUDE })
-  if (!item || item.tenantId !== tenantId) {
+  if (!item || item.tenantId !== tenantId || item.archivedAt) {
     throw new BadRequestException({ code: 'validation_failed', message: 'No such menu item' })
   }
   return item

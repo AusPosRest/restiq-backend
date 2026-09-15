@@ -366,6 +366,9 @@ model MenuItem {
   // the outlet's designated default/expo station at fire time, not here.
   stationId  String?    @map("station_id") @db.Uuid
   createdAt  DateTime   @default(now()) @map("created_at") @db.Timestamptz(6)
+  // restiq-web#248: set when the owner deletes the item. The row stays (order
+  // and cart lines reference it); every menu read filters archivedAt: null.
+  archivedAt DateTime?  @map("archived_at") @db.Timestamptz(6)
 
   tenant          Tenant               @relation(fields: [tenantId], references: [id])
   category        MenuCategory         @relation(fields: [categoryId], references: [id])
@@ -379,9 +382,10 @@ model MenuItem {
   orderLines      OrderLine[]
   cartLines       CartLine[]
 
-  // No two items in the same category may share a name (also the natural
-  // forced-failure anchor for the menu-import commit atomicity test).
-  @@unique([tenantId, categoryId, name])
+  // No two LIVE items in the same category may share a name: a partial unique
+  // index (menu_items_live_name_per_category, WHERE archived_at IS NULL) in
+  // 20260916120000_menu_item_archive/migration.sql, so a deleted item's name
+  // can be reused. Prisma's schema DSL has no partial-index syntax.
   @@map("menu_items")
 }
 

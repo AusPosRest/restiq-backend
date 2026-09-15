@@ -34,7 +34,7 @@ export class CombosService {
         await setTenantContext(tx, owner.tenantId)
         for (const component of dto.components) {
           const item = await tx.menuItem.findUnique({ where: { id: component.itemId } })
-          if (!item || item.tenantId !== owner.tenantId) {
+          if (!item || item.tenantId !== owner.tenantId || item.archivedAt) {
             throw new BadRequestException({ code: 'validation_failed', message: `No such item: ${component.itemId}` })
           }
         }

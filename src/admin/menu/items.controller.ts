@@ -46,6 +46,13 @@ export class AdminMenuItemsController {
     return this.items.update(owner, itemId, dto)
   }
 
+  // restiq-web#248: archives rather than deletes - see ItemsService.archive.
+  @Delete(':itemId')
+  @HttpCode(204)
+  archive(@CurrentOwner() owner: AdminPrincipal, @Param('itemId') itemId: string): Promise<void> {
+    return this.items.archive(owner, itemId)
+  }
+
   // 86 toggle - immediate, reflected in this same response.
   @Patch(':itemId/availability')
   setAvailability(@CurrentOwner() owner: AdminPrincipal, @Param('itemId') itemId: string, @Body() dto: SetAvailabilityDto): Promise<ItemView> {
