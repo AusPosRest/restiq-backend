@@ -132,6 +132,7 @@ function toTenderView(t: BillWithTenders['tenders'][number]): TenderView {
     amountMinor: Number(t.amountMinor),
     paymentIntentId: t.paymentIntentId,
     riskAcknowledged: t.riskAcknowledged,
+    reference: t.reference,
     createdAt: t.createdAt.toISOString(),
   }
 }
@@ -314,6 +315,8 @@ export async function createTenderRecord(
     // without it and a cash / manual one with it.
     paymentIntentId?: string
     riskAcknowledged?: boolean
+    // External tenders only (issue #146) - the CHECK rejects it on any other method.
+    reference?: string
   },
 ): Promise<BillWithTenders['tenders'][number]> {
   return tx.tender.create({
@@ -325,6 +328,7 @@ export async function createTenderRecord(
       amountMinor: params.amountMinor,
       paymentIntentId: params.paymentIntentId ?? null,
       riskAcknowledged: params.riskAcknowledged ?? false,
+      reference: params.reference ?? null,
     },
   })
 }

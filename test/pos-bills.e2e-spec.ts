@@ -445,6 +445,32 @@ describe('/pos/v1 bill and settle (e2e)', () => {
       expect((res.body as BillBody).tenders).toHaveLength(2)
     })
 
+    it('records an external tender with its reference, and rejects one without (issue #146)', async () => {
+      const tenantId = await createTenant(prisma)
+      const outletId = await createOutlet(prisma, tenantId)
+      const { orderId, ownerToken } = await setUpSentOrder(tenantId, outletId, 10000)
+      const created = await authed(request(httpServer).post(`/pos/v1/orders/${orderId}/bill`), ownerToken).send()
+      const billId = (created.body as BillBody).id
+
+      const missing = await authed(request(httpServer).post(`/pos/v1/bills/${billId}/finalize`), ownerToken).send({
+        tenders: [{ method: 'external', amountMinor: 21000 }],
+      })
+      expect(missing.status).toBe(400)
+
+      const res = await authed(request(httpServer).post(`/pos/v1/bills/${billId}/finalize`), ownerToken).send({
+        tenders: [
+          { method: 'cash', amountMinor: 1000 },
+          { method: 'external', amountMinor: 20000, reference: ' EFT-004512 ' },
+        ],
+      })
+      expect(res.status).toBe(200)
+      const tenders = (res.body as { tenders: { method: string; reference: string | null }[] }).tenders
+      expect(tenders.map((t) => [t.method, t.reference])).toEqual([
+        ['cash', null],
+        ['external', 'EFT-004512'],
+      ])
+    })
+
     it('rejects a mismatched tender sum', async () => {
       const tenantId = await createTenant(prisma)
       const outletId = await createOutlet(prisma, tenantId)
@@ -799,7 +825,7 @@ describe('/pos/v1 bill and settle (e2e)', () => {
       expect(invoice.taxBreakdown.reduce((sum, l) => sum + l.amountMinor, 0)).toBe(invoice.taxMinor)
       expect(invoice.totalMinor).toBe(26250)
       expect(invoice.pricesIncludeTax).toBe(false)
-      expect(invoice.tenders).toEqual([{ id: expect.any(String) as string, method: 'cash', amountMinor: 26250, paymentIntentId: null, riskAcknowledged: false, createdAt: expect.any(String) as string }])
+      expect(invoice.tenders).toEqual([{ id: expect.any(String) as string, method: 'cash', amountMinor: 26250, paymentIntentId: null, riskAcknowledged: false, reference: null, createdAt: expect.any(String) as string }])
       expect(invoice.creditNotes).toEqual([])
       expect(invoice.notes).toEqual([])
     })

@@ -2,13 +2,14 @@
 // request body - they come from the signed-in pos session, same posture as
 // every other pos DTO (AD-5).
 import { Type } from 'class-transformer'
-import { ArrayMinSize, IsArray, IsBoolean, IsIn, IsInt, IsOptional, IsString, IsUUID, Min, MinLength, ValidateNested } from 'class-validator'
+import { ArrayMinSize, IsArray, IsBoolean, IsIn, IsInt, IsOptional, IsString, IsUUID, MaxLength, Min, MinLength, ValidateIf, ValidateNested } from 'class-validator'
 import type { BillStatus, TenderMethod } from '../../generated/prisma/client'
 
 // Only the cashier-asserted methods are postable here. The electronic ones
 // (card_terminal, ...) are written by src/pos/payments' confirmIntent when
-// the provider confirms, never by this DTO (issue #130, ADR-001).
-export const TENDER_METHODS = ['cash', 'upi_manual'] as const
+// the provider confirms, never by this DTO (issue #130, ADR-001). `external`
+// (issue #146) is money taken outside RESTIQ - asserted by the cashier too.
+export const TENDER_METHODS = ['cash', 'upi_manual', 'external'] as const
 
 export class TenderDto {
   @IsIn(TENDER_METHODS)
@@ -23,6 +24,12 @@ export class TenderDto {
   // upi_manual without it) lands with epic #129 B5 once the web sends it.
   @IsOptional() @IsBoolean()
   riskAcknowledged?: boolean
+
+  // issue #146: required for an external tender (the outside receipt / bill
+  // number); ignored for every other method.
+  @ValidateIf((tender: TenderDto) => tender.method === 'external')
+  @IsString() @MinLength(1) @MaxLength(64)
+  reference?: string
 }
 
 // discountMinor/discountReason are optional, but only together - a bare
@@ -57,6 +64,8 @@ export interface TenderView {
   // / upi_manual, always set for an electronic method (DB CHECK).
   paymentIntentId: string | null
   riskAcknowledged: boolean
+  // The external tender's reference / bill number (issue #146); null otherwise.
+  reference: string | null
   createdAt: string
 }
 
