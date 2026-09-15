@@ -226,22 +226,20 @@ describe('/admin/v1/menu-import (e2e)', () => {
       expect(body.items.find((i) => i.name === 'Butter Chicken')?.priceMinor).toBe(32000)
     })
 
-    it('returns a fixed, lower-confidence stub draft for an image source, and does not fail the upload', async () => {
+    it('refuses an image source with 422 instead of drafting made-up sample items (restiq-web#246)', async () => {
       const { token } = await createOwner(prisma)
       const res = await upload(token, pngBuffer(), 'scan.png')
 
-      expect(res.status).toBe(201)
-      const body = res.body as DraftBody
-      expect(body.sourceType).toBe('image')
-      expect(body.items.length).toBeGreaterThan(0)
-      expect(body.items.every((i) => i.confidence.overall < 1)).toBe(true)
+      expect(res.status).toBe(422)
+      expect((res.body as { error: { code: string } }).error.code).toBe('extraction_unavailable')
+      expect(await prisma.menuImportDraft.count()).toBe(0)
     })
 
-    it('returns a fixed stub draft for a PDF source', async () => {
+    it('refuses a PDF source with 422 too', async () => {
       const { token } = await createOwner(prisma)
       const res = await upload(token, pdfBuffer(), 'scan.pdf')
-      expect(res.status).toBe(201)
-      expect((res.body as DraftBody).sourceType).toBe('pdf')
+      expect(res.status).toBe(422)
+      expect((res.body as { error: { code: string } }).error.code).toBe('extraction_unavailable')
     })
 
     it('rejects an unsupported file type', async () => {
@@ -305,6 +303,25 @@ describe('/admin/v1/menu-import (e2e)', () => {
         .set('Authorization', `Bearer ${token}`)
         .send({ items: [{ id: uuidv7(), name: 'Nope' }] })
       expect(res.status).toBe(400)
+    })
+
+    it('removes rows listed in removeIds, and rejects an unknown one (restiq-web#247)', async () => {
+      const { token } = await createOwner(prisma)
+      const draft = await draftFor(token)
+      const chicken = draft.items.find((i) => i.name === 'Butter Chicken')
+
+      const res = await request(httpServer)
+        .patch(`/admin/v1/menu-import/${draft.importId}`)
+        .set('Authorization', `Bearer ${token}`)
+        .send({ items: [], removeIds: [chicken?.id] })
+      expect(res.status).toBe(200)
+      expect((res.body as DraftBody).items.map((i) => i.name)).toEqual(['Garden Salad'])
+
+      const unknown = await request(httpServer)
+        .patch(`/admin/v1/menu-import/${draft.importId}`)
+        .set('Authorization', `Bearer ${token}`)
+        .send({ items: [], removeIds: [uuidv7()] })
+      expect(unknown.status).toBe(400)
     })
 
     it('404s for an unknown importId', async () => {
@@ -387,6 +404,9 @@ describe('/admin/v1/menu-import (e2e)', () => {
 
       const commitRes = await request(httpServer).post(`/admin/v1/menu-import/${draft.importId}/commit`).set('Authorization', `Bearer ${token}`)
       expect(commitRes.status).toBe(409)
+      const error = (commitRes.body as { error: { code: string; duplicates: Array<{ id: string; reason: string }> } }).error
+      expect(error.code).toBe('duplicate_items')
+      expect(error.duplicates).toEqual([{ id: draft.items[1]?.id, name: 'Butter Chicken', category: 'Mains', reason: 'repeated' }])
 
       expect(await prisma.menuCategory.count()).toBe(before.categories)
       expect(await prisma.menuItem.count()).toBe(before.items)
@@ -432,6 +452,31 @@ describe('/admin/v1/menu-import (e2e)', () => {
       const mainsCategories = await prisma.menuCategory.findMany({ where: { tenantId, name: 'Mains' } })
       expect(mainsCategories).toHaveLength(1)
       expect(await prisma.menuItem.count({ where: { tenantId, categoryId: mainsCategories[0]?.id } })).toBe(2)
+    })
+
+    it('names draft items already on the menu, and commits the rest once they are removed (restiq-web#247)', async () => {
+      const { token } = await createOwner(prisma)
+      const first = await upload(token, csvBuffer(SAMPLE_CSV_ROWS), 'menu.csv')
+      await request(httpServer).post(`/admin/v1/menu-import/${(first.body as DraftBody).importId}/commit`).set('Authorization', `Bearer ${token}`)
+
+      const second = await upload(token, csvBuffer([['Name', 'Category', 'Price'], ['butter chicken', 'mains', '300'], ['Chicken Tikka', 'Mains', '280']]), 'menu2.csv')
+      const draft = second.body as DraftBody
+      const clash = draft.items.find((i) => i.name === 'butter chicken')
+
+      const refused = await request(httpServer).post(`/admin/v1/menu-import/${draft.importId}/commit`).set('Authorization', `Bearer ${token}`)
+      expect(refused.status).toBe(409)
+      const error = (refused.body as { error: { code: string; message: string; duplicates: unknown[] } }).error
+      expect(error.code).toBe('duplicate_items')
+      expect(error.message).toContain('Already on your menu: butter chicken (mains)')
+      expect(error.duplicates).toEqual([{ id: clash?.id, name: 'butter chicken', category: 'mains', reason: 'on_menu' }])
+
+      await request(httpServer)
+        .patch(`/admin/v1/menu-import/${draft.importId}`)
+        .set('Authorization', `Bearer ${token}`)
+        .send({ items: [], removeIds: [clash?.id] })
+      const committed = await request(httpServer).post(`/admin/v1/menu-import/${draft.importId}/commit`).set('Authorization', `Bearer ${token}`)
+      expect(committed.status).toBe(201)
+      expect((committed.body as CommitBody).items.map((i) => i.name)).toEqual(['Chicken Tikka'])
     })
   })
 })
