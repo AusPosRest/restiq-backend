@@ -224,6 +224,7 @@ export class BillsService {
           method: tender.method,
           amountMinor: BigInt(tender.amountMinor),
           riskAcknowledged: tender.riskAcknowledged,
+          reference: tender.method === 'external' ? tender.reference?.trim() : undefined,
         })
       }
 

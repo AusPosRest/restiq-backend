@@ -1539,6 +1539,8 @@ enum TenderMethod {
   upi_qr
   card_online
   card_terminal
+  // issue #146: paid outside RESTIQ; cashier-asserted, needs a reference.
+  external
 }
 
 // Multiple tenders per bill = split payment (SPEC CAP-7's N-way/amount split,
@@ -1559,6 +1561,9 @@ model Tender {
   // the risk-acknowledgement checkbox lands (web W4). Stored, not yet
   // enforced (B5 makes it 400 risk_ack_required).
   riskAcknowledged Boolean  @default(false) @map("risk_acknowledged")
+  // issue #146: the outside system's reference / bill number. Set exactly
+  // when method = external (CHECK tenders_external_needs_reference).
+  reference   String?
   createdAt   DateTime     @default(now()) @map("created_at") @db.Timestamptz(6)
 
   tenant        Tenant         @relation(fields: [tenantId], references: [id])

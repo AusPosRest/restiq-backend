@@ -1,5 +1,10 @@
 # Completed
 
+- **2026-09-15** - External payment tender, issue #146. `TenderMethod.external` +
+  `tenders.reference` (migration `20260915120000_external_tender`; CHECKs: external needs no
+  intent and must carry a reference). `TenderDto.reference` required for external (1-64 chars,
+  trimmed); `TenderView.reference` on bills and invoices. e2e in `pos-bills.e2e-spec.ts`.
+
 - **2026-09-12** - Device topology, issue #134. `devices.paired_pos_id`,
   `print_jobs.target_device_id`, `payment_intents.target_device_id`
   (migration `20260912120000_device_topology`, FKs `ON DELETE SET NULL`);
