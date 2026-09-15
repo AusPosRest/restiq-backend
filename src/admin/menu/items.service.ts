@@ -49,7 +49,7 @@ function toView(item: ItemWithRelations): ItemView {
 
 async function loadItem(tx: Prisma.TransactionClient, tenantId: string, itemId: string): Promise<ItemWithRelations> {
   const item = await tx.menuItem.findUnique({ where: { id: itemId }, include: ITEM_INCLUDE })
-  if (!item || item.tenantId !== tenantId) {
+  if (!item || item.tenantId !== tenantId || item.archivedAt) {
     throw new NotFoundException({ code: 'not_found', message: 'No such menu item' })
   }
   return item
@@ -81,7 +81,7 @@ export class ItemsService {
     return plane.$transaction(async (tx) => {
       await setTenantContext(tx, owner.tenantId)
       const items = await tx.menuItem.findMany({
-        where: { tenantId: owner.tenantId, ...(categoryId ? { categoryId } : {}) },
+        where: { tenantId: owner.tenantId, archivedAt: null, ...(categoryId ? { categoryId } : {}) },
         include: ITEM_INCLUDE,
         orderBy: { createdAt: 'asc' },
       })
@@ -166,6 +166,28 @@ export class ItemsService {
         },
       })
       return toView(await loadItem(tx, owner.tenantId, itemId))
+    })
+  }
+
+  // restiq-web#248: "delete" archives. Order and cart lines still reference
+  // the item, so the row stays and every menu read filters on archivedAt.
+  async archive(owner: AdminPrincipal, itemId: string): Promise<void> {
+    const plane = this.registry.planeFor(this.registry.homeRegion())
+    await plane.$transaction(async (tx) => {
+      await setTenantContext(tx, owner.tenantId)
+      const item = await loadItem(tx, owner.tenantId, itemId)
+      const now = new Date()
+      await tx.menuItem.update({ where: { id: itemId }, data: { archivedAt: now } })
+      await tx.auditEvent.create({
+        data: {
+          tenantId: owner.tenantId,
+          actorId: owner.id,
+          actorEmail: owner.email,
+          action: 'menu.item_archived',
+          reason: `Deleted menu item ${item.name}`,
+          occurredAt: now,
+        },
+      })
     })
   }
 

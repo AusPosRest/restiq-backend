@@ -390,6 +390,50 @@ describe('/admin/v1/menu (e2e)', () => {
       expect((res.body as ErrorBody).error.code).toBe('validation_failed')
     })
 
+    describe('delete (archive) - restiq-web#248', () => {
+      it('archives the item: gone from list and GET, audited, row kept, category count drops, name reusable', async () => {
+        const { tenantId, token } = await createOwner(prisma)
+        const category = await createCategory(token)
+        const item = await createItem(token, category.id)
+
+        const res = await authed(request(httpServer).delete(`/admin/v1/menu/items/${item.id}`), token)
+        expect(res.status).toBe(204)
+
+        const list = await authed(request(httpServer).get('/admin/v1/menu/items'), token)
+        expect((list.body as ItemBody[]).map((i) => i.id)).not.toContain(item.id)
+        expect((await authed(request(httpServer).get(`/admin/v1/menu/items/${item.id}`), token)).status).toBe(404)
+        expect((await prisma.menuItem.findUnique({ where: { id: item.id } }))?.archivedAt).toBeInstanceOf(Date)
+        expect(await prisma.auditEvent.count({ where: { tenantId, action: 'menu.item_archived' } })).toBe(1)
+
+        const categories = await authed(request(httpServer).get('/admin/v1/menu/categories'), token)
+        expect((categories.body as CategoryBody[])[0]?.itemCount).toBe(0)
+
+        const again = await authed(request(httpServer).post('/admin/v1/menu/items'), token).send({ categoryId: category.id, name: 'Butter Chicken', shortName: 'Btr Chkn' })
+        expect(again.status).toBe(201)
+      })
+
+      it('refuses to delete a category whose only items are deleted ones, with its own code', async () => {
+        const { token } = await createOwner(prisma)
+        const category = await createCategory(token)
+        const item = await createItem(token, category.id)
+        await authed(request(httpServer).delete(`/admin/v1/menu/items/${item.id}`), token)
+
+        const res = await authed(request(httpServer).delete(`/admin/v1/menu/categories/${category.id}`), token)
+        expect(res.status).toBe(409)
+        expect((res.body as ErrorBody).error.code).toBe('category_has_history')
+      })
+
+      it('404s when another tenant tries to delete the item', async () => {
+        const owner1 = await createOwner(prisma)
+        const owner2 = await createOwner(prisma)
+        const category = await createCategory(owner1.token)
+        const item = await createItem(owner1.token, category.id)
+
+        const res = await authed(request(httpServer).delete(`/admin/v1/menu/items/${item.id}`), owner2.token)
+        expect(res.status).toBe(404)
+      })
+    })
+
     describe('allergen tags CRUD on an item', () => {
       it('attaches and then removes allergen tags via PUT (replace-set)', async () => {
         const { token } = await createOwner(prisma)

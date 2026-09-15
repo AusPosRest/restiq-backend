@@ -38,7 +38,7 @@ export class MenuService {
 
       const [categories, items, overrides] = await Promise.all([
         tx.menuCategory.findMany({ where: { tenantId: staff.tenantId }, orderBy: { sortOrder: 'asc' } }),
-        tx.menuItem.findMany({ where: { tenantId: staff.tenantId }, include: ITEM_INCLUDE, orderBy: { createdAt: 'asc' } }),
+        tx.menuItem.findMany({ where: { tenantId: staff.tenantId, archivedAt: null }, include: ITEM_INCLUDE, orderBy: { createdAt: 'asc' } }),
         tx.itemOutletOverride.findMany({ where: { tenantId: staff.tenantId, outletId: staff.outletId } }),
       ])
       const availabilityOverride = new Map(overrides.map((o) => [o.itemId, o.available]))

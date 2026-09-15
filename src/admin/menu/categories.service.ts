@@ -16,7 +16,7 @@ export class CategoriesService {
       const categories = await tx.menuCategory.findMany({
         where: { tenantId: owner.tenantId },
         orderBy: { sortOrder: 'asc' },
-        include: { _count: { select: { items: true } } },
+        include: { _count: { select: { items: { where: { archivedAt: null } } } } },
       })
       return categories.map((c) => ({ id: c.id, name: c.name, sortOrder: c.sortOrder, itemCount: c._count.items }))
     })
@@ -44,7 +44,7 @@ export class CategoriesService {
         where: { id: categoryId },
         data: { name: dto.name ?? existing.name, sortOrder: dto.sortOrder ?? existing.sortOrder },
       })
-      const itemCount = await tx.menuItem.count({ where: { categoryId } })
+      const itemCount = await tx.menuItem.count({ where: { categoryId, archivedAt: null } })
       return { id: updated.id, name: updated.name, sortOrder: updated.sortOrder, itemCount }
     })
   }
@@ -57,9 +57,16 @@ export class CategoriesService {
       if (!existing || existing.tenantId !== owner.tenantId) {
         throw new NotFoundException({ code: 'not_found', message: 'No such category' })
       }
-      const itemCount = await tx.menuItem.count({ where: { categoryId } })
+      const itemCount = await tx.menuItem.count({ where: { categoryId, archivedAt: null } })
       if (itemCount > 0) {
         throw new ConflictException({ code: 'category_not_empty', message: 'Move or delete this category’s items first' })
+      }
+      // Deleted (archived) items still hold the category for past bills (restiq-web#248).
+      if ((await tx.menuItem.count({ where: { categoryId } })) > 0) {
+        throw new ConflictException({
+          code: 'category_has_history',
+          message: 'Items deleted from this category are still on past bills, so it can’t be deleted. Rename it instead.',
+        })
       }
       await tx.menuCategory.delete({ where: { id: categoryId } })
     })
