@@ -19,6 +19,7 @@ import { MenuItemView, MenuVariantView, MenuView } from './menu.dtos'
 // price a line will actually be snapshotted at on add.
 const MENU_PRICE_CHANNEL: PriceChannel = 'dine_in'
 const DEFAULT_CURRENCY = 'INR'
+const MENU_PHOTOS_CAPABILITY_KEY = 'menu_photos'
 
 const ITEM_INCLUDE = {
   variants: { orderBy: { sortOrder: 'asc' } },
@@ -36,12 +37,15 @@ export class MenuService {
     return plane.$transaction(async (tx) => {
       await setTenantContext(tx, staff.tenantId)
 
-      const [categories, items, overrides] = await Promise.all([
+      const [categories, items, overrides, photos] = await Promise.all([
         tx.menuCategory.findMany({ where: { tenantId: staff.tenantId }, orderBy: { sortOrder: 'asc' } }),
         tx.menuItem.findMany({ where: { tenantId: staff.tenantId }, include: ITEM_INCLUDE, orderBy: { createdAt: 'asc' } }),
         tx.itemOutletOverride.findMany({ where: { tenantId: staff.tenantId, outletId: staff.outletId } }),
+        tx.outletCapability.findUnique({ where: { outletId_key: { outletId: staff.outletId, key: MENU_PHOTOS_CAPABILITY_KEY } } }),
       ])
       const availabilityOverride = new Map(overrides.map((o) => [o.itemId, o.available]))
+      // Absent row = on: photos show until an owner explicitly turns them off.
+      const showPhotos = photos?.enabled !== false
 
       let currency = DEFAULT_CURRENCY
       const itemViews: MenuItemView[] = []
@@ -63,6 +67,7 @@ export class MenuService {
           categoryId: item.categoryId,
           name: item.name,
           shortName: item.shortName,
+          photoUrl: showPhotos ? item.photoUrl : null,
           available: availabilityOverride.get(item.id) ?? item.available,
           priceMinor,
           variants,
