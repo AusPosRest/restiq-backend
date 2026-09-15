@@ -393,6 +393,72 @@ describe('/admin/v1/outlets/:outletId/devices (e2e)', () => {
     })
   })
 
+  describe('POST /admin/v1/outlets/:outletId/devices/:deviceId/revoke (owner-side removal, issue #140)', () => {
+    async function device(tenantId: string, outletId: string, type: 'pos' | 'printer' | 'terminal' | 'kiosk', pairedPosId: string | null = null): Promise<{ id: string }> {
+      return prisma.device.create({
+        data: { id: uuidv7(), tenantId, outletId, label: `${type}-${uuidv7().slice(-6)}`, type, status: 'active', hardwareKeyFingerprint: `fp-${uuidv7()}`, enrolledAt: new Date(), pairedPosId },
+        select: { id: true },
+      })
+    }
+
+    function revoke(outletId: string, deviceId: string): string {
+      return `${devicesBase(outletId)}/${deviceId}/revoke`
+    }
+
+    it('revokes the device with an audit row, unlinks its peripherals, lists it as revoked, and refuses a second revoke', async () => {
+      const { tenantId, token } = await createOwner(prisma)
+      const outletId = await createOutlet(prisma, tenantId)
+      const pos = await device(tenantId, outletId, 'pos')
+      const printer = await device(tenantId, outletId, 'printer', pos.id)
+      const terminal = await device(tenantId, outletId, 'terminal', pos.id)
+
+      const res = await authed(request(httpServer).post(revoke(outletId, pos.id)), token).send({ reason: 'Tablet retired' })
+      expect(res.status).toBe(200)
+      expect(res.body).toMatchObject({ id: pos.id, status: 'revoked' })
+      expect(typeof (res.body as { revokedAt: string }).revokedAt).toBe('string')
+
+      const row = await prisma.device.findUniqueOrThrow({ where: { id: pos.id } })
+      expect(row.status).toBe('revoked')
+      expect(row.revokedAt).not.toBeNull()
+      // The POS's printer and terminal serve the whole outlet again.
+      expect((await prisma.device.findUniqueOrThrow({ where: { id: printer.id } })).pairedPosId).toBeNull()
+      expect((await prisma.device.findUniqueOrThrow({ where: { id: terminal.id } })).pairedPosId).toBeNull()
+
+      const audit = await prisma.auditEvent.findFirst({ where: { tenantId, action: 'device.revoked' } })
+      expect(audit).toMatchObject({ reason: 'Tablet retired' })
+      expect(audit?.actorId).not.toBeNull()
+
+      const listed = (await authed(request(httpServer).get(devicesBase(outletId)), token)).body as DeviceListBody
+      expect(listed.devices.find((d) => d.id === pos.id)?.status).toBe('revoked')
+
+      const again = await authed(request(httpServer).post(revoke(outletId, pos.id)), token).send({ reason: 'Again' })
+      expect(again.status).toBe(409)
+    })
+
+    it('requires a reason', async () => {
+      const { tenantId, token } = await createOwner(prisma)
+      const outletId = await createOutlet(prisma, tenantId)
+      const kiosk = await device(tenantId, outletId, 'kiosk')
+      expect((await authed(request(httpServer).post(revoke(outletId, kiosk.id)), token).send({})).status).toBe(400)
+      expect((await authed(request(httpServer).post(revoke(outletId, kiosk.id)), token).send({ reason: '' })).status).toBe(400)
+      expect((await prisma.device.findUniqueOrThrow({ where: { id: kiosk.id } })).status).toBe('active')
+    })
+
+    it('404s for another tenant\'s device and for a device at a different outlet of the same tenant (isolation)', async () => {
+      const { tenantId, token } = await createOwner(prisma)
+      const outletId = await createOutlet(prisma, tenantId)
+      const otherOutletId = await createOutlet(prisma, tenantId)
+      const elsewhere = await device(tenantId, otherOutletId, 'pos')
+      expect((await authed(request(httpServer).post(revoke(outletId, elsewhere.id)), token).send({ reason: 'x' })).status).toBe(404)
+
+      const stranger = await createOwner(prisma)
+      const strangerOutletId = await createOutlet(prisma, stranger.tenantId)
+      const theirs = await device(stranger.tenantId, strangerOutletId, 'pos')
+      expect((await authed(request(httpServer).post(revoke(strangerOutletId, theirs.id)), token).send({ reason: 'x' })).status).toBe(404)
+      expect((await prisma.device.findUniqueOrThrow({ where: { id: theirs.id } })).status).toBe('active')
+    })
+  })
+
   describe('printer render-mode (story 5\'s printers table, GET/PATCH)', () => {
     it('lists and patches a printer\'s render mode, scoped to the outlet', async () => {
       const { tenantId, token } = await createOwner(prisma)
