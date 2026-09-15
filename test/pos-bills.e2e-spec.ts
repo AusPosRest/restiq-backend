@@ -920,4 +920,72 @@ describe('/pos/v1 bill and settle (e2e)', () => {
       expect(res.status).toBe(404)
     })
   })
+  // issue #158: today's payment history at the outlet.
+  describe('GET /pos/v1/outlets/:outletId/payments', () => {
+    interface PaymentsBody {
+      outletId: string
+      date: string
+      currency: string
+      totalMinor: number
+      count: number
+      byMethod: Array<{ method: string; count: number; amountMinor: number }>
+      payments: Array<{ id: string; billNumber: number | null; tableLabel: string | null; method: string; amountMinor: number; reference: string | null; takenBy: { name: string } | null; createdAt: string }>
+    }
+
+    async function finalizedBill(tenantId: string, outletId: string, tenders: Array<Record<string, unknown>>): Promise<{ orderId: string; ownerToken: string; billId: string }> {
+      const { orderId, ownerToken } = await setUpSentOrder(tenantId, outletId, 10000)
+      const created = await authed(request(httpServer).post(`/pos/v1/orders/${orderId}/bill`), ownerToken).send()
+      const billId = (created.body as BillBody).id
+      await authed(request(httpServer).post(`/pos/v1/bills/${billId}/finalize`), ownerToken).send({ tenders }).expect(200)
+      return { orderId, ownerToken, billId }
+    }
+
+    it('lists only today\'s tenders on finalized bills at this outlet, newest first, with per-method totals', async () => {
+      const tenantId = await createTenant(prisma)
+      const outletId = await createOutlet(prisma, tenantId)
+      const otherOutletId = await createOutlet(prisma, tenantId, 'Koramangala')
+
+      const first = await finalizedBill(tenantId, outletId, [{ method: 'cash', amountMinor: 21000 }])
+      const second = await finalizedBill(tenantId, outletId, [
+        { method: 'upi_manual', amountMinor: 11000, riskAcknowledged: true },
+        { method: 'external', amountMinor: 10000, reference: 'EFT-1' },
+      ])
+      // Elsewhere: another outlet's bill, a still-open bill here, and a two-day-old tender here.
+      await finalizedBill(tenantId, otherOutletId, [{ method: 'cash', amountMinor: 21000 }])
+      const open = await setUpSentOrder(tenantId, outletId, 10000)
+      await authed(request(httpServer).post(`/pos/v1/orders/${open.orderId}/bill`), open.ownerToken).send()
+      const stale = await finalizedBill(tenantId, outletId, [{ method: 'cash', amountMinor: 21000 }])
+      await prisma.tender.updateMany({ where: { billId: stale.billId }, data: { createdAt: new Date(Date.now() - 2 * 24 * 60 * 60 * 1000) } })
+
+      const res = await authed(request(httpServer).get(`/pos/v1/outlets/${outletId}/payments`), first.ownerToken).expect(200)
+      const body = res.body as PaymentsBody
+      expect(body.outletId).toBe(outletId)
+      expect(body.currency).toBe('INR')
+      expect(body.date).toMatch(/^\d{4}-\d{2}-\d{2}$/)
+      expect(body.count).toBe(3)
+      expect(body.totalMinor).toBe(42000)
+      expect(body.payments.map((p) => p.method)).toEqual(['external', 'upi_manual', 'cash'])
+      expect(body.payments[2]?.amountMinor).toBe(21000)
+      expect(body.payments[2]?.takenBy?.name).toBe('Asha')
+      expect(body.payments[2]?.tableLabel).toBe('T1')
+      expect(body.payments[2]?.billNumber).toBe(1)
+      expect(body.payments[0]?.reference).toBe('EFT-1')
+      expect(body.byMethod).toEqual([
+        { method: 'cash', count: 1, amountMinor: 21000 },
+        { method: 'upi_manual', count: 1, amountMinor: 11000 },
+        { method: 'external', count: 1, amountMinor: 10000 },
+      ])
+      void second
+    })
+
+    it('404s for an outlet outside the tenant', async () => {
+      const tenantId = await createTenant(prisma)
+      const outletId = await createOutlet(prisma, tenantId)
+      const otherTenant = await createTenant(prisma, 'Other')
+      const otherOutlet = await createOutlet(prisma, otherTenant)
+      const staff = await createStaff(prisma, tenantId, outletId, 'Asha')
+      await authed(request(httpServer).get(`/pos/v1/outlets/${otherOutlet}/payments`), staff.token).expect(404)
+      await request(httpServer).get(`/pos/v1/outlets/${outletId}/payments`).expect(401)
+    })
+  })
 })

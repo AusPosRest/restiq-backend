@@ -37,9 +37,10 @@ import { BadRequestException, ConflictException, ForbiddenException, Injectable,
 import { ManagerApproval, ManagerAuthService, PosPrincipal, RegionRegistryService, uuidv7 } from '../../platform'
 import { setTenantContext } from '../tenant-context'
 import { linkedPeripheral, queueFor } from '../device-routing'
+import { localDateKey } from '../clock/clock.util'
 import { assertOwner, loadOrder } from '../orders/orders.service'
-import { buildInvoiceView, commitFinalize, createOrGetBillRecord, createTenderRecord, loadBill, refreshOpenBillTotals, toBillView } from './bill-core'
-import { BillView, CreditNoteLineView, CreditNoteView, FinalizeBillDto, InvoiceView, PrintJobView, RefundBillDto } from './bills.dtos'
+import { buildInvoiceView, commitFinalize, createOrGetBillRecord, createTenderRecord, currencyForCountry, loadBill, loadTenantTaxProfile, refreshOpenBillTotals, toBillView } from './bill-core'
+import { BillView, CreditNoteLineView, CreditNoteView, FinalizeBillDto, InvoiceView, PaymentHistoryEntry, PaymentHistoryView, PaymentMethodTotal, PrintJobView, RefundBillDto } from './bills.dtos'
 import type { Prisma } from '../../generated/prisma/client'
 
 // SPEC.md's Assumptions section defers the actual discount-above-threshold
@@ -126,6 +127,81 @@ export class BillsService {
       await setTenantContext(tx, staff.tenantId)
       const bill = await refreshOpenBillTotals(tx, await loadBill(tx, staff.tenantId, billId))
       return toBillView(bill)
+    })
+  }
+
+  /**
+   * GET .../outlets/:outletId/payments (issue #158): every tender taken at
+   * this outlet today, newest first, with per-method totals. "Today" is the
+   * outlet's local calendar day - the same 48 h lookback + localDateKey rule
+   * attendance.service.ts uses, so a payment just before local midnight
+   * lands on the right day. Tenders only; refunds (credit notes) are a
+   * separate ledger and stay out of this list.
+   */
+  async listPaymentsToday(staff: PosPrincipal, outletId: string): Promise<PaymentHistoryView> {
+    const plane = this.plane()
+    return plane.$transaction(async (tx) => {
+      await setTenantContext(tx, staff.tenantId)
+      const outlet = await tx.outlet.findUnique({ where: { id: outletId }, select: { tenantId: true, timezone: true } })
+      if (!outlet || outlet.tenantId !== staff.tenantId) {
+        throw new NotFoundException({ code: 'not_found', message: 'No such outlet' })
+      }
+
+      const now = new Date()
+      const todayKey = localDateKey(now, outlet.timezone)
+      const since = new Date(now.getTime() - 48 * 60 * 60 * 1000)
+      const rows = await tx.tender.findMany({
+        where: { tenantId: staff.tenantId, createdAt: { gte: since }, bill: { outletId, status: 'finalized' } },
+        orderBy: { createdAt: 'desc' },
+        include: {
+          bill: {
+            select: {
+              id: true,
+              billNumber: true,
+              orderId: true,
+              finalizedByStaff: { select: { id: true, name: true } },
+              order: { select: { tokenNumber: true, table: { select: { label: true } } } },
+            },
+          },
+        },
+      })
+
+      const payments: PaymentHistoryEntry[] = rows
+        .filter((row) => localDateKey(row.createdAt, outlet.timezone) === todayKey)
+        .map((row) => ({
+          id: row.id,
+          billId: row.bill.id,
+          billNumber: row.bill.billNumber,
+          orderId: row.bill.orderId,
+          tableLabel: row.bill.order.table?.label ?? null,
+          tokenNumber: row.bill.order.tokenNumber,
+          method: row.method,
+          amountMinor: Number(row.amountMinor),
+          reference: row.reference,
+          takenBy: row.bill.finalizedByStaff ? { staffId: row.bill.finalizedByStaff.id, name: row.bill.finalizedByStaff.name } : null,
+          createdAt: row.createdAt.toISOString(),
+        }))
+
+      const totals = new Map<PaymentMethodTotal['method'], PaymentMethodTotal>()
+      for (const payment of payments) {
+        const total = totals.get(payment.method) ?? { method: payment.method, count: 0, amountMinor: 0 }
+        total.count += 1
+        total.amountMinor += payment.amountMinor
+        totals.set(payment.method, total)
+      }
+      const byMethod = [...totals.values()].sort((a, b) => b.amountMinor - a.amountMinor)
+
+      const { country } = await loadTenantTaxProfile(tx, staff.tenantId)
+      return {
+        outletId,
+        date: todayKey,
+        asOf: now.toISOString(),
+        currency: currencyForCountry(country),
+        totalMinor: payments.reduce((sum, p) => sum + p.amountMinor, 0),
+        count: payments.length,
+        byMethod,
+        payments,
+      }
     })
   }
 

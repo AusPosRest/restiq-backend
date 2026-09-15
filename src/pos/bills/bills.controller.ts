@@ -3,7 +3,7 @@ import type { Response } from 'express'
 import { CurrentStaff, PosPrincipal } from '../../platform'
 import { DeviceSourceDto } from '../devices/devices.dtos'
 import { BillsService } from './bills.service'
-import { BillView, CreditNoteView, FinalizeBillDto, InvoiceView, PrintJobView, RefundBillDto } from './bills.dtos'
+import { BillView, CreditNoteView, FinalizeBillDto, InvoiceView, PaymentHistoryView, PrintJobView, RefundBillDto } from './bills.dtos'
 
 @Controller('pos/v1')
 export class PosBillsController {
@@ -18,6 +18,12 @@ export class PosBillsController {
     const { view, created } = await this.bills.createBill(staff, orderId)
     res.status(created ? 201 : 200)
     return view
+  }
+
+  // issue #158: today's payments at the outlet, for the POS Payments screen.
+  @Get('outlets/:outletId/payments')
+  listPayments(@CurrentStaff() staff: PosPrincipal, @Param('outletId', ParseUUIDPipe) outletId: string): Promise<PaymentHistoryView> {
+    return this.bills.listPaymentsToday(staff, outletId)
   }
 
   @Get('bills/:id')

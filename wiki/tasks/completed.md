@@ -1,5 +1,10 @@
 # Completed
 
+- **2026-09-16** - POS payment history, issue #158. `GET pos/v1/outlets/:outletId/payments`
+  (today's tenders on finalized bills at the outlet in the outlet's local day, per-method totals,
+  `takenBy`). `bills.service.ts#listPaymentsToday`; e2e cases in `pos-bills.e2e-spec.ts`.
+  Web: restiq-web#253.
+
 - **2026-09-15** - External payment tender, issue #146. `TenderMethod.external` +
   `tenders.reference` (migration `20260915120000_external_tender`; CHECKs: external needs no
   intent and must carry a reference). `TenderDto.reference` required for external (1-64 chars,

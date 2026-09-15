@@ -238,3 +238,37 @@ export interface PrintJobView {
   createdAt: string
   printedAt: string | null
 }
+
+// issue #158: today's payment history at an outlet - every Tender on a
+// finalized bill created today in the outlet's local calendar day.
+export interface PaymentHistoryEntry {
+  id: string
+  billId: string
+  billNumber: number | null
+  orderId: string
+  tableLabel: string | null
+  tokenNumber: number | null
+  method: TenderMethod
+  amountMinor: number
+  reference: string | null
+  takenBy: { staffId: string; name: string } | null
+  createdAt: string
+}
+
+export interface PaymentMethodTotal {
+  method: TenderMethod
+  count: number
+  amountMinor: number
+}
+
+export interface PaymentHistoryView {
+  outletId: string
+  /** The outlet's local calendar day, YYYY-MM-DD. */
+  date: string
+  asOf: string
+  currency: string
+  totalMinor: number
+  count: number
+  byMethod: PaymentMethodTotal[]
+  payments: PaymentHistoryEntry[]
+}
