@@ -137,40 +137,87 @@ See `wiki/features/tenant-admin.md`'s CAP-108 section for the
 `/admin/v1/tax-registration` GET/PUT side of the same two fields, and
 `src/pos/bills/tax.ts` for how a configured rate changes bill tax math.
 
-## Agreements - versioned platform agreement, owner-signed (issue #132, `src/ops/agreements/`)
+## Agreements - versioned platform agreement, signed through DocuSign (issues #132, #150, `src/ops/agreements/`)
 
 - **Intent:** the platform publishes numbered, immutable agreement versions;
-  each tenant owner signs the current one from the owner console; operators
-  see per-tenant standing (signed / pending) and the signature record.
+  each tenant owner signs the current one through DocuSign from the owner
+  console, the platform's authorised signatory countersigns, and both sides
+  can download the sealed PDF; operators see per-tenant standing.
 - **Data:** `agreement_versions` (no `tenant_id`, no RLS - every tenant reads
-  the same text; `version` unique, `body_sha256` fixed at publish) and
-  `agreement_signatures` (one row per tenant per version, RLS mirrors
-  `print_jobs`, cascades with its tenant, RESTRICT on its version). A
-  signature stores the typed `signer_name` (the signature itself), signer
-  owner id/email, `signed_at`, and `evidence_sha256` = sha256 of
-  `bodySha256 \n tenantId \n ownerId \n ownerEmail \n signerName \n signedAt`
-  - tamper-evident proof of exactly what was accepted, by whom, when. No
-  update or delete route exists for either table.
+  the same text; `version` unique, `body_sha256` fixed at publish).
+  `agreement_envelopes` (#150, migration `20260915230000_agreement_docusign`):
+  one DocuSign signing attempt per row - tenant, version, `envelope_id`
+  (unique), signer owner id / name / email / title, `status` (`sent` |
+  `completed` | `declined` | `voided`, CHECK), `owner_signed_at`; a partial
+  unique index allows one `sent` envelope per tenant per version; RLS mirrors
+  `agreement_signatures`. `agreement_signatures` (one row per tenant per
+  version, RLS mirrors `print_jobs`, cascades with its tenant, RESTRICT on
+  its version) gains `signer_title`, `envelope_id` and `signed_pdf` (bytea);
+  for a DocuSign signature `evidence_sha256` is the SHA-256 of the sealed
+  PDF. #132's typed-name signatures keep the new columns null and their
+  original evidence hash (`bodySha256 \n tenantId \n ownerId \n ownerEmail \n
+  signerName \n signedAt`). No update or delete route exists for any of them.
+- **Document (`agreement-document.ts`):** the version as HTML for DocuSign to
+  convert to PDF - `#`/`##`/`###` headings, blank-line paragraphs,
+  everything HTML-escaped; `{{customer.legalName}}`, `.address`, `.country`
+  and `.taxId` filled from the tenant (legal entity name and ABN/GSTIN from
+  its tax registration when there is one); then a two-column signature block
+  (customer signer name + title, Restiq countersigner) carrying white anchor
+  strings the DocuSign tabs attach to, stripped from all other text so each
+  appears exactly once.
+- **DocuSign (`docusign.client.ts`):** eSignature REST v2.1, JWT-grant auth
+  (RS256 assertion, token cached until a minute before expiry). Recipient 1
+  is the owner with `clientUserId` (embedded signing; sign-here and
+  date-signed tabs); recipient 2 is `DOCUSIGN_COUNTERSIGNER_*`, by email. The
+  owner's session URL comes from `views/recipient` with `returnUrl`
+  `${WEB_ORIGIN}/admin/settings/agreement`. Completion fetches
+  `documents/combined?certificate=true`: the signed PDF plus DocuSign's
+  Certificate of Completion. Every `DOCUSIGN_*` value in `.env.example` is
+  required: missing config is 503 `esign_unavailable` (checked before any
+  work), DocuSign errors are 502 `esign_failed`, logged with DocuSign's body
+  (e.g. `consent_required` until the JWT grant is consented).
+- **Sync:** open envelopes are checked against DocuSign whenever the owner or
+  ops reads the agreement. Completed → the signature row with the PDF and a
+  tenant audit row `agreement.signed` (claimed with a conditional update so
+  concurrent reads write it once). Declined/voided → closed, so signing can
+  start again. Owner signed → `owner_signed_at`. A DocuSign failure during
+  sync is logged and retried on the next read, never failing the page. There
+  is no DocuSign Connect webhook yet (ponytail note in the service).
 - **Routes (ops realm):** `GET ops/v1/agreements` (newest first, with
   `signatureCount`), `POST ops/v1/agreements` `{ title, body, reason }` → 201
   with the next gap-free version (a `pg_advisory_xact_lock` serialises
   concurrent publishes) and a control-plane audit row `agreement.published`
   carrying the reason; `GET ops/v1/agreements/:id` (full body);
-  `GET ops/v1/tenants/:tenantId/agreements` → `{ current, status:
-  'signed' | 'pending' | 'no_agreement', signatures[] }`.
+  `GET ops/v1/tenants/:tenantId/agreements` → `{ current, status: 'signed' |
+  'awaiting_countersign' | 'pending' | 'no_agreement', signatures[] }`
+  (signatures carry `signerTitle` and `hasPdf`);
+  `GET ops/v1/tenants/:tenantId/agreements/:versionId/pdf` → the sealed PDF.
 - **Routes (admin realm, `src/admin/agreement/`):** `GET admin/v1/agreement`
-  → `{ current (with body) | null, signature | null, history[] }`;
-  `POST admin/v1/agreement/:versionId/sign` `{ signerName, accepted: true }`
-  → 201 `{ signature }`. `accepted` must be literally `true`; a blank name
-  is 400; signing a non-current version is 409 `stale_version`; a second
-  signature on the same version is 409 `already_signed`; an unknown version
-  is 404. Signing writes a tenant `audit_events` row `agreement.signed`.
+  → `{ current (body with customer fields filled) | null, signature | null,
+  signing: { status: 'awaiting_owner' | 'awaiting_countersign', signerName,
+  signerTitle, ownerSignedAt } | null, history[] }`;
+  `POST admin/v1/agreement/:versionId/signing` `{ signerName, signerTitle }`
+  → 201 `{ url }`, creating the envelope on first use (tenant audit row
+  `agreement.signing_started`) and resuming it after. A blank name or title
+  is 400; a non-current version 409 `stale_version`; already signed 409
+  `already_signed`; owner already signed 409 `awaiting_countersign`; another
+  owner's envelope open 409 `signing_in_progress`; an unknown version 404.
+  `GET admin/v1/agreement/:versionId/pdf` → the sealed PDF (404 until it is
+  complete). #132's typed-name `POST .../:versionId/sign` is removed.
 - **One service, two callers (AD-12):** `AgreementsService` lives in the ops
   module and is exported for `AdminAgreementController`, the same shape as
-  `DevicesService`.
-- **Tests:** `test/agreements.e2e-spec.ts` (publish/list/audit, sign/repeat/
-  stale/new-version reopen, cross-tenant isolation, unauthenticated) and an
-  `agreement_signatures` probe case in `test/rls.e2e-spec.ts`.
-- **Not built (by design):** platform countersignature, gating go-live on a
-  signature, PDF export, third-party e-sign. The typed-name-plus-hash record
-  is the evidence; swap in a provider if a legal review asks for one.
+  `DevicesService`; `DocuSignClient` is exported from the ops barrel so the
+  e2e suite can override it.
+- **Tests:** `src/ops/agreements/agreement-document.spec.ts` (markup,
+  escaping, fields, anchors) and `docusign.client.spec.ts` (fail-closed
+  config, JWT grant, envelope payload, recipient state, error mapping);
+  `test/agreements.e2e-spec.ts` with DocuSign swapped for an in-memory fake
+  (publish/list/audit; sign → countersign → sealed PDF; resume; declined;
+  unconfigured; stale/new-version reopen; cross-tenant isolation;
+  unauthenticated); `agreement_signatures` and `agreement_envelopes` probe
+  cases in `test/rls.e2e-spec.ts`.
+- **Not built:** gating go-live on a signature; a DocuSign Connect webhook
+  (completion lands on the next read); one countersigner per country (a
+  single `DOCUSIGN_COUNTERSIGNER_*`); voiding an open envelope when a newer
+  version is published (it stays `sent`, is still synced, and if completed
+  simply adds that older version's signature to the history).

@@ -1,7 +1,8 @@
-// Agreement payloads (issue #132). Publishing carries a required reason
-// (AD-6); signing carries the typed name that IS the signature plus an
-// explicit accepted:true so a bare POST can never sign.
-import { Equals, IsBoolean, IsNotEmpty, IsString, Matches, MaxLength } from 'class-validator'
+// Agreement payloads (issues #132, #150). Publishing carries a required
+// reason (AD-6). Signing happens in DocuSign; starting it carries the
+// signer's full name and title, which go into the signature block of the
+// document DocuSign seals.
+import { IsNotEmpty, IsString, Matches, MaxLength } from 'class-validator'
 
 export class PublishAgreementDto {
   @IsString() @IsNotEmpty() @MaxLength(200)
@@ -14,13 +15,14 @@ export class PublishAgreementDto {
   reason!: string
 }
 
-export class SignAgreementDto {
-  // The typed name is the signature - blanks are not a name.
+export class StartSigningDto {
+  // Full legal name as it appears in the signature block - blanks are not a name.
   @IsString() @Matches(/\S/, { message: 'signerName must not be blank' }) @MaxLength(200)
   signerName!: string
 
-  @IsBoolean() @Equals(true)
-  accepted!: boolean
+  // Role at the business (Director, Owner, ...): evidence of authority to sign for it.
+  @IsString() @Matches(/\S/, { message: 'signerTitle must not be blank' }) @MaxLength(120)
+  signerTitle!: string
 }
 
 export interface AgreementVersionSummary {
@@ -43,11 +45,16 @@ export interface AgreementSignatureView {
   title: string
   signerName: string
   signerEmail: string
+  /** Null on the typed-name signatures from before DocuSign (#132). */
+  signerTitle: string | null
   signedAt: string
+  /** SHA-256 of the sealed PDF for DocuSign signatures; of the signing record for earlier ones. */
   evidenceSha256: string
+  /** A sealed, signed PDF (with DocuSign's Certificate of Completion) can be downloaded. */
+  hasPdf: boolean
 }
 
-export type TenantAgreementStatus = 'signed' | 'pending' | 'no_agreement'
+export type TenantAgreementStatus = 'signed' | 'awaiting_countersign' | 'pending' | 'no_agreement'
 
 /** Ops: one tenant's standing against the current version. */
 export interface TenantAgreementsView {
@@ -56,9 +63,18 @@ export interface TenantAgreementsView {
   signatures: AgreementSignatureView[]
 }
 
-/** Admin: what the owner sees - the full current text, their signature on it (if any), and everything they signed before. */
+/** A DocuSign signing in progress on the current version. */
+export interface OwnerSigningView {
+  status: 'awaiting_owner' | 'awaiting_countersign'
+  signerName: string
+  signerTitle: string
+  ownerSignedAt: string | null
+}
+
+/** Admin: the current text (customer fields filled), its signature or signing in progress, and everything signed before. */
 export interface OwnerAgreementView {
   current: { id: string; version: number; title: string; body: string; publishedAt: string } | null
   signature: AgreementSignatureView | null
+  signing: OwnerSigningView | null
   history: AgreementSignatureView[]
 }

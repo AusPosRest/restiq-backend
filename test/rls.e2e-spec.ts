@@ -304,6 +304,44 @@ describe('row-level security on region-plane tables (e2e)', () => {
     await admin.agreementVersion.delete({ where: { id: version.id } })
   })
 
+  it('agreement_envelopes: fail closed under the wrong tenant, visible under the correct one and to operators (issue #150)', async () => {
+    const version = await admin.agreementVersion.create({
+      data: { version: 9_998, title: 'RLS Probe Terms', body: 'x', bodySha256: 'x', publishedBy: 'rls@probe.example' },
+    })
+    await admin.agreementEnvelope.create({
+      data: {
+        tenantId,
+        agreementVersionId: version.id,
+        envelopeId: `rls-probe-${randomUUID()}`,
+        signerOwnerId: randomUUID(),
+        signerName: 'Probe Owner',
+        signerEmail: 'rls@probe.example',
+        signerTitle: 'Director',
+      },
+    })
+
+    const underWrongTenant = await probe.$transaction(async (tx) => {
+      await tx.$executeRaw`SELECT set_config('app.tenant_id', ${randomUUID()}, true)`
+      return tx.agreementEnvelope.count()
+    })
+    expect(underWrongTenant).toBe(0)
+
+    const underCorrectTenant = await probe.$transaction(async (tx) => {
+      await tx.$executeRaw`SELECT set_config('app.tenant_id', ${tenantId}, true)`
+      return tx.agreementEnvelope.count({ where: { tenantId } })
+    })
+    expect(underCorrectTenant).toBe(1)
+
+    const underOperator = await probe.$transaction(async (tx) => {
+      await tx.$executeRaw`SELECT set_config('app.operator_context', 'operator', true)`
+      return tx.agreementEnvelope.count({ where: { tenantId } })
+    })
+    expect(underOperator).toBe(1)
+
+    await admin.agreementEnvelope.deleteMany({ where: { tenantId } })
+    await admin.agreementVersion.delete({ where: { id: version.id } })
+  })
+
   it('keeps audit_events append-only: UPDATE and DELETE touch zero rows even in-context', async () => {
     const updated = await probe.$transaction(async (tx) => {
       await tx.$executeRaw`SELECT set_config('app.tenant_id', ${tenantId}, true)`

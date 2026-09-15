@@ -145,6 +145,7 @@ model Tenant {
   ownerInvites        OwnerInvite[]
   ownerUsers          OwnerUser[]
   agreementSignatures AgreementSignature[]
+  agreementEnvelopes  AgreementEnvelope[]
   capabilities        TenantCapability[]
   outletCapabilities  OutletCapability[]
   devices             Device[]
@@ -1951,6 +1952,7 @@ model AgreementVersion {
   publishedAt DateTime @default(now()) @map("published_at") @db.Timestamptz(6)
 
   signatures AgreementSignature[]
+  envelopes  AgreementEnvelope[]
 
   @@map("agreement_versions")
 }
@@ -1966,6 +1968,12 @@ model AgreementSignature {
   // record of exactly what was accepted, by whom, when.
   evidenceSha256     String   @map("evidence_sha256")
   signedAt           DateTime @map("signed_at") @db.Timestamptz(6)
+  // #150: DocuSign signatures carry the signer's title, the envelope and the
+  // sealed PDF (evidenceSha256 is then the PDF's SHA-256); #132's typed-name
+  // signatures keep all three null.
+  signerTitle        String?  @map("signer_title")
+  envelopeId         String?  @map("envelope_id")
+  signedPdf          Bytes?   @map("signed_pdf")
 
   tenant  Tenant           @relation(fields: [tenantId], references: [id], onDelete: Cascade)
   version AgreementVersion @relation(fields: [agreementVersionId], references: [id])
@@ -1973,4 +1981,30 @@ model AgreementSignature {
   @@unique([tenantId, agreementVersionId])
   @@index([tenantId])
   @@map("agreement_signatures")
+}
+
+// One DocuSign signing attempt (#150): the owner signs embedded, then the
+// platform countersigns by email. Completing it writes the AgreementSignature.
+// The migration also holds a partial unique index - one 'sent' envelope per
+// tenant per version - and a CHECK on status. RLS mirrors agreement_signatures.
+model AgreementEnvelope {
+  id                 String    @id @default(uuid(7)) @db.Uuid
+  tenantId           String    @map("tenant_id") @db.Uuid
+  agreementVersionId String    @map("agreement_version_id") @db.Uuid
+  envelopeId         String    @unique @map("envelope_id")
+  signerOwnerId      String    @map("signer_owner_id") @db.Uuid
+  signerName         String    @map("signer_name")
+  signerEmail        String    @map("signer_email")
+  signerTitle        String    @map("signer_title")
+  // sent | completed | declined | voided
+  status             String    @default("sent")
+  ownerSignedAt      DateTime? @map("owner_signed_at") @db.Timestamptz(6)
+  createdAt          DateTime  @default(now()) @map("created_at") @db.Timestamptz(6)
+  updatedAt          DateTime  @updatedAt @map("updated_at") @db.Timestamptz(6)
+
+  tenant  Tenant           @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+  version AgreementVersion @relation(fields: [agreementVersionId], references: [id])
+
+  @@index([tenantId])
+  @@map("agreement_envelopes")
 }

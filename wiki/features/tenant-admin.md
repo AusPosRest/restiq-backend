@@ -615,13 +615,14 @@ built here, story by story.
   revoked PIN to actually stop authenticating; the e2e suite asserts the DB
   state and the argon2 hash directly instead.
 
-## Agreement - read and sign the platform agreement (issue #132)
+## Agreement - read and sign the platform agreement (issues #132, #150)
 
-- `GET admin/v1/agreement` and `POST admin/v1/agreement/:versionId/sign`
+- `GET admin/v1/agreement`, `POST admin/v1/agreement/:versionId/signing` and
+  `GET admin/v1/agreement/:versionId/pdf`
   (`src/admin/agreement/agreement.controller.ts`) - the owner side of the
-  versioned platform agreement. The service, data model, error codes and
-  evidence hash are documented once, in
-  [platform-console.md](platform-console.md#agreements---versioned-platform-agreement-owner-signed-issue-132-srcopsagreements).
+  versioned platform agreement, signed through DocuSign. The service, data
+  model, DocuSign flow, error codes and evidence are documented once, in
+  [platform-console.md](platform-console.md#agreements---versioned-platform-agreement-signed-through-docusign-issues-132-150-srcopsagreements).
 
 ## Integration points for story 6+ and beyond
 
