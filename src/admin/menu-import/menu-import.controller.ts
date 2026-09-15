@@ -26,7 +26,7 @@ export class AdminMenuImportController {
     @Param('importId') importId: string,
     @Body() dto: PatchMenuImportDraftDto,
   ): Promise<MenuImportDraftView> {
-    return this.menuImport.patch(owner, importId, dto.items)
+    return this.menuImport.patch(owner, importId, dto.items, dto.removeIds)
   }
 
   @Post(':importId/commit')
