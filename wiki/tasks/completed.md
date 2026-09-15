@@ -1,5 +1,13 @@
 # Completed
 
+- **2026-09-15** - Agreements signed through DocuSign, issue #150. The owner signs embedded,
+  Restiq countersigns by email, and the sealed PDF (with DocuSign's Certificate of Completion)
+  is stored on the signature and downloadable by owner and ops. Migration
+  `20260915230000_agreement_docusign` (`agreement_envelopes`; signature title, envelope and PDF
+  columns); `docusign.client.ts` (JWT grant, fail-closed config); `agreement-document.ts`
+  (escaped HTML with customer fields and signature anchors). Typed-name signing removed. Unit
+  specs for both new files, reworked `agreements.e2e-spec.ts`, RLS probe for the new table.
+
 - **2026-09-15** - External payment tender, issue #146. `TenderMethod.external` +
   `tenders.reference` (migration `20260915120000_external_tender`; CHECKs: external needs no
   intent and must carry a reference). `TenderDto.reference` required for external (1-64 chars,

@@ -2,6 +2,7 @@ import { Module } from '@nestjs/common'
 import { PlatformModule } from '../platform'
 import { OpsAgreementsController } from './agreements/agreements.controller'
 import { AgreementsService } from './agreements/agreements.service'
+import { DocuSignClient } from './agreements/docusign.client'
 import { OpsAuthController } from './auth.controller'
 import { OpsAuthService } from './auth.service'
 import { OpsDashboardController } from './dashboard.controller'
@@ -39,6 +40,7 @@ import { OpsTenantsService } from './tenants/tenants.service'
     SyncHealthService,
     DlqService,
     AgreementsService,
+    DocuSignClient,
     { provide: ALERT_CHANNEL, useClass: LogAlertChannel },
   ],
   // DevicesService is exported for tenant-admin/CAP-6 (AD-12: one enrolment
