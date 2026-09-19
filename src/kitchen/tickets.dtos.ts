@@ -24,6 +24,9 @@ export interface TicketLineView {
   itemId: string
   itemName: string
   variantName: string | null
+  // restiq-backend#160: set when this item was picked as part of a combo, so
+  // expo can send the combo's items out together.
+  comboName: string | null
   quantity: number
   seatNumber: number | null
   // qr-self-order/CAP-4 (issue #77, AD-18): the guest who added this line via

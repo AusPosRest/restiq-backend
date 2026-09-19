@@ -73,6 +73,7 @@ export async function assertOwner(tx: Tx, order: Order, staff: PosPrincipal): Pr
 
 const ORDER_LINE_INCLUDE = {
   modifiers: { include: { modifier: true } },
+  combo: { select: { name: true } },
 } satisfies Prisma.OrderLineInclude
 
 type OrderLineWithModifiers = Prisma.OrderLineGetPayload<{ include: typeof ORDER_LINE_INCLUDE }>
@@ -83,6 +84,9 @@ function toOrderLineView(line: OrderLineWithModifiers): OrderLineView {
     orderId: line.orderId,
     itemId: line.itemId,
     variantId: line.variantId,
+    comboId: line.comboId,
+    comboName: line.combo?.name ?? null,
+    parentLineId: line.parentLineId,
     quantity: line.quantity,
     unitPriceMinor: Number(line.unitPriceMinor),
     seatNumber: line.seatNumber,

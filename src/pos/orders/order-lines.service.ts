@@ -15,12 +15,12 @@
 // "open" - once sent, the kitchen may already be acting on that specific
 // line, so it is frozen except for outright new additions.
 import { BadRequestException, ConflictException, Injectable, NotFoundException } from '@nestjs/common'
-import { resolveCurrentPrice } from '../../admin'
-import type { Order, PriceChannel, Prisma } from '../../generated/prisma/client'
+import { resolveComboSelection, resolveCurrentPrice } from '../../admin'
+import type { Order, OrderLine, PriceChannel, Prisma } from '../../generated/prisma/client'
 import { KitchenTicketsService } from '../../kitchen'
 import { PosPrincipal, RegionRegistryService } from '../../platform'
 import { setTenantContext } from '../tenant-context'
-import { AddOrderLineDto, OrderView, UpdateOrderLineDto } from './orders.dtos'
+import { AddComboLineDto, AddOrderLineDto, OrderView, UpdateOrderLineDto } from './orders.dtos'
 import { assertOwner, buildOrderView, loadOrder, Tx } from './orders.service'
 
 // Fixed for this story: pos/CAP-3 only builds dine-in table orders (Order
@@ -113,6 +113,18 @@ async function loadOrderLine(tx: Tx, tenantId: string, orderId: string, lineId: 
   return line
 }
 
+// restiq-backend#160: a combo is edited by removing it and adding it again -
+// its lines are priced as one unit, so a partial edit could leave the combo
+// half-changed.
+function assertNotComboLine(line: OrderLine, action: 'change' | 'remove'): void {
+  if (line.comboId && action === 'change') {
+    throw new ConflictException({ code: 'combo_locked', message: 'Remove the combo and add it again to change it' })
+  }
+  if (line.parentLineId) {
+    throw new ConflictException({ code: 'combo_locked', message: `This item is part of a combo - ${action} the whole combo instead` })
+  }
+}
+
 @Injectable()
 export class OrderLinesService {
   constructor(
@@ -180,6 +192,34 @@ export class OrderLinesService {
     })
   }
 
+  /** restiq-backend#160: adds a combo - a parent line at the combo price plus one child line per chosen item. */
+  async addCombo(staff: PosPrincipal, orderId: string, dto: AddComboLineDto): Promise<OrderView> {
+    return this.plane().$transaction(async (tx) => {
+      await setTenantContext(tx, staff.tenantId)
+      const order = await loadOrder(tx, staff.tenantId, orderId)
+      await assertOwner(tx, order, staff)
+      assertOrderNotClosed(order)
+
+      const { combo, children } = await resolveComboSelection(tx, staff.tenantId, order.outletId, dto.comboId, dto.selections)
+      const shared = { tenantId: staff.tenantId, orderId, seatNumber: dto.seatNumber ?? null, addedByStaffId: staff.id }
+      const parent = await tx.orderLine.create({ data: { ...shared, comboId: combo.id, quantity: dto.quantity, unitPriceMinor: combo.priceMinor } })
+      for (const child of children) {
+        const line = await tx.orderLine.create({
+          data: { ...shared, itemId: child.itemId, variantId: child.variantId, parentLineId: parent.id, quantity: child.quantity * dto.quantity, unitPriceMinor: child.upchargeMinor },
+        })
+        const modifierPrices = await resolveModifierPrices(tx, staff.tenantId, child.modifierIds)
+        for (const modifierId of child.modifierIds) {
+          await tx.orderLineModifier.create({ data: { tenantId: staff.tenantId, orderLineId: line.id, modifierId, priceMinor: modifierPrices.get(modifierId) ?? 0n } })
+        }
+        // Same add-on firing as a single item added to a sent order.
+        if (order.status === 'sent') {
+          await this.tickets.fireAddedLine(tx, order, { id: line.id, quantity: line.quantity, item: { stationId: child.stationId } })
+        }
+      }
+      return buildOrderView(tx, order)
+    })
+  }
+
   async updateLine(staff: PosPrincipal, orderId: string, lineId: string, dto: UpdateOrderLineDto): Promise<OrderView> {
     const plane = this.plane()
     return plane.$transaction(async (tx) => {
@@ -188,6 +228,7 @@ export class OrderLinesService {
       await assertOwner(tx, order, staff)
       assertOrderOpenForEdit(order)
       const line = await loadOrderLine(tx, staff.tenantId, orderId, lineId)
+      assertNotComboLine(line, 'change')
 
       if (dto.quantity !== undefined) {
         await tx.orderLine.update({ where: { id: lineId }, data: { quantity: dto.quantity } })
@@ -198,7 +239,7 @@ export class OrderLinesService {
       }
 
       if (dto.modifierIds !== undefined) {
-        const item = await loadItemForOrderLine(tx, staff.tenantId, line.itemId)
+        const item = await loadItemForOrderLine(tx, staff.tenantId, line.itemId!)
         assertModifierSelectionValid(item, dto.modifierIds)
         const modifierPrices = await resolveModifierPrices(tx, staff.tenantId, dto.modifierIds)
         await tx.orderLineModifier.deleteMany({ where: { orderLineId: lineId } })
@@ -220,8 +261,9 @@ export class OrderLinesService {
       const order = await loadOrder(tx, staff.tenantId, orderId)
       await assertOwner(tx, order, staff)
       assertOrderOpenForEdit(order)
-      await loadOrderLine(tx, staff.tenantId, orderId, lineId)
+      assertNotComboLine(await loadOrderLine(tx, staff.tenantId, orderId, lineId), 'remove')
 
+      // A combo's child lines go with it (parent_line_id ON DELETE CASCADE).
       await tx.orderLine.delete({ where: { id: lineId } })
       return buildOrderView(tx, order)
     })

@@ -110,7 +110,8 @@ async function wipe(prisma: PrismaClient): Promise<void> {
   await prisma.enrolmentCode.deleteMany()
   await prisma.menuImportDraft.deleteMany()
   await prisma.itemOutletOverride.deleteMany()
-  await prisma.comboComponent.deleteMany()
+  await prisma.comboSlotOption.deleteMany()
+  await prisma.comboSlot.deleteMany()
   await prisma.combo.deleteMany()
   await prisma.itemAllergen.deleteMany()
   await prisma.allergen.deleteMany()
@@ -817,8 +818,8 @@ describe('/pos/v1 bill and settle (e2e)', () => {
         outletAddress: 'A1',
       })
       expect(invoice.lines).toEqual([
-        { name: expect.any(String) as string, quantity: 2, unitPriceMinor: 10000, lineTotalMinor: 20000 },
-        { name: expect.any(String) as string, quantity: 1, unitPriceMinor: 5000, lineTotalMinor: 5000 },
+        { name: expect.any(String) as string, quantity: 2, unitPriceMinor: 10000, lineTotalMinor: 20000, components: [] },
+        { name: expect.any(String) as string, quantity: 1, unitPriceMinor: 5000, lineTotalMinor: 5000, components: [] },
       ])
       expect(invoice.subtotalMinor).toBe(25000)
       expect(invoice.taxMinor).toBe(1250)

@@ -2,6 +2,7 @@
 // restiq-web's order-taking-state.ts already declares as PosMenuView - that
 // contract was never wrong, just never backed by a real endpoint (this file
 // closes that gap; restiq-web needs no shape change here).
+import type { ComboMenuView } from '../../admin'
 
 export interface MenuVariantView {
   id: string
@@ -44,5 +45,7 @@ export interface MenuCategoryView {
 export interface MenuView {
   categories: MenuCategoryView[]
   items: MenuItemView[]
+  // restiq-backend#160: live combos with availability at this outlet.
+  combos: ComboMenuView[]
   currency: string
 }

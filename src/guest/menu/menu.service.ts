@@ -13,7 +13,7 @@
 // per-item/variant resolution pos/order-lines already relies on for the same
 // reason (AD-11: one price-picking implementation).
 import { Injectable, NotFoundException } from '@nestjs/common'
-import { resolveCurrentPrice } from '../../admin'
+import { resolveCurrentPrice, listMenuCombos } from '../../admin'
 import type { Prisma } from '../../generated/prisma/client'
 import { GuestPrincipal, RegionRegistryService } from '../../platform'
 import { setTenantContext } from '../tenant-context'
@@ -123,7 +123,7 @@ export class GuestMenuService {
         })),
       )
 
-      return { outletId: guest.outletId, categories: categoryViews }
+      return { outletId: guest.outletId, categories: categoryViews, combos: await listMenuCombos(tx, guest.tenantId, guest.outletId) }
     })
   }
 

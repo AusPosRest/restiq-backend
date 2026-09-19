@@ -1,4 +1,6 @@
-import { ArrayUnique, IsArray, IsEnum, IsInt, IsOptional, IsString, IsUUID, Min, MinLength } from 'class-validator'
+import { Type } from 'class-transformer'
+import { ArrayMaxSize, ArrayUnique, IsArray, IsEnum, IsInt, IsOptional, IsString, IsUUID, Min, MinLength, ValidateNested } from 'class-validator'
+import { ComboSelectionDto } from '../../admin'
 import type { OrderSource, OrderStatus } from '../../generated/prisma/client'
 
 const ORDER_STATUSES = ['open', 'sent', 'closed'] as const
@@ -77,6 +79,20 @@ export class AddOrderLineDto {
   seatNumber?: number
 }
 
+export class AddComboLineDto {
+  @IsUUID()
+  comboId!: string
+
+  @IsInt() @Min(1)
+  quantity!: number
+
+  @IsArray() @ArrayMaxSize(60) @ValidateNested({ each: true }) @Type(() => ComboSelectionDto)
+  selections!: ComboSelectionDto[]
+
+  @IsOptional() @IsInt() @Min(1)
+  seatNumber?: number
+}
+
 // Quantity, seat number, and/or modifier re-selection only - swapping
 // itemId/variantId is "remove this line, add a different one", not an edit
 // (SPEC/stories.yaml story 4: PATCH covers "change quantity, or re-select
@@ -105,8 +121,15 @@ export interface OrderLineModifierView {
 export interface OrderLineView {
   id: string
   orderId: string
-  itemId: string
+  // Null on a combo's parent line - see comboId (restiq-backend#160).
+  itemId: string | null
   variantId: string | null
+  // A combo's parent line: comboId + comboName, unitPriceMinor = combo price.
+  // Its chosen items are separate lines whose parentLineId points here and
+  // whose unitPriceMinor is only the option's extra charge.
+  comboId: string | null
+  comboName: string | null
+  parentLineId: string | null
   quantity: number
   // Snapshotted at add-time (and re-snapshotted only by an explicit PATCH) -
   // a later item_prices change never retroactively alters this line.

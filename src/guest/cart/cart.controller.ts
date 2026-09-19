@@ -1,6 +1,6 @@
 import { Body, Controller, Delete, Get, Param, Patch, Post } from '@nestjs/common'
 import { CurrentGuest, GuestPrincipal } from '../../platform'
-import { AddCartLineDto, TableCartView, UpdateCartLineDto } from './cart.dtos'
+import { AddCartComboDto, AddCartLineDto, TableCartView, UpdateCartLineDto } from './cart.dtos'
 import { CartService } from './cart.service'
 
 @Controller('guest/v1/cart')
@@ -15,6 +15,12 @@ export class CartController {
   @Post('lines')
   addLine(@CurrentGuest() guest: GuestPrincipal, @Body() dto: AddCartLineDto): Promise<TableCartView> {
     return this.cart.addLine(guest, dto)
+  }
+
+  // restiq-backend#160
+  @Post('combos')
+  addCombo(@CurrentGuest() guest: GuestPrincipal, @Body() dto: AddCartComboDto): Promise<TableCartView> {
+    return this.cart.addCombo(guest, dto)
   }
 
   @Patch('lines/:id')

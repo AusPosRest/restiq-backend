@@ -1,6 +1,7 @@
 // qr-self-order/CAP-2 (stories.yaml story 2, issue #78): the guest-readable projection
 // shape. Mirrors the real catalogue (admin/menu) including guest-facing fields:
 // photoUrl, nameHindi, and vegMarker.
+import type { ComboMenuView } from '../../admin'
 import type { VegMarker } from '../../generated/prisma/client'
 
 export interface MenuModifierView {
@@ -62,4 +63,6 @@ export interface MenuCategoryView {
 export interface GuestMenuView {
   outletId: string
   categories: MenuCategoryView[]
+  // restiq-backend#160: live combos, availability at this outlet.
+  combos: ComboMenuView[]
 }

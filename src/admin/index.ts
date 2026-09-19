@@ -9,6 +9,10 @@ export type { PinStatus } from './staff/staff.service'
 // add-time against the real, already-shipped item_prices resolution rules -
 // no second price-picking implementation.
 export { resolveCurrentPrice } from './menu/pricing'
+// restiq-backend#160: combos on the POS, QR and kiosk menus and their picks.
+export { listMenuCombos, resolveComboSelection } from './menu/combo-menu'
+export type { ComboMenuView, ComboSelectionInput, ResolvedComboChild } from './menu/combo-menu'
+export { ComboSelectionDto } from './menu/combos.dtos'
 export { TaxRegistrationService } from './tax/tax-registration.service'
 // Test-only hook (issue #118): shrinks the owner-login lockout window so
 // e2e coverage of lockout recovery doesn't need a real 30s sleep.

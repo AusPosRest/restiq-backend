@@ -454,17 +454,38 @@ export async function buildInvoiceView(tx: Tx, tenantId: string, billId: string)
   const isFinalized = bill.status === 'finalized'
 
   const [orderLines, outlet, taxContext, creditNotes] = await Promise.all([
-    tx.orderLine.findMany({ where: { orderId: bill.orderId }, include: { item: true, modifiers: true }, orderBy: { createdAt: 'asc' } }),
+    tx.orderLine.findMany({
+      where: { orderId: bill.orderId },
+      include: { item: true, variant: true, combo: true, modifiers: { include: { modifier: true } } },
+      orderBy: { createdAt: 'asc' },
+    }),
     tx.outlet.findUniqueOrThrow({ where: { id: bill.outletId }, select: { name: true, address: true } }),
     loadTenantTaxProfile(tx, tenantId),
     tx.creditNote.findMany({ where: { originalBillId: bill.id }, orderBy: { createdAt: 'asc' } }),
   ])
 
-  const lines: InvoiceLineView[] = orderLines.map((line) => {
-    const modifiersTotal = line.modifiers.reduce((sum, m) => sum + m.priceMinor, 0n)
-    const unitPriceMinor = line.unitPriceMinor + modifiersTotal
-    return { name: line.item.name, quantity: line.quantity, unitPriceMinor: Number(unitPriceMinor), lineTotalMinor: Number(unitPriceMinor * BigInt(line.quantity)) }
-  })
+  const unitOf = (line: (typeof orderLines)[number]) => line.unitPriceMinor + line.modifiers.reduce((sum, m) => sum + m.priceMinor, 0n)
+  // restiq-backend#160: a combo prints as one line - its price plus every
+  // chosen item's extra charge - with the items listed underneath.
+  const lines: InvoiceLineView[] = orderLines
+    .filter((line) => !line.parentLineId)
+    .map((line) => {
+      const children = orderLines.filter((c) => c.parentLineId === line.id)
+      const qty = BigInt(line.quantity)
+      const lineTotal = children.reduce((sum, c) => sum + unitOf(c) * BigInt(c.quantity), unitOf(line) * qty)
+      const components = children.map((c) => {
+        const perCombo = c.quantity / line.quantity
+        const extras = [c.variant?.name, ...c.modifiers.map((m) => m.modifier.name)].filter(Boolean)
+        return `${perCombo > 1 ? `${perCombo}× ` : ''}${c.item?.name ?? ''}${extras.length ? ` (${extras.join(', ')})` : ''}`
+      })
+      return {
+        name: line.combo?.name ?? line.item?.name ?? '',
+        quantity: line.quantity,
+        unitPriceMinor: Number(lineTotal / qty),
+        lineTotalMinor: Number(lineTotal),
+        components,
+      }
+    })
 
   const creditNoteViews: InvoiceCreditNoteView[] = creditNotes.map((note) => ({
     id: note.id,
