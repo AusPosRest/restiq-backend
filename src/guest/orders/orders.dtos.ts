@@ -11,7 +11,11 @@ export interface PlacedOrderLineModifierView {
 
 export interface PlacedOrderLineView {
   id: string
-  itemId: string
+  // restiq-backend#160: null on a combo line (itemName is the combo's name);
+  // the combo's picks follow it with parentLineId set.
+  itemId: string | null
+  comboId: string | null
+  parentLineId: string | null
   itemName: string
   variantId: string | null
   variantName: string | null

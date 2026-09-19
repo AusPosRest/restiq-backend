@@ -167,10 +167,27 @@ built here, story by story.
     tag catalog, moved here from CAP-3 per the spec amendment (unreliable
     from OCR/CSV). `GET/POST /allergens`; attach to an item via the item's
     `PUT /items/:id/allergens` above.
-  - **Combos** (`combos.controller.ts`/`.service.ts`): a flat-priced bundle
-    of existing items. `GET/POST /combos`. Not versioned (AD-11 binds
-    `item_prices`, not combos) - a routine content edit like the rest of
-    this module's CRUD.
+  - **Combos** (`combos.controller.ts`/`.service.ts`, issue #160): a
+    flat-priced bundle built from **slots**. A slot picks `pickCount` items
+    from its options; a slot with one option is a fixed part of the combo.
+    An option is an item (optionally a variant) with an extra charge
+    (`upchargeMinor`). `GET/POST /combos`, `PUT /combos/:id` (saves the whole
+    combo, slots included), `DELETE /combos/:id` (archives - order lines keep
+    pointing at it; the name can be reused). Editing or deleting a combo
+    clears it from unplaced guest carts. Not versioned (AD-11 binds
+    `item_prices`, not combos).
+  - **Selling combos** (`combo-menu.ts`, exported from the admin barrel):
+    `listMenuCombos` feeds the POS and guest menus (`combos` on both, with
+    per-outlet availability - a combo is unavailable when switched off or a
+    slot has no available option); `resolveComboSelection` checks a pick
+    (fixed slots may be left out, every slot must add up to its pickCount,
+    item modifiers keep their min/max) for `POST /pos/v1/orders/:id/combos`
+    and `POST /guest/v1/cart/combos`. A combo is stored as a parent line
+    (`comboId`, no item, the combo price) plus one child line per pick
+    (`parentLineId`, price = the extra charge), so the bill's plain line sum
+    is already right. Only the picks are ticketed, each carrying
+    `comboName`; the invoice prints the combo as one line with `components`;
+    a refund names the combo's parent line and takes its picks with it.
   - **Prices** (`prices.service.ts`, routed from `items.controller.ts`):
     `POST /items/:id/prices` - the ONE place `item_prices` is ever written
     from this module (AD-11): always an INSERT, the targeted row (by
@@ -696,8 +713,10 @@ built here, story by story.
   0 <= min <= max at write time.
 - `allergens` / `item_allergens` (new) - tenant-scoped tag catalog + item
   join. Moved here from CAP-3 menu import per the spec amendment.
-- `combos` / `combo_components` (new) - a flat-priced bundle of existing
-  items. Not versioned - AD-11 binds `item_prices`, not combos.
+- `combos` / `combo_slots` / `combo_slot_options` - a flat-priced bundle
+  built from slots (issue #160 replaced the original `combo_components`;
+  migration `20260919120000_combo_slots` carried each component over as a
+  fixed slot). Not versioned - AD-11 binds `item_prices`, not combos.
 - `item_outlet_overrides` (new) - per-outlet **availability** override only
   (`{ itemId, outletId, available }`, `@@unique([itemId, outletId])`,
   mutable/upsertable). Per-outlet **price** override does *not* get a

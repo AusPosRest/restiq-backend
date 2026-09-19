@@ -172,6 +172,10 @@ export interface InvoiceLineView {
   quantity: number
   unitPriceMinor: number
   lineTotalMinor: number
+  // restiq-backend#160: a combo's chosen items ("2× Garlic naan"), printed
+  // under it. Their extra charges are already in this line's total. Empty
+  // for a plain item.
+  components: string[]
 }
 
 export interface InvoiceSellerView {

@@ -1,5 +1,16 @@
 # Completed
 
+- **2026-09-19** - Combo menu, issue #160 (backend half of restiq-web#264). Combos are built
+  from slots (`combo_slots`, `combo_slot_options`: pick N of these, or one fixed item, with
+  per-option extra charges); `combos` gains `photo_url`, `available`, `archived_at` (live names
+  unique via a partial index). Order and cart lines can be a combo parent (`combo_id`, no item)
+  with child lines per pick (`parent_line_id`); cart children keep `combo_option_id` so
+  placement re-checks the pick. Owner `PUT`/`DELETE /admin/v1/menu/combos/:id`; `combos` on the
+  POS and guest menus; `POST /pos/v1/orders/:id/combos`, `POST /guest/v1/cart/combos`. Kitchen
+  tickets carry `comboName`; invoice lines carry `components`; combo refunds are whole.
+  Migration `20260919120000_combo_slots` (checked against a demo-DB copy with existing combo
+  components). e2e: new `test/combos.e2e-spec.ts`, plus `menu-management` and `pos-bills` updates.
+
 - **2026-09-15** - External payment tender, issue #146. `TenderMethod.external` +
   `tenders.reference` (migration `20260915120000_external_tender`; CHECKs: external needs no
   intent and must carry a reference). `TenderDto.reference` required for external (1-64 chars,

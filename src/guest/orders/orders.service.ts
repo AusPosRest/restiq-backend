@@ -19,7 +19,7 @@
 // hook itself (src/kitchen, AD-16), which has no such dependency and is
 // injected the same way pos/orders does.
 import { BadRequestException, GoneException, Injectable, NotFoundException } from '@nestjs/common'
-import { resolveCurrentPrice } from '../../admin'
+import { resolveComboSelection, resolveCurrentPrice } from '../../admin'
 import type { Order, Prisma, PriceChannel, TableSession, Ticket } from '../../generated/prisma/client'
 import { KitchenTicketsService } from '../../kitchen'
 import { GuestPrincipal, RegionRegistryService } from '../../platform'
@@ -38,6 +38,7 @@ const CART_LINE_INCLUDE = {
   item: true,
   variant: true,
   modifiers: { include: { modifier: true } },
+  childLines: { include: { modifiers: true }, orderBy: { createdAt: 'asc' } },
 } satisfies Prisma.CartLineInclude
 
 type CartLineWithRelations = Prisma.CartLineGetPayload<{ include: typeof CART_LINE_INCLUDE }>
@@ -129,7 +130,8 @@ export class GuestOrdersService {
       const session = await loadActiveSession(tx, guest)
 
       const cartLines: CartLineWithRelations[] = await tx.cartLine.findMany({
-        where: { tenantId: guest.tenantId, sessionId: session.id },
+        // Combo picks are placed with their combo, below.
+        where: { tenantId: guest.tenantId, sessionId: session.id, parentLineId: null },
         include: CART_LINE_INCLUDE,
         orderBy: { createdAt: 'asc' },
       })
@@ -167,6 +169,46 @@ export class GuestOrdersService {
 
       const lineViews: PlacedOrderLineView[] = []
       for (const line of cartLines) {
+        // restiq-backend#160: a combo is re-checked against its current slots
+        // and availability, then written as a parent line at the combo price
+        // plus one child line per pick (price = that option's extra charge).
+        if (line.comboId) {
+          const selections = line.childLines.map((c) => ({
+            optionId: c.comboOptionId ?? '',
+            quantity: c.quantity / line.quantity,
+            modifierIds: c.modifiers.map((m) => m.modifierId),
+          }))
+          const { combo, children } = await resolveComboSelection(tx, guest.tenantId, guest.outletId, line.comboId, selections)
+          const who = { seatNumber: seatByGuest.get(line.guestId) ?? null, guestId: line.guestId, guestName: line.guestName }
+          const shared = { ...who, tenantId: guest.tenantId, orderId: order.id, addedByStaffId: null }
+          const parent = await tx.orderLine.create({ data: { ...shared, comboId: combo.id, quantity: line.quantity, unitPriceMinor: combo.priceMinor } })
+          lineViews.push({ ...who, id: parent.id, itemId: null, comboId: combo.id, parentLineId: null, itemName: combo.name, variantId: null, variantName: null, quantity: line.quantity, unitPriceMinor: Number(combo.priceMinor), modifiers: [] })
+          for (const child of children) {
+            const quantity = child.quantity * line.quantity
+            const created = await tx.orderLine.create({
+              data: { ...shared, itemId: child.itemId, variantId: child.variantId, parentLineId: parent.id, quantity, unitPriceMinor: child.upchargeMinor },
+            })
+            const modifiers = await tx.modifier.findMany({ where: { tenantId: guest.tenantId, id: { in: child.modifierIds } } })
+            for (const m of modifiers) {
+              await tx.orderLineModifier.create({ data: { tenantId: guest.tenantId, orderLineId: created.id, modifierId: m.id, priceMinor: m.priceMinor } })
+            }
+            lineViews.push({
+              ...who,
+              id: created.id,
+              itemId: child.itemId,
+              comboId: null,
+              parentLineId: parent.id,
+              itemName: child.itemName,
+              variantId: child.variantId,
+              variantName: null,
+              quantity,
+              unitPriceMinor: Number(child.upchargeMinor),
+              modifiers: modifiers.map((m) => ({ id: m.id, name: m.name, priceMinor: Number(m.priceMinor) })),
+            })
+          }
+          continue
+        }
+
         // Re-resolved here rather than trusting whatever the cart last showed -
         // same insert-only, re-resolvable item_prices read (AD-11)
         // pos/orders/order-lines.service.ts uses, snapshotted for real only now,
@@ -174,7 +216,7 @@ export class GuestOrdersService {
         // never snapshots price).
         const price = await resolveCurrentPrice(tx, {
           tenantId: guest.tenantId,
-          itemId: line.itemId,
+          itemId: line.itemId!,
           variantId: line.variantId,
           channel: ORDER_PLACEMENT_PRICE_CHANNEL,
           outletId: guest.outletId,
@@ -211,7 +253,9 @@ export class GuestOrdersService {
         lineViews.push({
           id: createdLine.id,
           itemId: line.itemId,
-          itemName: line.item.name,
+          comboId: null,
+          parentLineId: null,
+          itemName: line.item?.name ?? '',
           variantId: line.variantId,
           variantName: line.variant?.name ?? null,
           quantity: line.quantity,

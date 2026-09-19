@@ -100,7 +100,8 @@ async function wipe(prisma: PrismaClient): Promise<void> {
   await prisma.enrolmentCode.deleteMany()
   await prisma.menuImportDraft.deleteMany()
   await prisma.itemOutletOverride.deleteMany()
-  await prisma.comboComponent.deleteMany()
+  await prisma.comboSlotOption.deleteMany()
+  await prisma.comboSlot.deleteMany()
   await prisma.combo.deleteMany()
   await prisma.itemAllergen.deleteMany()
   await prisma.allergen.deleteMany()
@@ -694,9 +695,9 @@ describe('/admin/v1/menu (e2e)', () => {
         name: 'Combo A',
         priceMinor: 35000,
         currency: 'INR',
-        components: [
-          { itemId: item1.id, quantity: 1 },
-          { itemId: item2.id, quantity: 2 },
+        slots: [
+          { name: 'Main', pickCount: 1, options: [{ itemId: item1.id }] },
+          { name: 'Bread', pickCount: 2, options: [{ itemId: item2.id }] },
         ],
       })
       expect(res.status).toBe(201)

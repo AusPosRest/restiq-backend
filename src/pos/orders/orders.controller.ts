@@ -1,6 +1,6 @@
 import { Body, Controller, Delete, Get, HttpCode, Param, Patch, Post } from '@nestjs/common'
 import { CurrentStaff, PosPrincipal } from '../../platform'
-import { AddOrderLineDto, OrderView, TableMapEntry, TransferOrderDto, UpdateOrderLineDto, UpdateOrderStatusDto } from './orders.dtos'
+import { AddComboLineDto, AddOrderLineDto, OrderView, TableMapEntry, TransferOrderDto, UpdateOrderLineDto, UpdateOrderStatusDto } from './orders.dtos'
 import { OrderLinesService } from './order-lines.service'
 import { OrdersService } from './orders.service'
 
@@ -71,6 +71,13 @@ export class PosOrdersController {
   @HttpCode(201)
   addLine(@CurrentStaff() staff: PosPrincipal, @Param('orderId') orderId: string, @Body() dto: AddOrderLineDto): Promise<OrderView> {
     return this.orderLines.addLine(staff, orderId, dto)
+  }
+
+  // restiq-backend#160: a combo with its picks - see OrderLinesService.addCombo.
+  @Post('orders/:orderId/combos')
+  @HttpCode(201)
+  addCombo(@CurrentStaff() staff: PosPrincipal, @Param('orderId') orderId: string, @Body() dto: AddComboLineDto): Promise<OrderView> {
+    return this.orderLines.addCombo(staff, orderId, dto)
   }
 
   @Patch('orders/:orderId/lines/:lineId')

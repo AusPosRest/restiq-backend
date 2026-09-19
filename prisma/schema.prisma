@@ -139,7 +139,8 @@ model Tenant {
   allergens           Allergen[]
   itemAllergens       ItemAllergen[]
   combos              Combo[]
-  comboComponents     ComboComponent[]
+  comboSlots          ComboSlot[]
+  comboSlotOptions    ComboSlotOption[]
   itemOutletOverrides ItemOutletOverride[]
   menuImportDrafts    MenuImportDraft[]
   ownerInvites        OwnerInvite[]
@@ -374,7 +375,7 @@ model MenuItem {
   prices          ItemPrice[]
   modifierGroups  ItemModifierGroup[]
   allergens       ItemAllergen[]
-  comboComponents ComboComponent[]
+  comboOptions    ComboSlotOption[]
   outletOverrides ItemOutletOverride[]
   orderLines      OrderLine[]
   cartLines       CartLine[]
@@ -396,11 +397,12 @@ model ItemVariant {
   sortOrder Int      @map("sort_order")
   createdAt DateTime @default(now()) @map("created_at") @db.Timestamptz(6)
 
-  tenant     Tenant      @relation(fields: [tenantId], references: [id])
-  item       MenuItem    @relation(fields: [itemId], references: [id])
-  prices     ItemPrice[]
-  orderLines OrderLine[]
-  cartLines  CartLine[]
+  tenant       Tenant            @relation(fields: [tenantId], references: [id])
+  item         MenuItem          @relation(fields: [itemId], references: [id])
+  prices       ItemPrice[]
+  orderLines   OrderLine[]
+  cartLines    CartLine[]
+  comboOptions ComboSlotOption[]
 
   @@unique([itemId, name])
   @@map("item_variants")
@@ -534,42 +536,69 @@ model ItemAllergen {
 // carries that AD-11 obligation); a combo price is edited in place like any
 // other routine content field.
 model Combo {
-  id         String   @id @default(uuid(7)) @db.Uuid
-  tenantId   String   @map("tenant_id") @db.Uuid
-  categoryId String?  @map("category_id") @db.Uuid
+  id         String    @id @default(uuid(7)) @db.Uuid
+  tenantId   String    @map("tenant_id") @db.Uuid
+  categoryId String?   @map("category_id") @db.Uuid
   name       String
-  priceMinor BigInt   @map("price_minor")
-  currency   String   @db.Char(3)
-  createdAt  DateTime @default(now()) @map("created_at") @db.Timestamptz(6)
+  priceMinor BigInt    @map("price_minor")
+  currency   String    @db.Char(3)
+  photoUrl   String?   @map("photo_url")
+  // Owner's own on/off switch; a combo is also hidden while any fixed slot's
+  // only item is 86'd (see combo-menu.ts).
+  available  Boolean   @default(true)
+  createdAt  DateTime  @default(now()) @map("created_at") @db.Timestamptz(6)
+  // restiq-backend#160: set when the owner deletes the combo. The row stays
+  // (order and cart lines reference it). Live names are unique per tenant via
+  // a partial index (combos_live_name_per_tenant, WHERE archived_at IS NULL)
+  // in 20260919120000_combo_slots - no partial-index syntax in Prisma.
+  archivedAt DateTime? @map("archived_at") @db.Timestamptz(6)
 
-  tenant     Tenant           @relation(fields: [tenantId], references: [id])
-  category   MenuCategory?    @relation(fields: [categoryId], references: [id])
-  components ComboComponent[]
+  tenant     Tenant        @relation(fields: [tenantId], references: [id])
+  category   MenuCategory? @relation(fields: [categoryId], references: [id])
+  slots      ComboSlot[]
+  orderLines OrderLine[]
+  cartLines  CartLine[]
 
-  @@unique([tenantId, name])
   @@map("combos")
 }
 
-model ComboComponent {
-  id       String @id @default(uuid(7)) @db.Uuid
-  tenantId String @map("tenant_id") @db.Uuid
-  comboId  String @map("combo_id") @db.Uuid
-  itemId   String @map("item_id") @db.Uuid
-  quantity Int    @default(1)
+// restiq-backend#160: one step of a combo. pickCount items are chosen from
+// its options; a slot with a single option is a fixed part of the combo.
+model ComboSlot {
+  id        String @id @default(uuid(7)) @db.Uuid
+  tenantId  String @map("tenant_id") @db.Uuid
+  comboId   String @map("combo_id") @db.Uuid
+  name      String
+  pickCount Int    @map("pick_count")
+  sortOrder Int    @map("sort_order")
 
-  tenant Tenant   @relation(fields: [tenantId], references: [id])
-  combo  Combo    @relation(fields: [comboId], references: [id])
-  item   MenuItem @relation(fields: [itemId], references: [id])
+  tenant  Tenant            @relation(fields: [tenantId], references: [id])
+  combo   Combo             @relation(fields: [comboId], references: [id], onDelete: Cascade)
+  options ComboSlotOption[]
 
-  @@unique([comboId, itemId])
-  @@map("combo_components")
+  @@index([comboId])
+  @@map("combo_slots")
 }
 
-// CAP-4 per-outlet availability override - price's per-outlet dimension
-// already lives on item_prices.outletId (one insert-only price path, AD-11),
-// so this table carries only availability, which is mutable by design (86 is
-// immediate, not versioned). No row = the item's tenant-wide `available`
-// applies at that outlet.
+model ComboSlotOption {
+  id            String  @id @default(uuid(7)) @db.Uuid
+  tenantId      String  @map("tenant_id") @db.Uuid
+  slotId        String  @map("slot_id") @db.Uuid
+  itemId        String  @map("item_id") @db.Uuid
+  variantId     String? @map("variant_id") @db.Uuid
+  // Extra charge on top of the combo price when this option is picked.
+  upchargeMinor BigInt  @default(0) @map("upcharge_minor")
+  sortOrder     Int     @map("sort_order")
+
+  tenant  Tenant       @relation(fields: [tenantId], references: [id])
+  slot    ComboSlot    @relation(fields: [slotId], references: [id], onDelete: Cascade)
+  item    MenuItem     @relation(fields: [itemId], references: [id])
+  variant ItemVariant? @relation(fields: [variantId], references: [id], onDelete: Restrict)
+
+  @@index([slotId])
+  @@map("combo_slot_options")
+}
+
 model ItemOutletOverride {
   id        String   @id @default(uuid(7)) @db.Uuid
   tenantId  String   @map("tenant_id") @db.Uuid
@@ -695,18 +724,18 @@ model StaffUser {
   createdAt    DateTime  @default(now()) @map("created_at") @db.Timestamptz(6)
   updatedAt    DateTime  @updatedAt @map("updated_at") @db.Timestamptz(6)
 
-  tenant            Tenant         @relation(fields: [tenantId], references: [id])
-  role              Role           @relation(fields: [roleId], references: [id])
-  clockEvents       ClockEvent[]
-  orders            Order[]
-  orderLinesAdded   OrderLine[]
-  shiftsOpened      Shift[]        @relation("ShiftOpenedBy")
-  shiftsClosed      Shift[]        @relation("ShiftClosedBy")
-  cashMovementsMade CashMovement[]
-  billsCreated      Bill[]         @relation("BillCreatedBy")
-  billsFinalized    Bill[]         @relation("BillFinalizedBy")
-  creditNotesCreated  CreditNote[] @relation("CreditNoteCreatedBy")
-  creditNotesApproved CreditNote[] @relation("CreditNoteApprovedBy")
+  tenant                Tenant          @relation(fields: [tenantId], references: [id])
+  role                  Role            @relation(fields: [roleId], references: [id])
+  clockEvents           ClockEvent[]
+  orders                Order[]
+  orderLinesAdded       OrderLine[]
+  shiftsOpened          Shift[]         @relation("ShiftOpenedBy")
+  shiftsClosed          Shift[]         @relation("ShiftClosedBy")
+  cashMovementsMade     CashMovement[]
+  billsCreated          Bill[]          @relation("BillCreatedBy")
+  billsFinalized        Bill[]          @relation("BillFinalizedBy")
+  creditNotesCreated    CreditNote[]    @relation("CreditNoteCreatedBy")
+  creditNotesApproved   CreditNote[]    @relation("CreditNoteApprovedBy")
   paymentIntentsCreated PaymentIntent[]
 
   @@index([tenantId])
@@ -820,11 +849,11 @@ enum TableSessionStatus {
 }
 
 model TableSession {
-  id       String              @id @default(uuid(7)) @db.Uuid
-  tenantId String              @map("tenant_id") @db.Uuid
-  outletId String              @map("outlet_id") @db.Uuid
-  tableId  String              @map("table_id") @db.Uuid
-  status   TableSessionStatus  @default(open)
+  id                  String             @id @default(uuid(7)) @db.Uuid
+  tenantId            String             @map("tenant_id") @db.Uuid
+  outletId            String             @map("outlet_id") @db.Uuid
+  tableId             String             @map("table_id") @db.Uuid
+  status              TableSessionStatus @default(open)
   // 4-digit PIN gating who can join this table's shared cart - deliberately
   // NOT credential-grade (SPEC qr-self-order Constraints; AD-17). It protects
   // against a stranger joining the wrong table's order, not money or an
@@ -833,15 +862,15 @@ model TableSession {
   // StaffUser PIN (contrast pos/CAP-1's PosLoginDto). Do not "fix" this to
   // argon2 - that would misapply a credential-grade convention to a
   // cart-joining code.
-  sessionPin          String    @map("session_pin")
-  startedByGuestName  String    @map("started_by_guest_name")
-  startedByGuestPhone String    @map("started_by_guest_phone")
-  createdAt           DateTime  @default(now()) @map("created_at") @db.Timestamptz(6)
-  closedAt            DateTime? @map("closed_at") @db.Timestamptz(6)
+  sessionPin          String             @map("session_pin")
+  startedByGuestName  String             @map("started_by_guest_name")
+  startedByGuestPhone String             @map("started_by_guest_phone")
+  createdAt           DateTime           @default(now()) @map("created_at") @db.Timestamptz(6)
+  closedAt            DateTime?          @map("closed_at") @db.Timestamptz(6)
   // Idle-TTL backstop (~4h, SPEC Assumptions) - a prototype safety net, not a
   // product-designed timeout. Checked on every guest-facing read; never
   // silently renewed.
-  expiresAt DateTime @map("expires_at") @db.Timestamptz(6)
+  expiresAt           DateTime           @map("expires_at") @db.Timestamptz(6)
 
   tenant    Tenant      @relation(fields: [tenantId], references: [id])
   outlet    Outlet      @relation(fields: [outletId], references: [id])
@@ -898,26 +927,38 @@ model Guest {
 // admin/menu/pricing.ts's resolveCurrentPrice, and nothing is final until
 // placement snapshots it for real.
 model CartLine {
-  id        String   @id @default(uuid(7)) @db.Uuid
-  tenantId  String   @map("tenant_id") @db.Uuid
-  sessionId String   @map("session_id") @db.Uuid
-  guestId   String   @map("guest_id") @db.Uuid
-  guestName String   @map("guest_name")
-  itemId    String   @map("item_id") @db.Uuid
-  variantId String?  @map("variant_id") @db.Uuid
-  quantity  Int
-  createdAt DateTime @default(now()) @map("created_at") @db.Timestamptz(6)
+  id            String   @id @default(uuid(7)) @db.Uuid
+  tenantId      String   @map("tenant_id") @db.Uuid
+  sessionId     String   @map("session_id") @db.Uuid
+  guestId       String   @map("guest_id") @db.Uuid
+  guestName     String   @map("guest_name")
+  // Same combo shape as OrderLine (restiq-backend#160): parent has comboId
+  // and no item, children point at it via parentLineId.
+  itemId        String?  @map("item_id") @db.Uuid
+  variantId     String?  @map("variant_id") @db.Uuid
+  comboId       String?  @map("combo_id") @db.Uuid
+  parentLineId  String?  @map("parent_line_id") @db.Uuid
+  // The ComboSlotOption a child line was picked from, so placement can
+  // re-check the pick and price its extra charge. No FK: editing a combo
+  // clears the carts holding it (admin combos.service.ts).
+  comboOptionId String?  @map("combo_option_id") @db.Uuid
+  quantity      Int
+  createdAt     DateTime @default(now()) @map("created_at") @db.Timestamptz(6)
 
-  tenant    Tenant             @relation(fields: [tenantId], references: [id])
-  session   TableSession       @relation(fields: [sessionId], references: [id])
-  guest     Guest              @relation(fields: [guestId], references: [id])
-  item      MenuItem           @relation(fields: [itemId], references: [id])
-  variant   ItemVariant?       @relation(fields: [variantId], references: [id])
-  modifiers CartLineModifier[]
+  tenant     Tenant             @relation(fields: [tenantId], references: [id])
+  session    TableSession       @relation(fields: [sessionId], references: [id])
+  guest      Guest              @relation(fields: [guestId], references: [id])
+  item       MenuItem?          @relation(fields: [itemId], references: [id], onDelete: Restrict)
+  variant    ItemVariant?       @relation(fields: [variantId], references: [id])
+  combo      Combo?             @relation(fields: [comboId], references: [id], onDelete: Restrict)
+  parentLine CartLine?          @relation("CartLineCombo", fields: [parentLineId], references: [id], onDelete: Cascade)
+  childLines CartLine[]         @relation("CartLineCombo")
+  modifiers  CartLineModifier[]
 
   @@index([tenantId])
   @@index([sessionId])
   @@index([guestId])
+  @@index([parentLineId])
   @@map("cart_lines")
 }
 
@@ -1070,11 +1111,11 @@ model Device {
   clockSkewSeconds     Int?      @map("clock_skew_seconds")
   recentRejectionCount Int?      @map("recent_rejection_count")
 
-  tenant      Tenant           @relation(fields: [tenantId], references: [id])
-  outlet      Outlet?          @relation(fields: [outletId], references: [id])
-  deadLetters SyncDeadLetter[]
-  pairedPos              Device?         @relation("DevicePairing", fields: [pairedPosId], references: [id], onDelete: SetNull)
-  pairedPeripherals      Device[]        @relation("DevicePairing")
+  tenant                 Tenant           @relation(fields: [tenantId], references: [id])
+  outlet                 Outlet?          @relation(fields: [outletId], references: [id])
+  deadLetters            SyncDeadLetter[]
+  pairedPos              Device?          @relation("DevicePairing", fields: [pairedPosId], references: [id], onDelete: SetNull)
+  pairedPeripherals      Device[]         @relation("DevicePairing")
   targetedPrintJobs      PrintJob[]
   targetedPaymentIntents PaymentIntent[]
 
@@ -1281,8 +1322,15 @@ model OrderLine {
   id             String   @id @default(uuid(7)) @db.Uuid
   tenantId       String   @map("tenant_id") @db.Uuid
   orderId        String   @map("order_id") @db.Uuid
-  itemId         String   @map("item_id") @db.Uuid
+  // Null only on a combo's parent line (comboId set) - restiq-backend#160.
+  itemId         String?  @map("item_id") @db.Uuid
   variantId      String?  @map("variant_id") @db.Uuid
+  // restiq-backend#160 combos: the parent line carries comboId and the combo
+  // price; each chosen item is a child line (parentLineId) whose
+  // unitPriceMinor is only that option's upcharge. The bill's plain line sum
+  // therefore already totals a combo correctly.
+  comboId        String?  @map("combo_id") @db.Uuid
+  parentLineId   String?  @map("parent_line_id") @db.Uuid
   quantity       Int
   unitPriceMinor BigInt   @map("unit_price_minor")
   seatNumber     Int?     @map("seat_number")
@@ -1301,13 +1349,16 @@ model OrderLine {
   guestName      String?  @map("guest_name")
   createdAt      DateTime @default(now()) @map("created_at") @db.Timestamptz(6)
 
-  tenant       Tenant              @relation(fields: [tenantId], references: [id])
-  order        Order               @relation(fields: [orderId], references: [id])
-  item         MenuItem            @relation(fields: [itemId], references: [id])
-  variant      ItemVariant?        @relation(fields: [variantId], references: [id])
-  addedByStaff StaffUser?          @relation(fields: [addedByStaffId], references: [id])
-  guest        Guest?              @relation(fields: [guestId], references: [id])
-  modifiers    OrderLineModifier[]
+  tenant          Tenant              @relation(fields: [tenantId], references: [id])
+  order           Order               @relation(fields: [orderId], references: [id])
+  item            MenuItem?           @relation(fields: [itemId], references: [id], onDelete: Restrict)
+  combo           Combo?              @relation(fields: [comboId], references: [id], onDelete: Restrict)
+  parentLine      OrderLine?          @relation("OrderLineCombo", fields: [parentLineId], references: [id], onDelete: Cascade)
+  childLines      OrderLine[]         @relation("OrderLineCombo")
+  variant         ItemVariant?        @relation(fields: [variantId], references: [id])
+  addedByStaff    StaffUser?          @relation(fields: [addedByStaffId], references: [id])
+  guest           Guest?              @relation(fields: [guestId], references: [id])
+  modifiers       OrderLineModifier[]
   // pos/CAP-9 refunds (AD-14): a CreditNoteLine reverses this exact line's
   // unit price/modifiers snapshot, quantity at a time - see CreditNoteLine's
   // own comment for why refunds itemize against OrderLine, not against Bill
@@ -1323,6 +1374,7 @@ model OrderLine {
   @@index([tenantId])
   @@index([orderId])
   @@index([guestId])
+  @@index([parentLineId])
   @@map("order_lines")
 }
 
@@ -1472,11 +1524,11 @@ model Bill {
   finalizedByStaffId String?    @map("finalized_by_staff_id") @db.Uuid
   finalizedAt        DateTime?  @map("finalized_at") @db.Timestamptz(6)
 
-  tenant           Tenant       @relation(fields: [tenantId], references: [id])
-  outlet           Outlet       @relation(fields: [outletId], references: [id])
-  order            Order        @relation(fields: [orderId], references: [id])
-  createdByStaff   StaffUser?   @relation("BillCreatedBy", fields: [createdByStaffId], references: [id])
-  finalizedByStaff StaffUser?   @relation("BillFinalizedBy", fields: [finalizedByStaffId], references: [id])
+  tenant           Tenant          @relation(fields: [tenantId], references: [id])
+  outlet           Outlet          @relation(fields: [outletId], references: [id])
+  order            Order           @relation(fields: [orderId], references: [id])
+  createdByStaff   StaffUser?      @relation("BillCreatedBy", fields: [createdByStaffId], references: [id])
+  finalizedByStaff StaffUser?      @relation("BillFinalizedBy", fields: [finalizedByStaffId], references: [id])
   printJobs        PrintJob[]
   tenders          Tender[]
   creditNotes      CreditNote[]
@@ -1506,16 +1558,16 @@ model Bill {
 // migration mirrors bill_shares. Cascades with its bill so test wipes and
 // bill deletes never trip over a spooled job.
 model PrintJob {
-  id        String    @id @default(uuid(7)) @db.Uuid
-  tenantId  String    @map("tenant_id") @db.Uuid
-  outletId  String    @map("outlet_id") @db.Uuid
-  billId    String    @map("bill_id") @db.Uuid
-  payload   Json
-  createdAt DateTime  @default(now()) @map("created_at") @db.Timestamptz(6)
-  printedAt DateTime? @map("printed_at") @db.Timestamptz(6)
+  id             String    @id @default(uuid(7)) @db.Uuid
+  tenantId       String    @map("tenant_id") @db.Uuid
+  outletId       String    @map("outlet_id") @db.Uuid
+  billId         String    @map("bill_id") @db.Uuid
+  payload        Json
+  createdAt      DateTime  @default(now()) @map("created_at") @db.Timestamptz(6)
+  printedAt      DateTime? @map("printed_at") @db.Timestamptz(6)
   // Device topology (issue #134): the printer linked to the sending POS, or
   // null for the outlet-wide queue.
-  targetDeviceId String? @map("target_device_id") @db.Uuid
+  targetDeviceId String?   @map("target_device_id") @db.Uuid
 
   tenant       Tenant  @relation(fields: [tenantId], references: [id])
   outlet       Outlet  @relation(fields: [outletId], references: [id])
@@ -1548,23 +1600,23 @@ enum TenderMethod {
 // produces). Insert-only, like every other money-path row under AD-14 - no
 // UPDATE/DELETE path for a tender once finalise has written it.
 model Tender {
-  id          String       @id @default(uuid(7)) @db.Uuid
-  tenantId    String       @map("tenant_id") @db.Uuid
-  billId      String       @map("bill_id") @db.Uuid
-  method      TenderMethod
-  amountMinor BigInt       @map("amount_minor")
+  id               String       @id @default(uuid(7)) @db.Uuid
+  tenantId         String       @map("tenant_id") @db.Uuid
+  billId           String       @map("bill_id") @db.Uuid
+  method           TenderMethod
+  amountMinor      BigInt       @map("amount_minor")
   // Set only by confirmIntent (src/pos/payments/intent-core.ts) - the one
   // code path that turns a provider-confirmed intent into money on the
   // bill. Null for cash / upi_manual, by CHECK constraint.
-  paymentIntentId  String?  @unique @map("payment_intent_id") @db.Uuid
+  paymentIntentId  String?      @unique @map("payment_intent_id") @db.Uuid
   // FR-52: a manual UPI tender is the cashier's own verification; true once
   // the risk-acknowledgement checkbox lands (web W4). Stored, not yet
   // enforced (B5 makes it 400 risk_ack_required).
-  riskAcknowledged Boolean  @default(false) @map("risk_acknowledged")
+  riskAcknowledged Boolean      @default(false) @map("risk_acknowledged")
   // issue #146: the outside system's reference / bill number. Set exactly
   // when method = external (CHECK tenders_external_needs_reference).
-  reference   String?
-  createdAt   DateTime     @default(now()) @map("created_at") @db.Timestamptz(6)
+  reference        String?
+  createdAt        DateTime     @default(now()) @map("created_at") @db.Timestamptz(6)
 
   tenant        Tenant         @relation(fields: [tenantId], references: [id])
   bill          Bill           @relation(fields: [billId], references: [id])
@@ -1572,7 +1624,7 @@ model Tender {
   // qr-self-order/CAP-5 (issue #80): the BillShare(s) this Tender settles -
   // one for a per-guest share payment, or every outstanding share at once for
   // the one-payment ("pay-all") mode. Empty for every pos-created Tender.
-  shares BillShare[]
+  shares        BillShare[]
 
   @@index([tenantId])
   @@index([billId])
@@ -1648,8 +1700,8 @@ model PaymentIntent {
   tender         Tender?
   // Device topology (issue #134): the terminal linked to the sending POS, or
   // null for the outlet-wide queue.
-  targetDeviceId String?             @map("target_device_id") @db.Uuid
-  targetDevice   Device?             @relation(fields: [targetDeviceId], references: [id], onDelete: SetNull)
+  targetDeviceId String?    @map("target_device_id") @db.Uuid
+  targetDevice   Device?    @relation(fields: [targetDeviceId], references: [id], onDelete: SetNull)
 
   @@unique([tenantId, clientKey])
   @@index([tenantId])
@@ -1755,24 +1807,24 @@ model BillNumberCounter {
 // ---------------------------------------------------------------------------
 
 model CreditNote {
-  id                 String   @id @default(uuid(7)) @db.Uuid
-  tenantId           String   @map("tenant_id") @db.Uuid
-  originalBillId     String   @map("original_bill_id") @db.Uuid
-  reason             String
+  id                String   @id @default(uuid(7)) @db.Uuid
+  tenantId          String   @map("tenant_id") @db.Uuid
+  originalBillId    String   @map("original_bill_id") @db.Uuid
+  reason            String
   // The manager who approved this refund (platform/manager-auth's
   // ManagerApproval.approverId) - distinct from createdByStaffId below, same
   // actor/approver split Bill already draws between createdByStaffId and
   // finalizedByStaffId.
-  approvedByStaffId  String   @map("approved_by_staff_id") @db.Uuid
-  createdByStaffId   String   @map("created_by_staff_id") @db.Uuid
+  approvedByStaffId String   @map("approved_by_staff_id") @db.Uuid
+  createdByStaffId  String   @map("created_by_staff_id") @db.Uuid
   // Sum of this note's lines' amountMinor, and that subtotal's tax reversed
   // at the same TAX_RATE_PLACEHOLDER_PERCENT the original bill's tax was
   // computed with (bills.service.ts) - never re-derived or re-guessed.
   // totalMinor (subtotal + tax) is derived in CreditNoteView, same
   // never-persisted-derived-total convention as BillView.totalMinor.
-  subtotalMinor      BigInt   @map("subtotal_minor")
-  taxMinor           BigInt   @map("tax_minor")
-  createdAt          DateTime @default(now()) @map("created_at") @db.Timestamptz(6)
+  subtotalMinor     BigInt   @map("subtotal_minor")
+  taxMinor          BigInt   @map("tax_minor")
+  createdAt         DateTime @default(now()) @map("created_at") @db.Timestamptz(6)
 
   tenant          Tenant           @relation(fields: [tenantId], references: [id])
   originalBill    Bill             @relation(fields: [originalBillId], references: [id])
@@ -1868,10 +1920,10 @@ model Ticket {
   bumpedAt    DateTime?    @map("bumped_at") @db.Timestamptz(6)
   recalledAt  DateTime?    @map("recalled_at") @db.Timestamptz(6)
 
-  tenant  Tenant       @relation(fields: [tenantId], references: [id])
-  outlet  Outlet       @relation(fields: [outletId], references: [id])
-  order   Order        @relation(fields: [orderId], references: [id])
-  station Station?     @relation(fields: [stationId], references: [id])
+  tenant  Tenant        @relation(fields: [tenantId], references: [id])
+  outlet  Outlet        @relation(fields: [outletId], references: [id])
+  order   Order         @relation(fields: [orderId], references: [id])
+  station Station?      @relation(fields: [stationId], references: [id])
   lines   TicketLine[]
   events  TicketEvent[]
 

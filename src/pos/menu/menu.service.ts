@@ -7,7 +7,7 @@
 // already calls it the same way when a line is added). No second
 // price-picking or menu-shape implementation.
 import { Injectable } from '@nestjs/common'
-import { resolveCurrentPrice } from '../../admin'
+import { listMenuCombos, resolveCurrentPrice } from '../../admin'
 import type { PriceChannel, Prisma } from '../../generated/prisma/client'
 import { PosPrincipal, RegionRegistryService } from '../../platform'
 import { setTenantContext } from '../tenant-context'
@@ -36,10 +36,11 @@ export class MenuService {
     return plane.$transaction(async (tx) => {
       await setTenantContext(tx, staff.tenantId)
 
-      const [categories, items, overrides] = await Promise.all([
+      const [categories, items, overrides, combos] = await Promise.all([
         tx.menuCategory.findMany({ where: { tenantId: staff.tenantId }, orderBy: { sortOrder: 'asc' } }),
         tx.menuItem.findMany({ where: { tenantId: staff.tenantId }, include: ITEM_INCLUDE, orderBy: { createdAt: 'asc' } }),
         tx.itemOutletOverride.findMany({ where: { tenantId: staff.tenantId, outletId: staff.outletId } }),
+        listMenuCombos(tx, staff.tenantId, staff.outletId),
       ])
       const availabilityOverride = new Map(overrides.map((o) => [o.itemId, o.available]))
 
@@ -76,7 +77,7 @@ export class MenuService {
         })
       }
 
-      return { categories: categories.map((c) => ({ id: c.id, name: c.name, sortOrder: c.sortOrder })), items: itemViews, currency }
+      return { categories: categories.map((c) => ({ id: c.id, name: c.name, sortOrder: c.sortOrder })), items: itemViews, combos, currency }
     })
   }
 

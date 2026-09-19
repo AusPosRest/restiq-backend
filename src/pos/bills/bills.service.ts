@@ -285,6 +285,22 @@ export class BillsService {
         throw new BadRequestException({ code: 'nothing_to_refund', message: 'There is nothing left to refund on this bill' })
       }
 
+      // restiq-backend#160: a combo is refunded whole - naming its parent line
+      // brings its chosen items along; naming one item inside it is refused.
+      if (dto.lines) {
+        for (const target of [...targets]) {
+          const line = orderLineById.get(target.orderLineId)
+          if (line?.parentLineId) {
+            throw new BadRequestException({ code: 'combo_refund_whole', message: 'Refund the whole combo, not one item in it' })
+          }
+          if (line?.comboId) {
+            for (const child of orderLines.filter((c) => c.parentLineId === line.id)) {
+              targets.push({ orderLineId: child.id, quantity: (target.quantity * child.quantity) / line.quantity })
+            }
+          }
+        }
+      }
+
       let subtotalMinor = 0n
       const lineData: { orderLineId: string; quantity: number; unitPriceMinor: bigint; amountMinor: bigint }[] = []
       for (const target of targets) {

@@ -69,6 +69,7 @@ const TICKET_LINE_INCLUDE = {
       item: true,
       variant: true,
       modifiers: { include: { modifier: true } },
+      parentLine: { select: { combo: { select: { name: true } } } },
     },
   },
 } satisfies Prisma.TicketLineInclude
@@ -79,9 +80,11 @@ function toTicketLineView(line: TicketLineWithOrderLine): TicketLineView {
   return {
     id: line.id,
     orderLineId: line.orderLineId,
-    itemId: line.orderLine.itemId,
-    itemName: line.orderLine.item.shortName,
+    // Only item lines are ever ticketed (fireOnSend skips combo parents).
+    itemId: line.orderLine.itemId ?? '',
+    itemName: line.orderLine.item?.shortName ?? '',
     variantName: line.orderLine.variant?.name ?? null,
+    comboName: line.orderLine.parentLine?.combo?.name ?? null,
     quantity: line.quantity,
     seatNumber: line.orderLine.seatNumber,
     guestName: line.orderLine.guestName,
@@ -133,7 +136,9 @@ export class KitchenTicketsService {
    * station, addOnBatch 0. A no-op if the order somehow has no lines yet.
    */
   async fireOnSend(tx: Tx, order: Pick<Order, 'id' | 'tenantId' | 'outletId'>): Promise<void> {
-    const lines = await tx.orderLine.findMany({ where: { orderId: order.id }, include: { item: true } })
+    // A combo's parent line has no item and nothing to cook - its child lines
+    // (the chosen items) are what the kitchen gets (restiq-backend#160).
+    const lines = (await tx.orderLine.findMany({ where: { orderId: order.id }, include: { item: true } })).flatMap((l) => (l.item ? [{ ...l, item: l.item }] : []))
     if (lines.length === 0) return
 
     const defaultStationId = await resolveDefaultStationId(tx, order.tenantId, order.outletId)
@@ -328,8 +333,10 @@ export class KitchenTicketsService {
       })
       const totals = new Map<string, AllDaySummaryEntryView>()
       for (const line of lines) {
-        const itemId = line.orderLine.itemId
-        const entry = totals.get(itemId) ?? { itemId, itemName: line.orderLine.item.shortName, quantity: 0 }
+        const item = line.orderLine.item
+        if (!item) continue
+        const itemId = item.id
+        const entry = totals.get(itemId) ?? { itemId, itemName: item.shortName, quantity: 0 }
         entry.quantity += line.quantity
         totals.set(itemId, entry)
       }
