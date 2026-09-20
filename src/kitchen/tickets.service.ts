@@ -53,6 +53,15 @@ async function resolveDefaultStationId(tx: Tx, tenantId: string, outletId: strin
 // nullable precisely for this case.
 export const UNROUTED_STATION_PARAM = 'unrouted'
 
+/**
+ * How far back the Done tab looks (issue #167). A rolling window, not "since
+ * midnight", so a service running past midnight keeps its own tickets on
+ * screen; reopening is limited to the same window, since a ticket bumped
+ * yesterday has no business going back on a live station board.
+ */
+const BUMPED_WINDOW_MS = 12 * 60 * 60 * 1000
+const BUMPED_MAX = 200
+
 /** Resolves a `:stationId` path param (a real station id, or the literal "unrouted") to the DB value, validating outlet ownership. */
 export async function resolveStationParam(tx: Tx, tenantId: string, outletId: string, stationIdParam: string): Promise<string | null> {
   if (stationIdParam === UNROUTED_STATION_PARAM) return null
@@ -209,6 +218,9 @@ export class KitchenTicketsService {
       if (ticket.status !== 'bumped') {
         throw new ConflictException({ code: 'conflict', message: 'Only a bumped ticket can be recalled' })
       }
+      if (ticket.bumpedAt && Date.now() - ticket.bumpedAt.getTime() > BUMPED_WINDOW_MS) {
+        throw new ConflictException({ code: 'conflict', message: 'This ticket is too old to reopen' })
+      }
       const updated = await tx.ticket.update({
         where: { id: ticketId },
         data: { status: 'queued', recallCount: { increment: 1 }, recalledAt: new Date() },
@@ -302,13 +314,17 @@ export class KitchenTicketsService {
     })
   }
 
-  /** CAP-4: bumped tickets, most-recently-bumped first, each with its full recall history. */
+  /** CAP-4: bumped tickets in the last 12 hours, most-recently-bumped first, capped at 200. Each with its full recall history. */
   async bumped(staff: PosPrincipal, outletId: string): Promise<BumpedTicketView[]> {
     const plane = this.plane()
     return plane.$transaction(async (tx) => {
       await setTenantContext(tx, staff.tenantId)
       await loadOutlet(tx, staff.tenantId, outletId)
-      const tickets = await tx.ticket.findMany({ where: { tenantId: staff.tenantId, outletId, status: 'bumped' }, orderBy: { bumpedAt: 'desc' } })
+      const tickets = await tx.ticket.findMany({
+        where: { tenantId: staff.tenantId, outletId, status: 'bumped', bumpedAt: { gte: new Date(Date.now() - BUMPED_WINDOW_MS) } },
+        orderBy: { bumpedAt: 'desc' },
+        take: BUMPED_MAX,
+      })
       return Promise.all(
         tickets.map(async (ticket) => {
           const [view, events] = await Promise.all([
