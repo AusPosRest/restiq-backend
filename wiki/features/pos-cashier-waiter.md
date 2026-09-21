@@ -128,6 +128,11 @@ guesses never tripped it.
   browsers, so an attacker can't lock the tills out.
 - `req.ip` is resolved through `TRUST_PROXY_HOPS`. It is 1 on Fly and 0 by
   default, which means `X-Forwarded-For` is ignored.
+- Sign-ins reach the API through the web app's own server routes, so `req.ip`
+  there is the web server. Those routes send the browser's address in
+  `X-Restiq-Client-Ip`, and it is believed only with a matching
+  `X-Restiq-Proxy-Secret` (`PROXY_SHARED_SECRET`, compared in constant time).
+  See `src/platform/client-ip.ts`.
 
 **Tests:** `test/login-throttle.e2e-spec.ts` covers:
 - a burst of concurrent requests;

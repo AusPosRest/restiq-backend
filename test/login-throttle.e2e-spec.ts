@@ -249,6 +249,27 @@ describe('shared sign-in throttling (#171, e2e)', () => {
     expect((await pinLogin(proxied.server, { tenantId, pin: '1234', deviceId: till }, '192.0.2.99')).status).toBe(200)
   })
 
+  it("the web server's forwarded client address counts only with the shared proxy secret", async () => {
+    process.env.PROXY_SHARED_SECRET = 'e2e-proxy-secret'
+    try {
+      const { tenantId } = await seedTenant()
+      await staff(tenantId, '1234')
+      const viaWeb = (pin: string, clientIp: string, secret: string) =>
+        request(a.server).post('/pos/v1/auth/login').set('X-Restiq-Client-Ip', clientIp).set('X-Restiq-Proxy-Secret', secret).send({ tenantId, pin })
+
+      // Guesses claiming many addresses without the secret all land on the one real (socket) address.
+      for (let i = 0; i < 10; i++) expect((await viaWeb(String(7700 + i), `203.0.113.${i}`, 'wrong-secret')).status).toBe(401)
+      expect((await viaWeb('1234', '203.0.113.50', 'wrong-secret')).status).toBe(429)
+
+      // With the secret, each browser behind the web server has its own allowance.
+      for (let i = 0; i < 10; i++) expect((await viaWeb(String(7800 + i), '198.51.100.1', 'e2e-proxy-secret')).status).toBe(401)
+      expect((await viaWeb('1234', '198.51.100.1', 'e2e-proxy-secret')).status).toBe(429)
+      expect((await viaWeb('1234', '198.51.100.2', 'e2e-proxy-secret')).status).toBe(200)
+    } finally {
+      delete process.env.PROXY_SHARED_SECRET
+    }
+  })
+
   it('manager PIN approval: 5 wrong tries per requester, then refused even with the right PIN; another requester is unaffected', async () => {
     const { tenantId } = await seedTenant()
     await staff(tenantId, '4321', 'Manager')
