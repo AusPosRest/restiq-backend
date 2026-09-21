@@ -4,6 +4,8 @@
 // guest share path (B4) and a real provider's webhook handler (B6) call the
 // exact same confirmIntent rather than growing their own.
 import type { Prisma } from '../../generated/prisma/client'
+import { ConflictException } from '@nestjs/common'
+import { paymentsSimulatorEnabled } from '../../platform'
 import { createTenderRecord } from '../bills'
 import { PaymentIntentView } from './intents.dtos'
 
@@ -50,6 +52,11 @@ export function toPaymentIntentView(intent: IntentRow): PaymentIntentView {
  * on the bill, and recording it is not optional.
  */
 export async function confirmIntent(tx: Tx, params: { tenantId: string; intentId: string }): Promise<IntentRow> {
+  // #170: a simulated approval is never money - refuse it whenever the simulator is off, whenever the intent was made.
+  const target = await tx.paymentIntent.findUniqueOrThrow({ where: { id: params.intentId }, select: { provider: true } })
+  if (target.provider === 'simulated' && !paymentsSimulatorEnabled()) {
+    throw new ConflictException({ code: 'simulator_disabled', message: 'Simulated card payments are turned off' })
+  }
   const flipped = await tx.paymentIntent.updateMany({
     where: { id: params.intentId, status: { in: ['created', 'pending', 'expired'] } },
     data: { status: 'succeeded', succeededAt: new Date(), failureReason: null },

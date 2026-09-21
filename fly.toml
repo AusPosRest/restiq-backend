@@ -20,6 +20,12 @@ primary_region = "syd"
     size = "performance-1x"
     memory = "2gb"
 
+[env]
+  # restiq-backend#170: the simulated card terminal approves payments with no
+  # money moving. Never on in production - card is taken on the venue's own
+  # terminal and recorded as an external payment until a real provider lands.
+  PAYMENTS_SIMULATOR = "off"
+
 [build]
 
 [http_service]

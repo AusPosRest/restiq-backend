@@ -11,3 +11,5 @@ process.env.OPS_JWT_SECRET ??= 'e2e-ops-secret'
 process.env.ADMIN_JWT_SECRET ??= 'e2e-admin-secret'
 process.env.POS_JWT_SECRET ??= 'e2e-pos-secret'
 process.env.GUEST_JWT_SECRET ??= 'e2e-guest-secret'
+// #170: most suites drive the simulated terminal; pos-payment-intents turns it off where it tests that.
+process.env.PAYMENTS_SIMULATOR ??= 'on'

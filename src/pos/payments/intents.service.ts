@@ -12,7 +12,7 @@
 // handler (B6) calls the same confirmIntent.
 import { BadRequestException, ConflictException, ForbiddenException, Injectable, NotFoundException } from '@nestjs/common'
 import type { Prisma } from '../../generated/prisma/client'
-import { PosPrincipal, RegionRegistryService, uuidv7 } from '../../platform'
+import { paymentsSimulatorEnabled, PosPrincipal, RegionRegistryService, uuidv7 } from '../../platform'
 import { isUniqueViolation, loadBill, refreshOpenBillTotals, toBillView } from '../bills'
 import { setTenantContext } from '../tenant-context'
 import { linkedPeripheral, queueFor } from '../device-routing'
@@ -50,6 +50,13 @@ export class PaymentIntentsService {
    * never exceed what is still due after every tender already on the bill.
    */
   async createIntent(staff: PosPrincipal, billId: string, dto: CreatePaymentIntentDto): Promise<{ view: PaymentIntentView; created: boolean }> {
+    // #170: the simulator is the only card provider so far - with it off there is nothing to send to.
+    if (!paymentsSimulatorEnabled()) {
+      throw new ConflictException({
+        code: 'provider_unavailable',
+        message: 'Card terminal payments are not connected yet - take the card on your own terminal and record it as an external payment',
+      })
+    }
     const plane = this.plane()
     return plane.$transaction(async (tx) => {
       await setTenantContext(tx, staff.tenantId)
@@ -174,7 +181,8 @@ export class PaymentIntentsService {
     return plane.$transaction(async (tx) => {
       await setTenantContext(tx, staff.tenantId)
       const intent = await loadIntent(tx, staff.tenantId, intentId)
-      if (intent.provider !== 'simulated') {
+      // #170: with the simulator off the webhook does not exist, for old intents too.
+      if (intent.provider !== 'simulated' || !paymentsSimulatorEnabled()) {
         throw new NotFoundException({ code: 'not_found', message: 'No such payment intent' })
       }
 
