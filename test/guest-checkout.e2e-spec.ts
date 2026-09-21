@@ -199,9 +199,9 @@ async function enableQrOrdering(prisma: PrismaClient, tenantId: string, outletId
 }
 
 async function createStaff(prisma: PrismaClient, tenantId: string, outletId: string, name: string): Promise<string> {
-  const role = await prisma.role.create({ data: { tenantId, name: `Waiter-${uuidv7()}`, isSystem: false } })
+  const role = await prisma.role.upsert({ where: { tenantId_name: { tenantId, name: 'Cashier' } }, update: {}, create: { tenantId, name: 'Cashier', isSystem: true, isManager: false } })
   const staff = await prisma.staffUser.create({ data: { tenantId, roleId: role.id, name } })
-  return signPosToken({ id: staff.id, tenantId, outletId, name })
+  return signPosToken({ sessionVersion: 0, id: staff.id, tenantId, outletId, name })
 }
 
 async function createItemWithPrice(prisma: PrismaClient, tenantId: string, priceMinor: number): Promise<string> {

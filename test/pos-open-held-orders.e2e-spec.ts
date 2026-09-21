@@ -127,10 +127,10 @@ async function createTable(prisma: PrismaClient, tenantId: string, outletId: str
 }
 
 async function createStaff(prisma: PrismaClient, tenantId: string, name: string, outletId?: string): Promise<{ id: string; token: string }> {
-  const role = await prisma.role.create({ data: { tenantId, name: `Waiter-${uuidv7()}`, isSystem: false } })
+  const role = await prisma.role.upsert({ where: { tenantId_name: { tenantId, name: 'Cashier' } }, update: {}, create: { tenantId, name: 'Cashier', isSystem: true, isManager: false } })
   const staff = await prisma.staffUser.create({ data: { tenantId, roleId: role.id, name } })
   const resolvedOutletId = outletId ?? (await prisma.outlet.findMany({ where: { tenantId } }))[0]?.id ?? uuidv7()
-  const token = signPosToken({ id: staff.id, tenantId, outletId: resolvedOutletId, name })
+  const token = signPosToken({ sessionVersion: 0, id: staff.id, tenantId, outletId: resolvedOutletId, name })
   return { id: staff.id, token }
 }
 

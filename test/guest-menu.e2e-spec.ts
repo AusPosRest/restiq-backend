@@ -169,7 +169,7 @@ describe('/guest/v1/menu (e2e)', () => {
   it('rejects a pos-realm token on the guest menu route', async () => {
     const tenantId = await createTenant(prisma)
     const outletId = await createOutlet(prisma, tenantId)
-    const posToken = signPosToken({ id: uuidv7(), tenantId, outletId, name: 'Server' })
+    const posToken = signPosToken({ sessionVersion: 0, id: uuidv7(), tenantId, outletId, name: 'Server' })
     const res = await request(httpServer).get('/guest/v1/menu').set('Authorization', `Bearer ${posToken}`)
     expect(res.status).toBe(401)
   })

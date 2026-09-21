@@ -456,9 +456,9 @@ describe('/guest/v1/cart shared group cart (e2e)', () => {
       const added = await authed(request(httpServer).post('/guest/v1/cart/lines'), tokenA).send({ itemId, quantity: 1 })
       const lineId = (added.body as TableCartBody).guests[0]?.lines[0]?.id
 
-      const role = await prisma.role.create({ data: { tenantId, name: `Waiter-${uuidv7()}`, isSystem: false } })
+      const role = await prisma.role.upsert({ where: { tenantId_name: { tenantId, name: 'Cashier' } }, update: {}, create: { tenantId, name: 'Cashier', isSystem: true, isManager: false } })
       const staff = await prisma.staffUser.create({ data: { tenantId, roleId: role.id, name: 'Server Priya' } })
-      const posToken = signPosToken({ id: staff.id, tenantId, outletId, name: staff.name })
+      const posToken = signPosToken({ sessionVersion: 0, id: staff.id, tenantId, outletId, name: staff.name })
       const closeRes = await authed(request(httpServer).post(`/pos/v1/tables/${tableId}/close-session`), posToken)
       expect(closeRes.status).toBe(200)
 
@@ -489,9 +489,9 @@ describe('/guest/v1/cart shared group cart (e2e)', () => {
     it('rejects a pos-realm token on the guest cart routes', async () => {
       const tenantId = await createTenant(prisma)
       const outletId = await createOutlet(prisma, tenantId)
-      const role = await prisma.role.create({ data: { tenantId, name: `Waiter-${uuidv7()}`, isSystem: false } })
+      const role = await prisma.role.upsert({ where: { tenantId_name: { tenantId, name: 'Cashier' } }, update: {}, create: { tenantId, name: 'Cashier', isSystem: true, isManager: false } })
       const staff = await prisma.staffUser.create({ data: { tenantId, roleId: role.id, name: 'Server Priya' } })
-      const posToken = signPosToken({ id: staff.id, tenantId, outletId, name: staff.name })
+      const posToken = signPosToken({ sessionVersion: 0, id: staff.id, tenantId, outletId, name: staff.name })
 
       const res = await authed(request(httpServer).get('/guest/v1/cart'), posToken)
       expect(res.status).toBe(401)

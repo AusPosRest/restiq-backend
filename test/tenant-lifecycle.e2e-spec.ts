@@ -278,7 +278,7 @@ describe('tenant lifecycle: deactivate / reactivate / soft-delete (e2e)', () => 
     it('rejects a pos token for a soft-deleted tenant with 403 tenant_inactive', async () => {
       await authed(request(httpServer).delete(`/ops/v1/tenants/${tenantId}`)).send({ reason: 'x' })
 
-      const posToken = signPosToken({ id: uuidv7(), tenantId, outletId: uuidv7(), name: 'Staffer' })
+      const posToken = signPosToken({ sessionVersion: 0, id: uuidv7(), tenantId, outletId: uuidv7(), name: 'Staffer' })
       const res = await request(httpServer).get('/pos/v1/menu').set('Authorization', `Bearer ${posToken}`)
       expect(res.status).toBe(403)
       expect(errorCodeOf(res)).toBe('tenant_inactive')

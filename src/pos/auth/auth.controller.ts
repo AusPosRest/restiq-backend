@@ -1,5 +1,5 @@
 import { Body, Controller, HttpCode, Post } from '@nestjs/common'
-import { Public } from '../../platform'
+import { AnyStaff, CurrentStaff, PosPrincipal, Public } from '../../platform'
 import { PosLoginDto, PosLoginResult, SelectOutletDto } from './auth.dtos'
 import { PosAuthService } from './auth.service'
 
@@ -19,5 +19,13 @@ export class PosAuthController {
   @HttpCode(200)
   selectOutlet(@Body() dto: SelectOutletDto): Promise<PosLoginResult> {
     return this.auth.selectOutlet(dto)
+  }
+
+  // restiq-backend#169: signs this staff member out on every device.
+  @Post('logout')
+  @AnyStaff()
+  @HttpCode(204)
+  logout(@CurrentStaff() staff: PosPrincipal): Promise<void> {
+    return this.auth.logout(staff)
   }
 }

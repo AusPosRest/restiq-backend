@@ -132,9 +132,9 @@ async function createTable(prisma: PrismaClient, tenantId: string, outletId: str
 }
 
 async function createStaffToken(prisma: PrismaClient, tenantId: string, outletId: string): Promise<string> {
-  const role = await prisma.role.create({ data: { tenantId, name: `Waiter-${uuidv7()}`, isSystem: false } })
+  const role = await prisma.role.upsert({ where: { tenantId_name: { tenantId, name: 'Cashier' } }, update: {}, create: { tenantId, name: 'Cashier', isSystem: true, isManager: false } })
   const staff = await prisma.staffUser.create({ data: { tenantId, roleId: role.id, name: 'Asha' } })
-  return signPosToken({ id: staff.id, tenantId, outletId, name: 'Asha' })
+  return signPosToken({ sessionVersion: 0, id: staff.id, tenantId, outletId, name: 'Asha' })
 }
 
 /** A thali menu: 2 mains and naan (Tandoor), 2 drinks (Bar), gulab jamun (Dessert), priced a la carte. */

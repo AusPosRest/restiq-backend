@@ -7,7 +7,7 @@
 import { BadRequestException, ConflictException, HttpException, Injectable, UnauthorizedException } from '@nestjs/common'
 import * as argon2 from 'argon2'
 import { pinStatus } from '../../admin'
-import { PosPrincipal, RegionRegistryService, signPosPendingToken, signPosToken, verifyPosPendingToken } from '../../platform'
+import { PosPrincipal, PosTokenClaims, RegionRegistryService, signPosPendingToken, signPosToken, verifyPosPendingToken } from '../../platform'
 import type { Outlet, StaffUser } from '../../generated/prisma/client'
 import { recordClockInIfNeeded } from '../clock/clock.util'
 import { setTenantContext } from '../tenant-context'
@@ -124,12 +124,21 @@ export class PosAuthService {
       await recordClockInIfNeeded(tx, { tenantId: staff.tenantId, staffId: staff.id, outletId: outlet.id, timezone: outlet.timezone })
     })
 
-    const principal: PosPrincipal = { id: staff.id, tenantId: staff.tenantId, outletId: outlet.id, name: staff.name }
+    const claims: PosTokenClaims = { id: staff.id, tenantId: staff.tenantId, outletId: outlet.id, name: staff.name, sessionVersion: staff.sessionVersion }
     return {
       status: 'authenticated',
-      token: signPosToken(principal),
+      token: signPosToken(claims),
       staff: toStaffSummary(staff),
       outlet: toOutletSummary(outlet),
     }
+  }
+
+  /** restiq-backend#169: ends every session this staff member holds (all devices) by moving their sessionVersion on. */
+  async logout(staff: PosPrincipal): Promise<void> {
+    const plane = this.plane()
+    await plane.$transaction(async (tx) => {
+      await setTenantContext(tx, staff.tenantId)
+      await tx.staffUser.update({ where: { id: staff.id }, data: { sessionVersion: { increment: 1 } } })
+    })
   }
 }
