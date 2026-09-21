@@ -11,7 +11,7 @@ import { OpsDlqController } from './dlq/dlq.controller'
 import { DlqService } from './dlq/dlq.service'
 import { OpsSubscriptionsController } from './subscriptions/subscriptions.controller'
 import { SubscriptionsService } from './subscriptions/subscriptions.service'
-import { ALERT_CHANNEL, LogAlertChannel } from './sync-health/alert-channel'
+import { ALERT_CHANNEL, WebhookAlertChannel } from './sync-health/alert-channel'
 import { OpsSyncHealthController } from './sync-health/sync-health.controller'
 import { SyncHealthService } from './sync-health/sync-health.service'
 import { TenantDirectoryService } from './tenants/directory.service'
@@ -39,7 +39,7 @@ import { OpsTenantsService } from './tenants/tenants.service'
     SyncHealthService,
     DlqService,
     AgreementsService,
-    { provide: ALERT_CHANNEL, useClass: LogAlertChannel },
+    { provide: ALERT_CHANNEL, useClass: WebhookAlertChannel },
   ],
   // DevicesService is exported for tenant-admin/CAP-6 (AD-12: one enrolment
   // implementation, two callers) - admin/devices calls it directly rather

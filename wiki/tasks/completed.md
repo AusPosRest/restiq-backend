@@ -1,5 +1,15 @@
 # Completed
 
+- **2026-09-22** - Production readiness prep (issue #175, audit PROD-06..11):
+  - `fly.toml` is always on (min 1 machine, auto-stop off) with 1 GB.
+  - `enableShutdownHooks()`.
+  - `assertProductionConfig()` refuses a production boot with a missing or unsafe HOME_REGION,
+    JWT secrets, PROXY_SHARED_SECRET, PAYMENTS_SIMULATOR or WEB_ORIGIN.
+  - `WebhookAlertChannel` posts silent-device alerts to `ALERT_WEBHOOK_URL`.
+  - Runbooks in `wiki/ops/`: launch configuration, release, backup/restore, alerts,
+    staging rehearsal.
+  - None of it has been applied to live infrastructure yet.
+
 - **2026-09-22** - Shared sign-in throttling (issue #171, audit PROD-03):
   - Atomic, database-backed counters in `auth_attempts` (additive migration
     `20260922130000_auth_attempts`), counted before the secret is checked.

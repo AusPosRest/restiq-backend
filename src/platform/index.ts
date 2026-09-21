@@ -25,3 +25,4 @@ export { AnyStaff, PERMISSIONS, permissionsFor, RequirePermission, ROLE_PERMISSI
 export type { Permission } from './permissions'
 export { GUEST_SESSION_TTL_SECONDS, signGuestToken } from './guest-jwt'
 export type { GuestPrincipal } from './guest-jwt'
+export { assertProductionConfig } from './production-config'

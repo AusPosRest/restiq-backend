@@ -5,8 +5,11 @@ import 'reflect-metadata'
 import { NestFactory } from '@nestjs/core'
 import type { NestExpressApplication } from '@nestjs/platform-express'
 import { AppModule } from './app.module'
+import { assertProductionConfig } from './platform'
 
 async function bootstrap(): Promise<void> {
+  // restiq-backend#175: a production boot with a missing/unsafe setting stops here, listing all of them.
+  assertProductionConfig()
   // Required, not defaulted: a silent fallback would allow the wrong origin in prod.
   const webOrigin = process.env.WEB_ORIGIN
   if (!webOrigin) {
@@ -23,6 +26,9 @@ async function bootstrap(): Promise<void> {
     throw new Error('TRUST_PROXY_HOPS must be a whole number of proxy hops (0 = none)')
   }
   if (trustProxyHops > 0) app.set('trust proxy', trustProxyHops)
+  // restiq-backend#175: on SIGTERM (every Fly deploy/restart) Nest runs its
+  // shutdown hooks - in-flight requests finish and the DB pool closes cleanly.
+  app.enableShutdownHooks()
   // credentials: the operator's session cookie rides this same path.
   app.enableCors({ origin: webOrigin, credentials: true })
 
