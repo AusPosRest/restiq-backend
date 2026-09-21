@@ -1346,6 +1346,22 @@ a real Postgres test DB)
 
 ## Payments, first slice - the simulated card terminal (issue #130, epic #129)
 
+> **Off in production (issue #170).** The simulator approves payments with no
+> money moving, so it runs only when `PAYMENTS_SIMULATOR=on` (local dev, demos,
+> e2e). `fly.toml` pins it `off`.
+>
+> **With it off:**
+> - sending to the terminal is refused with 409 `provider_unavailable`;
+> - `simulate` is 404;
+> - `confirmIntent` refuses a simulated intent (`simulator_disabled`), including
+>   one created while the simulator was on;
+> - `commitFinalize` refuses a bill that carries a simulated tender
+>   (`simulated_tender`).
+>
+> Cash and external-terminal payments (card on the venue's own machine plus a
+> reference, #146) are unaffected. Covered by the "with the simulator off"
+> block in `test/pos-payment-intents.e2e-spec.ts`.
+
 - **Intent:** the first concrete piece of the payments architecture
   (restiq-web/wiki/features/payments.md, ADR-001..012 in
   restiq-web/docs/DECISIONS.md): an electronic payment is a

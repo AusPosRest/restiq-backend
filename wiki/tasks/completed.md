@@ -1,5 +1,13 @@
 # Completed
 
+- **2026-09-22** - Simulated card payments can't be used in production (issue #170, audit
+  PROD-01):
+  - The `PAYMENTS_SIMULATOR` flag defaults off, and `fly.toml` pins it off.
+  - With it off, the services refuse creating, approving (route and `confirmIntent`) and
+    settling any simulated payment, including intents or tenders made while it was on.
+  - Cash and external-terminal tenders still work.
+  - e2e: 4 new tests in `test/pos-payment-intents.e2e-spec.ts`.
+
 - **2026-09-22** - POS/KDS sessions end when access changes, and the API enforces staff
   permissions (issue #169, audit PROD-02/PROD-04):
   - `staff_users.session_version` goes in the token as `sv`.

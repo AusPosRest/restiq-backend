@@ -13,10 +13,11 @@
 import { INestApplication } from '@nestjs/common'
 import { Test } from '@nestjs/testing'
 import request from 'supertest'
-import { afterAll, beforeAll, beforeEach, describe, expect, it } from 'vitest'
+import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it } from 'vitest'
 import { AppModule } from '../src/app.module'
 import { createPrismaClient, PrismaClient } from '../src/db/client'
 import { signPosToken, uuidv7 } from '../src/platform'
+import { confirmIntent } from '../src/pos'
 
 interface ErrorBody {
   error: { code: string; message: string }
@@ -449,6 +450,64 @@ describe('/pos/v1 payment intents - simulated card terminal (e2e)', () => {
       expect((await heartbeat(uuidv7())).status).toBe(404)
       const elsewhere = await device(tenantId, await createOutlet(prisma, tenantId, 'Koramangala'), 'terminal')
       expect((await heartbeat(elsewhere.id)).status).toBe(404)
+    })
+  })
+
+  describe('with the simulator off (#170)', () => {
+    afterEach(() => {
+      process.env.PAYMENTS_SIMULATOR = 'on'
+    })
+
+    it('refuses a new card intent but still settles cash + external-terminal payments', async () => {
+      const { billId, token } = await setUpOpenBill()
+      process.env.PAYMENTS_SIMULATOR = 'off'
+      const sent = await sendToTerminal(billId, token, 21000)
+      expect(sent.status).toBe(409)
+      expect((sent.body as ErrorBody).error.code).toBe('provider_unavailable')
+      expect(await prisma.paymentIntent.count({ where: { billId } })).toBe(0)
+
+      const finalized = await authed(request(httpServer).post(`/pos/v1/bills/${billId}/finalize`), token).send({
+        tenders: [
+          { method: 'cash', amountMinor: 1000 },
+          { method: 'external', amountMinor: 20000, reference: 'EFTPOS 004512' },
+        ],
+      })
+      expect(finalized.status).toBe(200)
+      expect((finalized.body as BillBody).status).toBe('finalized')
+    })
+
+    it('an intent created while it was on can no longer be approved - not via the route, not via confirmIntent', async () => {
+      const { tenantId, billId, token } = await setUpOpenBill()
+      const intent = (await sendToTerminal(billId, token, 21000)).body as IntentBody
+      process.env.PAYMENTS_SIMULATOR = 'off'
+
+      const approve = await authed(request(httpServer).post(`/pos/v1/payment-intents/${intent.id}/simulate`), token).send({ outcome: 'success' })
+      expect(approve.status).toBe(404)
+      await expect(prisma.$transaction((tx) => confirmIntent(tx, { tenantId, intentId: intent.id }))).rejects.toMatchObject({ response: { code: 'simulator_disabled' } })
+      expect(await prisma.tender.count({ where: { billId } })).toBe(0)
+      expect((await prisma.paymentIntent.findUniqueOrThrow({ where: { id: intent.id } })).status).toBe('pending')
+    })
+
+    it('a simulated tender recorded while it was on cannot settle the bill once it is off', async () => {
+      const { billId, token } = await setUpOpenBill()
+      const intent = (await sendToTerminal(billId, token, 21000)).body as IntentBody
+      await authed(request(httpServer).post(`/pos/v1/payment-intents/${intent.id}/simulate`), token).send({ outcome: 'success' })
+      process.env.PAYMENTS_SIMULATOR = 'off'
+
+      const finalized = await authed(request(httpServer).post(`/pos/v1/bills/${billId}/finalize`), token).send({ tenders: [] })
+      expect(finalized.status).toBe(409)
+      expect((finalized.body as ErrorBody).error.code).toBe('simulated_tender')
+      expect((await prisma.bill.findUniqueOrThrow({ where: { id: billId } })).status).toBe('open')
+    })
+
+    it('anything but the exact value "on" is off', async () => {
+      const { billId, token } = await setUpOpenBill()
+      for (const value of ['', 'true', 'ON', '1']) {
+        process.env.PAYMENTS_SIMULATOR = value
+        expect((await sendToTerminal(billId, token, 21000)).status).toBe(409)
+      }
+      delete process.env.PAYMENTS_SIMULATOR
+      expect((await sendToTerminal(billId, token, 21000)).status).toBe(409)
     })
   })
 
