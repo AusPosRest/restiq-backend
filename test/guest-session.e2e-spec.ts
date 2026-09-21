@@ -331,9 +331,9 @@ describe('/guest/v1 table sessions (e2e)', () => {
       .send({ outletId, tableId, name: 'Asha', phone: '+91 90000 11111' })
     const { token } = startRes.body as StartResult
 
-    const role = await prisma.role.create({ data: { tenantId, name: `Waiter-${uuidv7()}`, isSystem: false } })
+    const role = await prisma.role.upsert({ where: { tenantId_name: { tenantId, name: 'Cashier' } }, update: {}, create: { tenantId, name: 'Cashier', isSystem: true, isManager: false } })
     const staff = await prisma.staffUser.create({ data: { tenantId, roleId: role.id, name: 'Server Priya' } })
-    const posToken = signPosToken({ id: staff.id, tenantId, outletId, name: staff.name })
+    const posToken = signPosToken({ sessionVersion: 0, id: staff.id, tenantId, outletId, name: staff.name })
 
     const closeRes = await request(httpServer).post(`/pos/v1/tables/${tableId}/close-session`).set('Authorization', `Bearer ${posToken}`)
     expect(closeRes.status).toBe(200)

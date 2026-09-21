@@ -137,7 +137,7 @@ describe('/pos realm separation (e2e)', () => {
     // the guard accepted the token (200), not just "didn't 401".
     await prisma.clockEvent.create({ data: { tenantId, staffId, outletId, type: 'clock_in', occurredAt: new Date() } })
 
-    posToken = signPosToken({ id: staffId, tenantId, outletId, name: 'Realm Staff' })
+    posToken = signPosToken({ sessionVersion: 0, id: staffId, tenantId, outletId, name: 'Realm Staff' })
 
     const moduleRef = await Test.createTestingModule({ imports: [AppModule] }).compile()
     app = moduleRef.createNestApplication()

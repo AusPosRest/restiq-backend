@@ -156,7 +156,7 @@ async function createOutlet(prisma: PrismaClient, tenantId: string, name = 'Indi
 async function createCashier(prisma: PrismaClient, tenantId: string, name = 'Priya Nair'): Promise<{ staffId: string; token: string }> {
   const role = await prisma.role.create({ data: { tenantId, name: 'Cashier', isSystem: true } })
   const staff = await prisma.staffUser.create({ data: { tenantId, roleId: role.id, name } })
-  const token = signPosToken({ id: staff.id, tenantId, outletId: uuidv7(), name })
+  const token = signPosToken({ sessionVersion: 0, id: staff.id, tenantId, outletId: uuidv7(), name })
   return { staffId: staff.id, token }
 }
 

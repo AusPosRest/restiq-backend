@@ -171,14 +171,14 @@ async function createTable(prisma: PrismaClient, tenantId: string, outletId: str
 }
 
 async function createStaff(prisma: PrismaClient, tenantId: string, outletId: string, name: string): Promise<{ id: string; token: string }> {
-  const role = await prisma.role.create({ data: { tenantId, name: `Role-${uuidv7()}`, isSystem: false } })
+  const role = await prisma.role.upsert({ where: { tenantId_name: { tenantId, name: 'Cashier' } }, update: {}, create: { tenantId, name: 'Cashier', isSystem: true, isManager: false } })
   const staff = await prisma.staffUser.create({ data: { tenantId, roleId: role.id, name } })
-  const token = signPosToken({ id: staff.id, tenantId, outletId, name })
+  const token = signPosToken({ sessionVersion: 0, id: staff.id, tenantId, outletId, name })
   return { id: staff.id, token }
 }
 
 async function createManagerPin(prisma: PrismaClient, tenantId: string, pin: string): Promise<void> {
-  const role = await prisma.role.create({ data: { tenantId, name: `Manager-${uuidv7()}`, isSystem: false, isManager: true } })
+  const role = await prisma.role.upsert({ where: { tenantId_name: { tenantId, name: 'Manager' } }, update: {}, create: { tenantId, name: 'Manager', isSystem: true, isManager: true } })
   await prisma.staffUser.create({ data: { tenantId, roleId: role.id, name: 'Manager', pinHash: await argon2.hash(pin) } })
 }
 

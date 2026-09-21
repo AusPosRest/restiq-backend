@@ -1,5 +1,16 @@
 # Completed
 
+- **2026-09-22** - POS/KDS sessions end when access changes, and the API enforces staff
+  permissions (issue #169, audit PROD-02/PROD-04):
+  - `staff_users.session_version` goes in the token as `sv`.
+  - The guard re-reads staff + role on every request and refuses a token after a PIN
+    revoke/reissue, role change or logout, and refuses any token without `sv`.
+  - The permission catalog is enforced per route and fails closed.
+  - Roles now return their `permissions`.
+  - Migration `20260922120000_staff_session_version` is additive.
+  - e2e: new `test/pos-sessions.e2e-spec.ts`; helpers moved to real system role names.
+  - See [pos-cashier-waiter.md](../features/pos-cashier-waiter.md).
+
 - **2026-09-19** - Combo menu, issue #160 (backend half of restiq-web#264). Combos are built
   from slots (`combo_slots`, `combo_slot_options`: pick N of these, or one fixed item, with
   per-option extra charges); `combos` gains `photo_url`, `available`, `archived_at` (live names

@@ -51,6 +51,49 @@ story by story.
   day's open clock-in; `409 not_clocked_in` if the staff member's latest
   event isn't already an open clock-in (`src/pos/clock/clock.service.ts`).
 
+### Sessions and permissions (issue #169)
+
+- **Session version.** A POS/KDS token carries `sv`, the staff member's
+  `staff_users.session_version` at login.
+  - `PosAuthGuard` re-reads the staff row on every `/pos` and `/kitchen`
+    request.
+  - It returns 401 `session_revoked` if the row is gone, belongs to another
+    tenant, has a revoked PIN, or has a different version.
+  - The version is bumped by: PIN issue/reissue, PIN revoke, role change, and
+    `POST /pos/v1/auth/logout` (which signs that staff member out on every
+    device).
+  - A token with no `sv`, meaning anything issued before #169, is refused, so
+    everyone logs in once more after that deploy.
+- **Role from the database.** The role is never in the token; the guard reads it
+  from the staff row, so a role change takes effect on the next request.
+- **Permission catalog** (`src/platform/permissions.ts`). Every non-public
+  handler carries either `@RequirePermission(key)` or `@AnyStaff()`. The guard
+  refuses a handler with neither (fail closed).
+
+  | Role | Permissions |
+  |---|---|
+  | Owner, Manager | all |
+  | Cashier | take_orders, fire_kitchen, settle_bills, discounts |
+  | Waiter | take_orders, fire_kitchen |
+  | Kitchen | fire_kitchen |
+  | Accountant | settle_bills, z_report |
+
+- **How routes map to permissions:**
+
+  | Permission | Routes |
+  |---|---|
+  | take_orders | open/counter order, lines, combos, transfer, request bill, print bill |
+  | fire_kitchen | send to kitchen (order status); KDS bump/recall/refire |
+  | settle_bills | payment intents, finalize, refund, shifts (open, cash movements, close), close table session |
+  | any staff | reads (menu, orders, bills, KDS queues, shift view, attendance); printer/terminal polling; heartbeat; clock out; logout |
+
+- **Manager PIN stays a second gate.** It still covers refunds, void-after-fire
+  and discounts over threshold. It adds to the caller's permission and never
+  replaces it.
+- **Owner UI.** `GET /admin/v1/roles` returns each role's `permissions`, so the
+  owner's Staff matrix shows the table the API enforces.
+- **Tests.** Covered by `test/pos-sessions.e2e-spec.ts`.
+
 ### CAP-1 integration points for later stories
 
 - CAP-11 (device & staff attendance status, story 11, since built - see
