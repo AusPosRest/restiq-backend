@@ -162,6 +162,10 @@ describe('shared sign-in throttling (#171, e2e)', () => {
     const statuses = results.map((r) => r.status)
     expect(statuses.filter((s) => s === 401)).toHaveLength(10)
     expect(statuses.filter((s) => s === 429)).toHaveLength(15)
+    const locked = results.find((r) => r.status === 429)?.body as { error: { code: string; retryAfterSeconds: number } }
+    expect(locked.error.code).toBe('locked_out')
+    expect(locked.error.retryAfterSeconds).toBeGreaterThan(14 * 60)
+    expect(locked.error.retryAfterSeconds).toBeLessThanOrEqual(15 * 60)
   })
 
   it('two API instances share one count, and a restart does not reset it', async () => {

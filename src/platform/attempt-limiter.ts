@@ -49,7 +49,8 @@ export class AttemptLimiter {
       if (row.attempts > rule.max) {
         const minutes = Math.ceil(row.retry_after / 60)
         throw new HttpException(
-          { code: 'locked_out', message: `Too many incorrect attempts - try again in ${minutes} minute${minutes === 1 ? '' : 's'}` },
+          // retryAfterSeconds lets a sign-in screen count down to the real end of the window.
+          { code: 'locked_out', message: `Too many incorrect attempts - try again in ${minutes} minute${minutes === 1 ? '' : 's'}`, retryAfterSeconds: row.retry_after },
           429,
         )
       }
