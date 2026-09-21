@@ -1,5 +1,5 @@
 import { Body, Controller, HttpCode, Post } from '@nestjs/common'
-import { AnyStaff, CurrentStaff, PosPrincipal, Public } from '../../platform'
+import { AnyStaff, ClientIp, CurrentStaff, PosPrincipal, Public } from '../../platform'
 import { PosLoginDto, PosLoginResult, SelectOutletDto } from './auth.dtos'
 import { PosAuthService } from './auth.service'
 
@@ -10,8 +10,9 @@ export class PosAuthController {
   @Public()
   @Post('login')
   @HttpCode(200)
-  login(@Body() dto: PosLoginDto): Promise<PosLoginResult> {
-    return this.auth.login(dto)
+  // The browser's address as passed by our own web server, else req.ip - see platform/client-ip.ts.
+  login(@Body() dto: PosLoginDto, @ClientIp() ip: string): Promise<PosLoginResult> {
+    return this.auth.login(dto, ip)
   }
 
   @Public()

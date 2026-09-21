@@ -35,6 +35,7 @@
 import { BadRequestException, Injectable, UnauthorizedException } from '@nestjs/common'
 import * as argon2 from 'argon2'
 import type { Prisma } from '../generated/prisma/client'
+import { AttemptLimiter, AttemptRule } from './attempt-limiter'
 import { RegionRegistryService } from './region-registry.service'
 
 // The six actions AD-15 names as bound to this gate, in AD-15's own words.
@@ -88,7 +89,10 @@ export class ManagerAuthService {
   // failure timing doesn't leak whether the tenant has any managers at all.
   private dummyHash?: Promise<string>
 
-  constructor(private readonly registry: RegionRegistryService) {}
+  constructor(
+    private readonly registry: RegionRegistryService,
+    private readonly limiter: AttemptLimiter,
+  ) {}
 
   private plane() {
     return this.registry.planeFor(this.registry.homeRegion())
@@ -114,6 +118,8 @@ export class ManagerAuthService {
     outletId: string,
     enteredPin: string,
     reason: string,
+    /** restiq-backend#171: the signed-in staff member asking - wrong manager PINs are limited per requester. */
+    requesterId: string,
   ): Promise<ManagerApproval> {
     void outletId // see doc comment above - accepted, not yet used
 
@@ -122,6 +128,11 @@ export class ManagerAuthService {
     if (!reason.trim()) {
       throw new BadRequestException({ code: 'validation_failed', message: 'A reason is required for manager authorisation' })
     }
+
+    // restiq-backend#171: 5 wrong manager PINs per requester per 15 minutes,
+    // shared across instances - a 4-digit PIN can't be walked from the till.
+    const rules: AttemptRule[] = [{ key: `manager-pin:${tenantId}:${requesterId}`, max: 5, windowSeconds: 15 * 60 }]
+    await this.limiter.consume(rules)
 
     const plane = this.plane()
     const candidates = await plane.$transaction(async (tx) => {
@@ -137,6 +148,7 @@ export class ManagerAuthService {
       // field stays nullable because it's shared with StaffUser's
       // unfiltered shape elsewhere.
       if (await argon2.verify(candidate.pinHash as string, enteredPin)) {
+        await this.limiter.refund(rules)
         return {
           approverId: candidate.id,
           approverName: candidate.name,

@@ -94,6 +94,56 @@ story by story.
   owner's Staff matrix shows the table the API enforces.
 - **Tests.** Covered by `test/pos-sessions.e2e-spec.ts`.
 
+### Sign-in throttling (issue #171)
+
+`src/platform/attempt-limiter.ts` replaces the three in-memory lockouts
+(POS PIN, owner login, guest join). Those reset on restart, weren't shared
+between instances, and the POS one was keyed by the guessed PIN, so rotating
+guesses never tripped it.
+
+**How it works:**
+- Counters live in `auth_attempts`, one row per key, using a fixed window.
+- Each attempt is counted **before** the secret is checked, in one atomic
+  upsert.
+- Once over the limit, the key answers 429 `locked_out` until its window ends.
+- A correct secret gives back only its own attempt; earlier failures still
+  count.
+- Rows are purged a day after their window.
+
+**Limits by path:**
+
+| Path | Keys (limit / window) |
+|---|---|
+| POS PIN, enrolled device | `pos-pin:device:<tenant>:<device>` 10 / 15 min |
+| POS PIN, unbound browser | `pos-pin:ip:<tenant>:<ip>` 10 / 15 min **and** `pos-pin:untrusted:<tenant>` 30 / hour |
+| Owner login | per email 5 / 15 min, per IP 30 / 15 min |
+| Operator login | per email 5 / 15 min, per IP 30 / 15 min |
+| Manager PIN | per requesting staff member 5 / 15 min |
+| Guest table join | per table 10 / 15 min |
+
+**Trust rules:**
+- A device id is trusted only when it is an **active, unrevoked device of that
+  tenant**. Anything else is limited by IP.
+- Enrolled devices never count toward the tenant-wide cap for unbound
+  browsers, so an attacker can't lock the tills out.
+- `req.ip` is resolved through `TRUST_PROXY_HOPS`. It is 1 on Fly and 0 by
+  default, which means `X-Forwarded-For` is ignored.
+- Sign-ins reach the API through the web app's own server routes, so `req.ip`
+  there is the web server. Those routes send the browser's address in
+  `X-Restiq-Client-Ip`, and it is believed only with a matching
+  `X-Restiq-Proxy-Secret` (`PROXY_SHARED_SECRET`, compared in constant time).
+  See `src/platform/client-ip.ts`.
+
+**Tests:** `test/login-throttle.e2e-spec.ts` covers:
+- a burst of concurrent requests;
+- two app instances sharing one count;
+- a restart;
+- trusted, unknown, revoked and foreign device ids;
+- a busy shared till;
+- spoofed and proxied `X-Forwarded-For`;
+- the tenant cap;
+- manager PIN and operator login.
+
 ### CAP-1 integration points for later stories
 
 - CAP-11 (device & staff attendance status, story 11, since built - see

@@ -3,6 +3,7 @@
 import 'dotenv/config'
 import 'reflect-metadata'
 import { NestFactory } from '@nestjs/core'
+import type { NestExpressApplication } from '@nestjs/platform-express'
 import { AppModule } from './app.module'
 
 async function bootstrap(): Promise<void> {
@@ -12,7 +13,16 @@ async function bootstrap(): Promise<void> {
     throw new Error('WEB_ORIGIN is not set - it must name the site allowed to call this API')
   }
 
-  const app = await NestFactory.create(AppModule)
+  const app = await NestFactory.create<NestExpressApplication>(AppModule)
+  // restiq-backend#171: sign-in throttling keys on the client IP (req.ip).
+  // Behind a proxy that address is in X-Forwarded-For, which a client can
+  // also write itself - so trust exactly the proxy hops we run behind (Fly's
+  // edge = 1) and no more. Unset/0: use the socket address, ignore the header.
+  const trustProxyHops = Number(process.env.TRUST_PROXY_HOPS ?? 0)
+  if (!Number.isInteger(trustProxyHops) || trustProxyHops < 0) {
+    throw new Error('TRUST_PROXY_HOPS must be a whole number of proxy hops (0 = none)')
+  }
+  if (trustProxyHops > 0) app.set('trust proxy', trustProxyHops)
   // credentials: the operator's session cookie rides this same path.
   app.enableCors({ origin: webOrigin, credentials: true })
 
