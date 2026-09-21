@@ -213,7 +213,7 @@ export class BillsService {
           if (!dto.managerPin) {
             throw new BadRequestException({ code: 'manager_pin_required', message: 'A manager PIN is required for a discount above the threshold' })
           }
-          approval = await this.managerAuth.authorize('discount_above_threshold', staff.tenantId, bill.outletId, dto.managerPin, discountReason as string)
+          approval = await this.managerAuth.authorize('discount_above_threshold', staff.tenantId, bill.outletId, dto.managerPin, discountReason as string, staff.id)
         }
       }
 
@@ -340,7 +340,7 @@ export class BillsService {
       // Refund is unconditionally gated (unlike finalize()'s above-threshold
       // discount) - validate the refund request itself first (cheap), then
       // spend a manager-PIN check only on a request that's actually valid.
-      const approval = await this.managerAuth.authorize('refund', staff.tenantId, bill.outletId, dto.managerPin, dto.reason)
+      const approval = await this.managerAuth.authorize('refund', staff.tenantId, bill.outletId, dto.managerPin, dto.reason, staff.id)
 
       const created = await tx.creditNote.create({
         data: {

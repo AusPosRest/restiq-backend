@@ -4,15 +4,14 @@
 // StaffUser rows, then either finalise immediately (single-outlet tenant) or
 // hand back a short-lived pending token plus the outlet list for the staff
 // member to pick from.
-import { BadRequestException, ConflictException, HttpException, Injectable, UnauthorizedException } from '@nestjs/common'
+import { BadRequestException, ConflictException, Injectable, UnauthorizedException } from '@nestjs/common'
 import * as argon2 from 'argon2'
 import { pinStatus } from '../../admin'
-import { PosPrincipal, PosTokenClaims, RegionRegistryService, signPosPendingToken, signPosToken, verifyPosPendingToken } from '../../platform'
+import { AttemptLimiter, AttemptRule, PosPrincipal, PosTokenClaims, RegionRegistryService, signPosPendingToken, signPosToken, verifyPosPendingToken } from '../../platform'
 import type { Outlet, StaffUser } from '../../generated/prisma/client'
 import { recordClockInIfNeeded } from '../clock/clock.util'
 import { setTenantContext } from '../tenant-context'
 import { OutletSummary, PosLoginDto, PosLoginResult, SelectOutletDto, StaffSummary } from './auth.dtos'
-import { clearAttempts, isLockedOut, recordFailedAttempt } from './lockout'
 
 function toStaffSummary(staff: StaffUser): StaffSummary {
   return { id: staff.id, name: staff.name }
@@ -22,6 +21,17 @@ function toOutletSummary(outlet: Outlet): OutletSummary {
   return { id: outlet.id, name: outlet.name }
 }
 
+// restiq-backend#171: PINs are 4 digits (10,000 guesses), so wrong-PIN
+// attempts are limited per source, never per guessed PIN (rotating guesses
+// used to bypass that). A trusted device gets its own allowance, so one
+// outlet's devices sharing a NAT address don't lock each other out; an
+// unbound browser is limited by IP, and all unbound browsers of a tenant
+// share a slower hourly cap so a spread-out guesser still runs dry. Trusted
+// devices never touch that cap, so an attack can't lock the tills out.
+const DEVICE_RULE = { max: 10, windowSeconds: 15 * 60 }
+const IP_RULE = { max: 10, windowSeconds: 15 * 60 }
+const UNTRUSTED_TENANT_RULE = { max: 30, windowSeconds: 60 * 60 }
+
 @Injectable()
 export class PosAuthService {
   // Verified when there's no PIN match, so both "wrong PIN" and "no staff at
@@ -29,25 +39,25 @@ export class PosAuthService {
   // via response timing (same reasoning as OpsAuthService.dummyHash).
   private dummyHash?: Promise<string>
 
-  constructor(private readonly registry: RegionRegistryService) {}
+  constructor(
+    private readonly registry: RegionRegistryService,
+    private readonly limiter: AttemptLimiter,
+  ) {}
 
   private plane() {
     return this.registry.planeFor(this.registry.homeRegion())
   }
 
-  async login(dto: PosLoginDto): Promise<PosLoginResult> {
+  async login(dto: PosLoginDto, ip: string): Promise<PosLoginResult> {
     const { tenantId, pin } = dto
 
-    if (isLockedOut(tenantId, pin)) {
-      throw new HttpException({ code: 'locked_out', message: 'Too many incorrect attempts - try again shortly' }, 429)
-    }
-
+    const rules = await this.throttleRules(tenantId, ip, dto.deviceId)
+    await this.limiter.consume(rules)
     const staff = await this.findStaffByPin(tenantId, pin)
     if (!staff) {
-      recordFailedAttempt(tenantId, pin)
       throw new UnauthorizedException({ code: 'invalid_pin', message: 'Incorrect tenant or PIN' })
     }
-    clearAttempts(tenantId, pin)
+    await this.limiter.refund(rules)
 
     const outlets = await this.listOutlets(tenantId)
     if (outlets.length === 0) {
@@ -87,6 +97,21 @@ export class PosAuthService {
     })
 
     return this.finalize(staff, outlet)
+  }
+
+  private async throttleRules(tenantId: string, ip: string, deviceId: string | undefined): Promise<AttemptRule[]> {
+    if (deviceId) {
+      const plane = this.plane()
+      const device = await plane.$transaction(async (tx) => {
+        await setTenantContext(tx, tenantId)
+        return tx.device.findFirst({ where: { id: deviceId, tenantId, status: 'active', revokedAt: null }, select: { id: true } })
+      })
+      if (device) return [{ key: `pos-pin:device:${tenantId}:${device.id}`, ...DEVICE_RULE }]
+    }
+    return [
+      { key: `pos-pin:ip:${tenantId}:${ip}`, ...IP_RULE },
+      { key: `pos-pin:untrusted:${tenantId}`, ...UNTRUSTED_TENANT_RULE },
+    ]
   }
 
   private async findStaffByPin(tenantId: string, pin: string): Promise<StaffUser | null> {

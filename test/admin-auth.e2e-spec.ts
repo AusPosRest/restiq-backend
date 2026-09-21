@@ -10,7 +10,6 @@ import request from 'supertest'
 import { afterAll, beforeAll, describe, expect, it } from 'vitest'
 import { AppModule } from '../src/app.module'
 import { createPrismaClient, PrismaClient } from '../src/db/client'
-import { setLockoutMsForTesting } from '../src/admin'
 import { uuidv7 } from '../src/platform'
 
 async function wipe(prisma: PrismaClient): Promise<void> {
@@ -194,7 +193,6 @@ describe('/admin/v1/auth/login (e2e)', () => {
   })
 
   it('clears the lockout once the window expires', async () => {
-    setLockoutMsForTesting(50)
     const email = 'lockout-recovery-owner@admin-auth-test.example'
     await createOwnerViaInvite(tenantAId, email, PASSWORD)
 
@@ -203,10 +201,10 @@ describe('/admin/v1/auth/login (e2e)', () => {
     }
     expect((await request(httpServer).post('/admin/v1/auth/login').send({ email, password: PASSWORD })).status).toBe(429)
 
-    await new Promise((resolve) => setTimeout(resolve, 75))
+    // #171: the window lives in auth_attempts - age it past its 15 minutes rather than sleeping.
+    await prisma.$executeRaw`UPDATE auth_attempts SET window_started_at = now() - interval '16 minutes'`
 
     const res = await request(httpServer).post('/admin/v1/auth/login').send({ email, password: PASSWORD })
     expect(res.status).toBe(200)
-    setLockoutMsForTesting(30_000)
   })
 })

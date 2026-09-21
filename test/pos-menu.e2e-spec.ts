@@ -91,6 +91,9 @@ async function wipe(prisma: PrismaClient): Promise<void> {
   await prisma.outletCapability.deleteMany()
   await prisma.station.deleteMany()
   await prisma.printer.deleteMany()
+  // Guest sessions FK to dining_tables (RESTRICT) - another file may have left some.
+  await prisma.guest.deleteMany()
+  await prisma.tableSession.deleteMany()
   await prisma.diningTable.deleteMany()
   await prisma.floor.deleteMany()
   await prisma.outlet.deleteMany()

@@ -1,4 +1,4 @@
-import { Body, Controller, HttpCode, Post } from '@nestjs/common'
+import { Body, Controller, HttpCode, Ip, Post } from '@nestjs/common'
 import { Public } from '../platform'
 import { AcceptInviteDto } from './accept-invite.dto'
 import { AcceptInviteResult, AdminAuthService, OwnerSessionResult } from './auth.service'
@@ -18,7 +18,7 @@ export class AdminAuthController {
   @Public()
   @Post('login')
   @HttpCode(200)
-  login(@Body() dto: LoginDto): Promise<OwnerSessionResult> {
-    return this.auth.login(dto.email, dto.password)
+  login(@Body() dto: LoginDto, @Ip() ip: string): Promise<OwnerSessionResult> {
+    return this.auth.login(dto.email, dto.password, ip)
   }
 }

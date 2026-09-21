@@ -1,4 +1,4 @@
-import { Body, Controller, HttpCode, Post } from '@nestjs/common'
+import { Body, Controller, HttpCode, Ip, Post } from '@nestjs/common'
 import { AnyStaff, CurrentStaff, PosPrincipal, Public } from '../../platform'
 import { PosLoginDto, PosLoginResult, SelectOutletDto } from './auth.dtos'
 import { PosAuthService } from './auth.service'
@@ -10,8 +10,9 @@ export class PosAuthController {
   @Public()
   @Post('login')
   @HttpCode(200)
-  login(@Body() dto: PosLoginDto): Promise<PosLoginResult> {
-    return this.auth.login(dto)
+  // req.ip - the client address as resolved through TRUST_PROXY_HOPS (main.ts), never a raw X-Forwarded-For.
+  login(@Body() dto: PosLoginDto, @Ip() ip: string): Promise<PosLoginResult> {
+    return this.auth.login(dto, ip)
   }
 
   @Public()

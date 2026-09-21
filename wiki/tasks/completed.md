@@ -1,5 +1,17 @@
 # Completed
 
+- **2026-09-22** - Shared sign-in throttling (issue #171, audit PROD-03):
+  - Atomic, database-backed counters in `auth_attempts` (additive migration
+    `20260922130000_auth_attempts`), counted before the secret is checked.
+  - Covers POS PIN, owner, operator, manager PIN and guest join.
+  - The POS is keyed by trusted device or client IP (never the guessed PIN), plus a
+    tenant cap for unbound browsers.
+  - `TRUST_PROXY_HOPS` (1 on Fly) controls `req.ip`.
+  - The in-memory lockout modules are removed.
+  - e2e: new `test/login-throttle.e2e-spec.ts`; lockout tests in pos-auth-clock,
+    admin-auth and guest-session updated.
+  - pos-menu's wipe now clears guest sessions (an order-dependent FK failure).
+
 - **2026-09-22** - Simulated card payments can't be used in production (issue #170, audit
   PROD-01):
   - The `PAYMENTS_SIMULATOR` flag defaults off, and `fly.toml` pins it off.

@@ -2027,3 +2027,14 @@ model AgreementSignature {
   @@index([tenantId])
   @@map("agreement_signatures")
 }
+
+// restiq-backend#171: shared failed sign-in counters - see
+// src/platform/attempt-limiter.ts. Written only through raw atomic SQL there.
+model AuthAttempt {
+  key             String   @id
+  attempts        Int
+  windowStartedAt DateTime @map("window_started_at") @db.Timestamptz(6)
+
+  @@index([windowStartedAt])
+  @@map("auth_attempts")
+}

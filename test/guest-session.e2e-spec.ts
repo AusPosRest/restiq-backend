@@ -278,7 +278,8 @@ describe('/guest/v1 table sessions (e2e)', () => {
     const { pin } = startRes.body as StartResult
     const wrongPin = pin === '0000' ? '1111' : '0000'
 
-    for (let i = 0; i < 5; i++) {
+    // #171: 10 wrong guesses per table per 15 minutes (shared limiter).
+    for (let i = 0; i < 10; i++) {
       const res = await request(httpServer).post('/guest/v1/sessions/join').send({ outletId, tableId, pin: wrongPin, name: 'Rohan' })
       expect(res.status).toBe(403)
     }

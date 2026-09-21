@@ -14,6 +14,3 @@ export { listMenuCombos, resolveComboSelection } from './menu/combo-menu'
 export type { ComboMenuView, ComboSelectionInput, ResolvedComboChild } from './menu/combo-menu'
 export { ComboSelectionDto } from './menu/combos.dtos'
 export { TaxRegistrationService } from './tax/tax-registration.service'
-// Test-only hook (issue #118): shrinks the owner-login lockout window so
-// e2e coverage of lockout recovery doesn't need a real 30s sleep.
-export { setLockoutMsForTesting } from './login-lockout'

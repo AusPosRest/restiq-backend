@@ -2,12 +2,11 @@
 // session lifecycle - start (first guest, name+phone), join (later guests,
 // 4-digit PIN), the authenticated session view, and the staff-side close pos
 // calls into (see close-session below, exported through the guest barrel).
-import { ConflictException, ForbiddenException, GoneException, HttpException, Injectable, NotFoundException } from '@nestjs/common'
+import { ConflictException, ForbiddenException, GoneException, Injectable, NotFoundException } from '@nestjs/common'
 import { randomInt } from 'node:crypto'
 import type { DiningTable, Guest, Outlet, Prisma, TableSession } from '../../generated/prisma/client'
-import { GuestPrincipal, RegionRegistryService, signGuestToken } from '../../platform'
+import { AttemptLimiter, AttemptRule, GuestPrincipal, RegionRegistryService, signGuestToken } from '../../platform'
 import { isUniqueViolation, setGuestEntryContext, setTenantContext } from '../tenant-context'
-import { clearJoinAttempts, isJoinLockedOut, recordFailedJoinAttempt } from './join-lockout'
 import { GuestSummary, JoinSessionDto, OutletAvailability, SessionJoinResult, SessionStartResult, StartSessionDto, TableSessionView } from './sessions.dtos'
 
 type Tx = Prisma.TransactionClient
@@ -86,7 +85,10 @@ export function isSessionInactive(session: TableSession): boolean {
 
 @Injectable()
 export class GuestSessionsService {
-  constructor(private readonly registry: RegionRegistryService) {}
+  constructor(
+    private readonly registry: RegionRegistryService,
+    private readonly limiter: AttemptLimiter,
+  ) {}
 
   private plane() {
     return this.registry.planeFor(this.registry.homeRegion())
@@ -176,10 +178,8 @@ export class GuestSessionsService {
   }
 
   async joinSession(dto: JoinSessionDto): Promise<SessionJoinResult> {
-    if (isJoinLockedOut(dto.outletId, dto.tableId)) {
-      throw new HttpException({ code: 'locked_out', message: 'Too many incorrect attempts - try again shortly' }, 429)
-    }
-
+    // restiq-backend#171: wrong table-PIN guesses per table, shared across instances (was an in-memory Map).
+    const rules: AttemptRule[] = [{ key: `guest-join:table:${dto.outletId}:${dto.tableId}`, max: 10, windowSeconds: 15 * 60 }]
     const plane = this.plane()
     return plane.$transaction(async (tx) => {
       const { outlet, table } = await resolveOutletAndTable(tx, dto.outletId, dto.tableId)
@@ -191,11 +191,11 @@ export class GuestSessionsService {
         throw new NotFoundException({ code: 'no_open_session', message: 'This table has no open session to join - start one instead' })
       }
 
+      await this.limiter.consume(rules)
       if (session.sessionPin !== dto.pin) {
-        recordFailedJoinAttempt(dto.outletId, dto.tableId)
         throw new ForbiddenException({ code: 'invalid_pin', message: 'Incorrect PIN' })
       }
-      clearJoinAttempts(dto.outletId, dto.tableId)
+      await this.limiter.refund(rules)
 
       const guest = await tx.guest.create({ data: { tenantId: outlet.tenantId, sessionId: session.id, name: dto.name } })
       const guests = await tx.guest.findMany({ where: { sessionId: session.id }, orderBy: { joinedAt: 'asc' } })

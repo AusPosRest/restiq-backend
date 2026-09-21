@@ -280,24 +280,23 @@ describe('/pos/v1/auth and /pos/v1/clock (e2e)', () => {
   })
 
   describe('lockout', () => {
-    it('locks a specific (tenant, pin) pair after 5 wrong attempts, without blocking a different correct PIN', async () => {
+    // #171 regression: the lock used to sit on the guessed PIN, so walking
+    // 0000, 0001, 0002... never tripped it. It now sits on the source.
+    it('rotating PIN guesses still hit the limit, and then even the real PIN is refused from that source', async () => {
       const tenantId = await createTenant(prisma)
       await createOutlet(prisma, tenantId, 'Only Outlet')
       await createStaffWithPin(prisma, tenantId, 'Priya Nair', '1234')
 
-      const guessedWrongPin = '0000'
-      for (let i = 0; i < 5; i++) {
-        const res = await request(httpServer).post('/pos/v1/auth/login').send({ tenantId, pin: guessedWrongPin })
+      for (let i = 0; i < 10; i++) {
+        const res = await request(httpServer).post('/pos/v1/auth/login').send({ tenantId, pin: String(i).padStart(4, '0') })
         expect(res.status).toBe(401)
       }
 
-      const lockedRes = await request(httpServer).post('/pos/v1/auth/login').send({ tenantId, pin: guessedWrongPin })
+      const lockedRes = await request(httpServer).post('/pos/v1/auth/login').send({ tenantId, pin: '0010' })
       expect(lockedRes.status).toBe(429)
       expect((lockedRes.body as ErrorBody).error.code).toBe('locked_out')
-
-      // The real PIN, never guessed, is untouched by the lock on '0000'.
       const realPinRes = await request(httpServer).post('/pos/v1/auth/login').send({ tenantId, pin: '1234' })
-      expect(realPinRes.status).toBe(200)
+      expect(realPinRes.status).toBe(429)
     })
   })
 

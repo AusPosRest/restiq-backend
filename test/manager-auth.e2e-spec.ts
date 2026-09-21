@@ -141,7 +141,7 @@ describe('ManagerAuthService (CAP-8, e2e)', () => {
     const tenantId = await createTenant(prisma)
     const manager = await seedStaff(prisma, tenantId, { name: 'Meera Manager', roleName: 'Manager', isManager: true, pin: '1234' })
 
-    const approval = await service.authorize('void_after_fire', tenantId, uuidv7(), '1234', 'Kitchen fired the wrong dish')
+    const approval = await service.authorize('void_after_fire', tenantId, uuidv7(), '1234', 'Kitchen fired the wrong dish', uuidv7())
 
     expect(approval).toMatchObject({
       approverId: manager.id,
@@ -157,7 +157,7 @@ describe('ManagerAuthService (CAP-8, e2e)', () => {
     const tenantId = await createTenant(prisma)
     await seedStaff(prisma, tenantId, { name: 'Meera Manager', roleName: 'Manager', isManager: true, pin: '1234' })
 
-    await expect(service.authorize('void_after_fire', tenantId, uuidv7(), '9999', 'Kitchen fired the wrong dish')).rejects.toBeInstanceOf(
+    await expect(service.authorize('void_after_fire', tenantId, uuidv7(), '9999', 'Kitchen fired the wrong dish', uuidv7())).rejects.toBeInstanceOf(
       UnauthorizedException,
     )
   })
@@ -167,15 +167,15 @@ describe('ManagerAuthService (CAP-8, e2e)', () => {
     // Deliberately seed no manager at all - if the reason check ran after a
     // PIN lookup this would still throw, but for the wrong cause (no
     // candidates) instead of the validation error this test is pinning down.
-    await expect(service.authorize('void_after_fire', tenantId, uuidv7(), '1234', '')).rejects.toBeInstanceOf(BadRequestException)
-    await expect(service.authorize('void_after_fire', tenantId, uuidv7(), '1234', '   ')).rejects.toBeInstanceOf(BadRequestException)
+    await expect(service.authorize('void_after_fire', tenantId, uuidv7(), '1234', '', uuidv7())).rejects.toBeInstanceOf(BadRequestException)
+    await expect(service.authorize('void_after_fire', tenantId, uuidv7(), '1234', '   ', uuidv7())).rejects.toBeInstanceOf(BadRequestException)
   })
 
   it("rejects a non-manager StaffUser's correct PIN", async () => {
     const tenantId = await createTenant(prisma)
     await seedStaff(prisma, tenantId, { name: 'Wasim Waiter', roleName: 'Waiter', isManager: false, pin: '1234' })
 
-    await expect(service.authorize('void_after_fire', tenantId, uuidv7(), '1234', 'Trying to self-approve')).rejects.toBeInstanceOf(
+    await expect(service.authorize('void_after_fire', tenantId, uuidv7(), '1234', 'Trying to self-approve', uuidv7())).rejects.toBeInstanceOf(
       UnauthorizedException,
     )
   })
@@ -185,7 +185,7 @@ describe('ManagerAuthService (CAP-8, e2e)', () => {
     const tenantB = await createTenant(prisma, 'Tenant B')
     await seedStaff(prisma, tenantB, { name: 'Tenant B Manager', roleName: 'Manager', isManager: true, pin: '1234' })
 
-    await expect(service.authorize('void_after_fire', tenantA, uuidv7(), '1234', 'reason')).rejects.toBeInstanceOf(UnauthorizedException)
+    await expect(service.authorize('void_after_fire', tenantA, uuidv7(), '1234', 'reason', uuidv7())).rejects.toBeInstanceOf(UnauthorizedException)
   })
 
   it('recordApproval writes actor, approver, reason, and both timestamps into audit_events, inside the caller\'s own transaction', async () => {
@@ -193,7 +193,7 @@ describe('ManagerAuthService (CAP-8, e2e)', () => {
     const manager = await seedStaff(prisma, tenantId, { name: 'Meera Manager', roleName: 'Manager', isManager: true, pin: '1234' })
     const actorId = uuidv7()
 
-    const approval = await service.authorize('refund', tenantId, uuidv7(), '1234', 'Customer sent back a cold dish')
+    const approval = await service.authorize('refund', tenantId, uuidv7(), '1234', 'Customer sent back a cold dish', uuidv7())
     const occurredAt = new Date()
 
     // Stands in for a caller's own mutation transaction (AD-6: the audit
