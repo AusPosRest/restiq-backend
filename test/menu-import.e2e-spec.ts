@@ -227,22 +227,20 @@ describe('/admin/v1/menu-import (e2e)', () => {
       expect(body.items.find((i) => i.name === 'Butter Chicken')?.priceMinor).toBe(32000)
     })
 
-    it('returns a fixed, lower-confidence stub draft for an image source, and does not fail the upload', async () => {
+    it('refuses an image source with 422 instead of drafting made-up sample items (restiq-web#246)', async () => {
       const { token } = await createOwner(prisma)
       const res = await upload(token, pngBuffer(), 'scan.png')
 
-      expect(res.status).toBe(201)
-      const body = res.body as DraftBody
-      expect(body.sourceType).toBe('image')
-      expect(body.items.length).toBeGreaterThan(0)
-      expect(body.items.every((i) => i.confidence.overall < 1)).toBe(true)
+      expect(res.status).toBe(422)
+      expect((res.body as { error: { code: string } }).error.code).toBe('extraction_unavailable')
+      expect(await prisma.menuImportDraft.count()).toBe(0)
     })
 
-    it('returns a fixed stub draft for a PDF source', async () => {
+    it('refuses a PDF source with 422 too', async () => {
       const { token } = await createOwner(prisma)
       const res = await upload(token, pdfBuffer(), 'scan.pdf')
-      expect(res.status).toBe(201)
-      expect((res.body as DraftBody).sourceType).toBe('pdf')
+      expect(res.status).toBe(422)
+      expect((res.body as { error: { code: string } }).error.code).toBe('extraction_unavailable')
     })
 
     it('rejects an unsupported file type', async () => {
