@@ -1,5 +1,6 @@
 # Completed
 
+- **2026-10-08** - Owner invite details (issue #193). `POST /admin/v1/auth/invite-details { token }` returns `{ restaurantName, email, firstName }` for an unused, unexpired invite. It uses the same errors as accept and consumes nothing.
 - **2026-10-08** - One capability list (issue #191):
   - `GET /ops/v1/tenants/:id` returns `outlets[].capabilities`, the real `outlet_capabilities` switches that guest QR, kiosk and menu photos read.
   - The tenant-level toggle (`PUT …/capabilities/:key`, `CAPABILITY_KEYS`, `CAPABILITY_DEFAULTS`, `ToggleCapabilityDto`) is removed. Nothing read `tenant_capabilities`. The table stays, unused.
