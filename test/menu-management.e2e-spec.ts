@@ -621,6 +621,28 @@ describe('/admin/v1/menu (e2e)', () => {
       expect(rows[1]?.priceMinor).toBe(21000n)
     })
 
+    it('a price with no channel prices every channel, including ones that already had their own price', async () => {
+      const { tenantId, token } = await createOwner(prisma)
+      const category = await createCategory(token)
+      const item = await createItem(token, category.id, {})
+      const post = (body: Record<string, unknown>) =>
+        authed(request(httpServer).post(`/admin/v1/menu/items/${item.id}/prices`), token).send({ currency: 'INR', reason: 'Set price', ...body })
+      const current = async (channel: string) =>
+        ((await authed(request(httpServer).get(`/admin/v1/menu/items/${item.id}/price?channel=${channel}`), token)).body as { priceMinor?: number }).priceMinor ?? null
+
+      // Old data: a dine-in price set on its own, which would shadow a newer unscoped one.
+      await post({ channel: 'dine_in', priceMinor: 19000 }).expect(201)
+      expect(await current('qr')).toBeNull()
+
+      const res = await post({ priceMinor: 21000 })
+      expect(res.status).toBe(201)
+      expect((res.body as ItemPriceBody).channel).toBeNull()
+      for (const channel of ['dine_in', 'qr', 'takeaway', 'aggregator', 'delivery']) expect(await current(channel)).toBe(21000)
+      // One unscoped row plus one for the channel that had its own price - and a single audit entry.
+      expect(await prisma.itemPrice.count({ where: { itemId: item.id } })).toBe(3)
+      expect(await prisma.auditEvent.count({ where: { tenantId, action: 'menu.item.price_changed' } })).toBe(2)
+    })
+
     it('requires a reason (price change is security-relevant) and audits it', async () => {
       const { tenantId, token } = await createOwner(prisma)
       const { item, variantId } = await itemWithVariant(token)

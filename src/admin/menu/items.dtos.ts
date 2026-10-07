@@ -110,8 +110,10 @@ export class CreatePriceDto {
   @IsOptional() @IsUUID()
   variantId?: string
 
-  @IsEnum(PRICE_CHANNELS)
-  channel!: PriceChannel
+  // Omitted = every channel: the price becomes the unscoped default and also replaces any
+  // channel-specific price already set, so QR, takeaway and aggregator orders are priced too.
+  @IsOptional() @IsEnum(PRICE_CHANNELS)
+  channel?: PriceChannel
 
   @IsOptional() @IsUUID()
   outletId?: string

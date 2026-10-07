@@ -49,18 +49,27 @@ export class PricesService {
         }
       }
 
-      const created = await tx.itemPrice.create({
-        data: {
-          tenantId: owner.tenantId,
-          itemId,
-          variantId: dto.variantId ?? null,
-          outletId: dto.outletId ?? null,
-          channel: dto.channel,
-          priceMinor: BigInt(dto.priceMinor),
-          currency: dto.currency,
-          ...(dto.effectiveAt ? { effectiveAt: new Date(dto.effectiveAt) } : {}),
-        },
-      })
+      // One channel when asked; otherwise the unscoped default plus a matching row for every channel
+      // that already has its own price here (a channel-specific row would otherwise keep winning).
+      const scope = { itemId, variantId: dto.variantId ?? null, outletId: dto.outletId ?? null }
+      const existing = dto.channel ? [] : await tx.itemPrice.findMany({ where: { tenantId: owner.tenantId, ...scope, channel: { not: null } }, distinct: ['channel'], select: { channel: true } })
+      const channels: Array<PriceChannel | null> = dto.channel ? [dto.channel] : [null, ...existing.map((row) => row.channel)]
+      const rows = []
+      for (const channel of channels) {
+        rows.push(
+          await tx.itemPrice.create({
+            data: {
+              tenantId: owner.tenantId,
+              ...scope,
+              channel,
+              priceMinor: BigInt(dto.priceMinor),
+              currency: dto.currency,
+              ...(dto.effectiveAt ? { effectiveAt: new Date(dto.effectiveAt) } : {}),
+            },
+          }),
+        )
+      }
+      const created = rows[0]
 
       await tx.auditEvent.create({
         data: {
