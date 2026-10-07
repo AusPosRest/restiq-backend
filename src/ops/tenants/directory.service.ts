@@ -2,16 +2,16 @@
 // explicit operator RLS context, and detail mutations that write their
 // audit_events row in the same transaction (AD-6), routed to the tenant's
 // owning region through the registry (AD-1).
-import { BadRequestException, ConflictException, Injectable, NotFoundException } from '@nestjs/common'
+import { BadRequestException, ConflictException, Injectable, Logger, NotFoundException } from '@nestjs/common'
 import { createHash, randomBytes } from 'node:crypto'
 import type { Prisma, PrismaClient } from '../../generated/prisma/client'
-import { OpsPrincipal, PrismaService, RegionRegistryService } from '../../platform'
+import { MailService, OpsPrincipal, PrismaService, RegionRegistryService } from '../../platform'
 import {
   UpdateBrandingDto,
   UpdateTenantDto,
 } from './directory.dtos'
 import { LAGGING_THRESHOLD_SECONDS } from '../sync-health/severity'
-import { OWNER_INVITE_TTL_HOURS } from './tenants.service'
+import { OWNER_INVITE_TTL_HOURS, ownerInviteEmail } from './tenants.service'
 
 const STATUSES = ['provisioning', 'active', 'inactive'] as const
 const COUNTRIES = ['IN', 'AU'] as const
@@ -132,9 +132,12 @@ function decodeCursor(raw: string): Cursor {
 
 @Injectable()
 export class TenantDirectoryService {
+  private readonly logger = new Logger(TenantDirectoryService.name)
+
   constructor(
     private readonly prisma: PrismaService,
     private readonly registry: RegionRegistryService,
+    private readonly mail: MailService,
   ) {}
 
   // --- Reads: fan out across region planes via the registry (AD-1). v1 has a
@@ -351,9 +354,9 @@ export class TenantDirectoryService {
     return { brandingTokens: tokens }
   }
 
-  // inviteToken is the raw accept token, exposed exactly once here: there is
-  // no mailer in this prototype, so the ops console must be able to show a
-  // copyable accept link (issue #85). Only the hash is stored.
+  // inviteToken is the raw accept token, exposed exactly once here so the ops
+  // console can still show a copyable accept link (issue #85); it is also
+  // emailed to the owner (#198). Only the hash is stored.
   async regenerateOwnerInvite(
     operator: OpsPrincipal,
     id: string,
@@ -361,12 +364,14 @@ export class TenantDirectoryService {
   ): Promise<{ invite: InviteView; inviteToken: string }> {
     const rawToken = randomBytes(32).toString('hex')
     const expiresAt = new Date(Date.now() + OWNER_INVITE_TTL_HOURS * 3_600_000)
+    let restaurant = ''
 
     const invite = await this.mutate(operator, id, 'tenant.owner_invite_regenerated', reason, async (tx) => {
-      const existing = await tx.ownerInvite.findFirst({ where: { tenantId: id }, orderBy: { createdAt: 'desc' } })
+      const existing = await tx.ownerInvite.findFirst({ where: { tenantId: id }, orderBy: { createdAt: 'desc' }, include: { tenant: { select: { name: true } } } })
       if (!existing) throw new NotFoundException({ code: 'not_found', message: 'This tenant has no owner invite to regenerate' })
       // The old token must stop working the moment the new one exists.
       await tx.ownerInvite.deleteMany({ where: { tenantId: id } })
+      restaurant = existing.tenant.name
       return tx.ownerInvite.create({
         data: {
           tenantId: id,
@@ -378,6 +383,10 @@ export class TenantDirectoryService {
         },
       })
     })
+
+    void this.mail
+      .send(ownerInviteEmail(invite.email, invite.firstName, restaurant, rawToken))
+      .catch((error: unknown) => this.logger.error(`Owner invite email failed: ${String(error)}`))
 
     return {
       invite: {
