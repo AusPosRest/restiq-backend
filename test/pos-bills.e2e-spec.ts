@@ -973,7 +973,7 @@ describe('/pos/v1 bill and settle (e2e)', () => {
       expect(body.payments[2]?.takenBy?.name).toBe('Asha')
       expect(body.payments[2]?.tableLabel).toBe('T1')
       expect(body.payments[2]?.billNumber).toBe(1)
-      expect(body.payments[0]?.reference).toBe('EFT-1')
+      expect(body.payments.find((p) => p.method === 'external')?.reference).toBe('EFT-1')
       expect(body.byMethod).toEqual([
         { method: 'cash', count: 1, amountMinor: 21000 },
         { method: 'upi_manual', count: 1, amountMinor: 11000 },
