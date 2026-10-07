@@ -108,6 +108,8 @@ enum BillingPeriod {
 model Tenant {
   id                String           @id @db.Uuid
   name              String
+  // The tenant's subdomain (D14, #TBD): <slug>.<BASE_DOMAIN>. Set at creation, never changed.
+  slug              String?          @unique
   registeredAddress String           @map("registered_address")
   contactName       String           @map("contact_name")
   contactEmail      String           @map("contact_email")

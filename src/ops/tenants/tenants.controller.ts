@@ -1,9 +1,23 @@
 import { Body, Controller, Delete, Get, HttpCode, Param, ParseIntPipe, ParseUUIDPipe, Patch, Post, Put, Query } from '@nestjs/common'
-import { CurrentOperator, OpsPrincipal } from '../../platform'
+import { CurrentOperator, OpsPrincipal, slugProblem } from '../../platform'
 import { CapabilityKey, ReasonDto, ToggleCapabilityDto, UpdateBrandingDto, UpdateTenantDto } from './directory.dtos'
 import { InviteView, TenantDetail, TenantDirectoryService, TenantListResult } from './directory.service'
 import { SubmitTenantDto } from './submit.dto'
 import { DraftView, OpsTenantsService, ProvisionResult } from './tenants.service'
+
+// Is this subdomain free? (D14) Separate from the tenants routes: it is about a name, not a tenant.
+@Controller('ops/v1/tenant-slugs')
+export class OpsTenantSlugsController {
+  constructor(private readonly tenants: OpsTenantsService) {}
+
+  @Get(':slug')
+  async check(@Param('slug') raw: string): Promise<{ slug: string; available: boolean; reason: 'taken' | 'reserved' | 'invalid' | null }> {
+    const slug = raw.trim().toLowerCase()
+    const problem = slugProblem(slug)
+    if (problem) return { slug, available: false, reason: problem }
+    return (await this.tenants.slugTaken(slug)) ? { slug, available: false, reason: 'taken' } : { slug, available: true, reason: null }
+  }
+}
 
 @Controller('ops/v1/tenants')
 export class OpsTenantsController {
