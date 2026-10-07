@@ -916,3 +916,25 @@
   `file_changed` otherwise) and the evidence hash covers it; versions published
   as text before this have no file and answer 409 `no_file`. Migration
   `20261007100000_agreement_pdf`. Tests: `test/agreements.e2e-spec.ts`.
+- **2026-10-07 - Owner password reset by email, revocable owner sessions (#181).**
+  `POST /admin/v1/auth/forgot-password` always answers 202 (never says whether the
+  email is registered; 3 per email and 10 per address in 15 minutes) and emails a
+  single-use, one-hour link through `MailService` (`MAIL_PROVIDER=mailjet`, or `log`
+  in development). `POST /admin/v1/auth/reset-password` sets the password (10+
+  characters), uses the link up and moves `owner_users.session_version` on, so every
+  older owner token answers 401 `session_revoked`. Tokens issued before this carry no
+  version and expire as before. Production start refuses to run without Mailjet
+  settings. Migration `20261007200000_owner_password_reset`. Tests:
+  `test/owner-password-reset.e2e-spec.ts`, `src/platform/mail.service.spec.ts`.
+- **2026-10-07 - Tenant subdomain addressing (D14).** `tenants.slug` (unique, 3-32
+  lowercase letters, digits, hyphens; reserved names refused; set at creation, never
+  changed). `POST /ops/v1/tenants` takes an optional `slug`, otherwise one is made
+  from the company name and numbered on a clash (409 `slug_taken`, 400 `slug_invalid`
+  / `slug_reserved`). `GET /ops/v1/tenant-slugs/:slug` reports free, taken, reserved
+  or invalid. `GET /public/v1/tenant` (`host` query or Host header, under
+  `BASE_DOMAIN`, default idelta.com.au) returns what a sign-in page needs, 404
+  `tenant_not_found` otherwise. The web server forwards the visitor's address in
+  `X-Restiq-Tenant-Host`, believed only with the proxy secret; the admin, POS and
+  guest guards then refuse a token for another tenant (403 `tenant_mismatch`).
+  Migration `20261007300000_tenant_slug`. Tests: `test/tenant-address.e2e-spec.ts`,
+  `src/platform/tenant-slug.spec.ts`.

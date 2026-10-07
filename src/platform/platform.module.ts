@@ -12,6 +12,7 @@ import { OpsAuthGuard } from './ops-auth.guard'
 import { PosAuthGuard } from './pos-auth.guard'
 import { PrismaService } from './prisma.service'
 import { RegionRegistryService } from './region-registry.service'
+import { TenantAddressService } from './tenant-address.service'
 
 @Module({
   providers: [
@@ -21,6 +22,7 @@ import { RegionRegistryService } from './region-registry.service'
     ManagerAuthService,
     AttemptLimiter,
     MailService,
+    TenantAddressService,
     { provide: APP_GUARD, useClass: OpsAuthGuard },
     // AD-10: a second, disjoint global guard for /admin/* - each early-returns
     // true outside its own prefix, so both combine without interfering.
@@ -34,6 +36,6 @@ import { RegionRegistryService } from './region-registry.service'
     { provide: APP_FILTER, useClass: ApiErrorFilter },
     { provide: APP_PIPE, useValue: new ValidationPipe({ whitelist: true }) },
   ],
-  exports: [PrismaService, ControlPlaneAuditService, RegionRegistryService, ManagerAuthService, AttemptLimiter, MailService],
+  exports: [PrismaService, ControlPlaneAuditService, RegionRegistryService, ManagerAuthService, AttemptLimiter, MailService, TenantAddressService],
 })
 export class PlatformModule {}

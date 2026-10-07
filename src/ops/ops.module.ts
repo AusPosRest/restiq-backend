@@ -17,7 +17,7 @@ import { ALERT_CHANNEL, WebhookAlertChannel } from './sync-health/alert-channel'
 import { OpsSyncHealthController } from './sync-health/sync-health.controller'
 import { SyncHealthService } from './sync-health/sync-health.service'
 import { TenantDirectoryService } from './tenants/directory.service'
-import { OpsTenantsController } from './tenants/tenants.controller'
+import { OpsTenantSlugsController, OpsTenantsController } from './tenants/tenants.controller'
 import { OpsTenantsService } from './tenants/tenants.service'
 
 @Module({
@@ -26,6 +26,7 @@ import { OpsTenantsService } from './tenants/tenants.service'
     OpsAuthController,
     OpsDashboardController,
     OpsTenantsController,
+    OpsTenantSlugsController,
     OpsDevicesController,
     OpsSubscriptionsController,
     OpsSyncHealthController,

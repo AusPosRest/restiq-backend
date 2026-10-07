@@ -23,6 +23,7 @@ import { IS_PUBLIC } from './ops-auth.guard'
 import { ROUTE_PERMISSION, RoutePolicy, roleHasPermission } from './permissions'
 import { PosPrincipal, verifyPosToken } from './pos-jwt'
 import { RegionRegistryService } from './region-registry.service'
+import { TenantAddressService } from './tenant-address.service'
 import { isTenantBlocked } from './tenant-lifecycle'
 
 type PosRequest = Request & { staff?: PosPrincipal }
@@ -42,6 +43,7 @@ export class PosAuthGuard implements CanActivate {
   constructor(
     private readonly reflector: Reflector,
     private readonly registry: RegionRegistryService,
+    private readonly address: TenantAddressService,
   ) {}
 
   async canActivate(context: ExecutionContext): Promise<boolean> {
@@ -60,6 +62,7 @@ export class PosAuthGuard implements CanActivate {
     if (await isTenantBlocked(this.registry, claims.tenantId)) {
       throw new ForbiddenException({ code: 'tenant_inactive', message: 'This tenant is no longer active' })
     }
+    await this.address.assertTokenMatchesAddress(request, claims.tenantId)
 
     const plane = this.registry.planeFor(this.registry.homeRegion())
     const staff = await plane.$transaction(async (tx) => {

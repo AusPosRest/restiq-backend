@@ -7,9 +7,10 @@ import { KitchenModule } from './kitchen'
 import { OpsModule } from './ops'
 import { PlatformModule } from './platform'
 import { PosModule } from './pos'
+import { TenancyModule } from './tenancy/tenancy.module'
 
 @Module({
-  imports: [PlatformModule, OpsModule, AdminModule, PosModule, GuestModule, KitchenModule, DeviceModule],
+  imports: [PlatformModule, OpsModule, AdminModule, PosModule, GuestModule, KitchenModule, DeviceModule, TenancyModule],
   controllers: [HealthController],
 })
 export class AppModule {}
