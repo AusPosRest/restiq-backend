@@ -1,5 +1,8 @@
 # Completed
 
+- **2026-10-08** - One capability list (issue #191):
+  - `GET /ops/v1/tenants/:id` returns `outlets[].capabilities`, the real `outlet_capabilities` switches that guest QR, kiosk and menu photos read.
+  - The tenant-level toggle (`PUT …/capabilities/:key`, `CAPABILITY_KEYS`, `CAPABILITY_DEFAULTS`, `ToggleCapabilityDto`) is removed. Nothing read `tenant_capabilities`. The table stays, unused.
 - **2026-10-08** - Live status after the first sales (issue #189):
   - `commitFinalize` flips a `provisioning` tenant to `active` on its first finalised bill, audited as `tenant.went_live` with reason "First sale".
   - Ops KPI `devices_online` counts active devices heard from within the 1 h lagging threshold. `open_dlq` counts unresolved dead letters.

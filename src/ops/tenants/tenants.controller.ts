@@ -1,6 +1,6 @@
 import { Body, Controller, Delete, Get, HttpCode, Param, ParseIntPipe, ParseUUIDPipe, Patch, Post, Put, Query } from '@nestjs/common'
 import { CurrentOperator, OpsPrincipal, slugProblem } from '../../platform'
-import { CapabilityKey, ReasonDto, ToggleCapabilityDto, UpdateBrandingDto, UpdateTenantDto } from './directory.dtos'
+import { ReasonDto, UpdateBrandingDto, UpdateTenantDto } from './directory.dtos'
 import { InviteView, TenantDetail, TenantDirectoryService, TenantListResult } from './directory.service'
 import { SubmitTenantDto } from './submit.dto'
 import { DraftView, OpsTenantsService, ProvisionResult } from './tenants.service'
@@ -69,16 +69,6 @@ export class OpsTenantsController {
     @Body() dto: UpdateTenantDto,
   ): Promise<{ tenant: { id: string; name: string } }> {
     return this.directory.updateBasics(operator, id, dto)
-  }
-
-  @Put(':id/capabilities/:key')
-  toggleCapability(
-    @CurrentOperator() operator: OpsPrincipal,
-    @Param('id', ParseUUIDPipe) id: string,
-    @Param('key') key: string,
-    @Body() dto: ToggleCapabilityDto,
-  ): Promise<{ capability: { key: CapabilityKey; enabled: boolean } }> {
-    return this.directory.toggleCapability(operator, id, key, dto)
   }
 
   @Put(':id/branding')
