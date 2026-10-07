@@ -19,6 +19,7 @@ import { resolveComboSelection, resolveCurrentPrice } from '../../admin'
 import type { Order, OrderLine, PriceChannel, Prisma } from '../../generated/prisma/client'
 import { KitchenTicketsService } from '../../kitchen'
 import { PosPrincipal, RegionRegistryService } from '../../platform'
+import type { Replay } from '../sync/replay'
 import { setTenantContext } from '../tenant-context'
 import { AddComboLineDto, AddOrderLineDto, OrderView, UpdateOrderLineDto } from './orders.dtos'
 import { assertOwner, buildOrderView, loadOrder, Tx } from './orders.service'
@@ -136,7 +137,18 @@ export class OrderLinesService {
     return this.registry.planeFor(this.registry.homeRegion())
   }
 
-  async addLine(staff: PosPrincipal, orderId: string, dto: AddOrderLineDto): Promise<OrderView> {
+  /**
+   * `replay` (restiq-backend#185): a line the hub till already rang up. It
+   * keeps the hub's line id and time and the price the guest was charged,
+   * which can differ from today's cloud price if the menu changed while the
+   * hub was offline (a past sale is never re-priced).
+   */
+  async addLine(
+    staff: PosPrincipal,
+    orderId: string,
+    dto: AddOrderLineDto,
+    replay?: Replay & { unitPriceMinor: bigint; modifierPriceMinor: Record<string, bigint> },
+  ): Promise<OrderView> {
     const plane = this.plane()
     return plane.$transaction(async (tx) => {
       await setTenantContext(tx, staff.tenantId)
@@ -149,20 +161,25 @@ export class OrderLinesService {
       const modifierIds = dto.modifierIds ?? []
       assertModifierSelectionValid(item, modifierIds)
 
-      const price = await resolveCurrentPrice(tx, {
-        tenantId: staff.tenantId,
-        itemId: dto.itemId,
-        variantId: dto.variantId ?? null,
-        channel: ORDER_PRICE_CHANNEL,
-        outletId: order.outletId,
-      })
+      const price = replay
+        ? { priceMinor: replay.unitPriceMinor }
+        : await resolveCurrentPrice(tx, {
+            tenantId: staff.tenantId,
+            itemId: dto.itemId,
+            variantId: dto.variantId ?? null,
+            channel: ORDER_PRICE_CHANNEL,
+            outletId: order.outletId,
+          })
       if (!price) {
         throw new BadRequestException({ code: 'no_price', message: 'No current price is configured for this item' })
       }
 
-      const modifierPrices = await resolveModifierPrices(tx, staff.tenantId, modifierIds)
+      const modifierPrices = replay
+        ? new Map(Object.entries(replay.modifierPriceMinor))
+        : await resolveModifierPrices(tx, staff.tenantId, modifierIds)
       const line = await tx.orderLine.create({
         data: {
+          ...(replay && { id: replay.id, createdAt: replay.at }),
           tenantId: staff.tenantId,
           orderId,
           itemId: dto.itemId,

@@ -74,6 +74,13 @@ model OnboardingDraft {
 model AppliedOp {
   opId      String   @id @map("op_id") @db.Uuid
   appliedAt DateTime @default(now()) @map("applied_at") @db.Timestamptz(6)
+  // Offline sync push (restiq-backend#185) reuses this ledger: which device
+  // sent the op, its place in that device's sequence, and the outcome a
+  // re-sent op is answered with. Null for DLQ replays, which predate sync.
+  deviceId  String?  @map("device_id") @db.Uuid
+  seq       Int?
+  status    String?
+  code      String?
 
   @@map("applied_ops")
 }
@@ -123,6 +130,9 @@ model Tenant {
   // Flat map of design-token overrides (logo URL, accent color, ...) applied
   // to the tenant's guest-facing surfaces.
   brandingTokens    Json             @default("{}") @map("branding_tokens")
+  // Offline lock (decision O1, restiq-backend#185): a hub that has not synced
+  // for this long stops taking new sales until it syncs. Per restaurant.
+  maxOfflineHours   Int              @default(24) @map("max_offline_hours")
   createdAt         DateTime         @default(now()) @map("created_at") @db.Timestamptz(6)
   updatedAt         DateTime         @updatedAt @map("updated_at") @db.Timestamptz(6)
   deletedAt         DateTime?        @map("deleted_at") @db.Timestamptz(6)
@@ -1142,6 +1152,14 @@ model Device {
   clockSkewSeconds     Int?      @map("clock_skew_seconds")
   recentRejectionCount Int?      @map("recent_rejection_count")
 
+  // Offline sync (restiq-backend#185). The ed25519 public key (base64 SPKI
+  // DER) sent with the one-time enrolment code; every /sync/v1 request is
+  // signed with its private half. Null = enrolled before sync, cannot sync.
+  publicKey      String?   @map("public_key")
+  lastSyncAt     DateTime? @map("last_sync_at") @db.Timestamptz(6)
+  // Highest push seq applied; the next op must be exactly this + 1.
+  lastAppliedSeq Int       @default(0) @map("last_applied_seq")
+
   tenant                 Tenant           @relation(fields: [tenantId], references: [id])
   outlet                 Outlet?          @relation(fields: [outletId], references: [id])
   deadLetters            SyncDeadLetter[]
@@ -1194,6 +1212,24 @@ model SyncDeadLetter {
   @@index([tenantId])
   @@index([deviceId])
   @@map("sync_dead_letters")
+}
+
+// Offline sync change feed (restiq-backend#185): one row per insert, update or
+// delete on a cloud-owned table, written by the sync_record_change() trigger.
+// The bigserial id is the pull cursor. No payload: pull reads the current row.
+// No foreign key to tenants: it is an append-only log read by tenant_id under
+// RLS, and a key would make every tenant hard-delete (test wipes) clear it first.
+model SyncChange {
+  id        BigInt   @id @default(autoincrement())
+  tenantId  String   @map("tenant_id") @db.Uuid
+  outletId  String?  @map("outlet_id") @db.Uuid
+  entity    String
+  entityId  String   @map("entity_id") @db.Uuid
+  action    String
+  changedAt DateTime @default(now()) @map("changed_at") @db.Timestamptz(6)
+
+  @@index([tenantId, id])
+  @@map("sync_changes")
 }
 
 // ---------------------------------------------------------------------------

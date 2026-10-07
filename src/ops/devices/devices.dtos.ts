@@ -40,6 +40,11 @@ export class EnrollDeviceDto {
 
   @IsOptional() @IsString() @MaxLength(500)
   reason?: string
+
+  // Offline sync (restiq-backend#185): the device's ed25519 public key, base64
+  // SPKI DER. The one-time code is the trust anchor, so the key rides on it.
+  @IsOptional() @IsString() @MaxLength(200)
+  publicKey?: string
 }
 
 export class HubDto extends MutationDto {}

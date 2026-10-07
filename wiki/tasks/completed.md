@@ -930,3 +930,12 @@
   guest guards then refuse a token for another tenant (403 `tenant_mismatch`).
   Migration `20261007300000_tenant_slug`. Tests: `test/tenant-address.e2e-spec.ts`,
   `src/platform/tenant-slug.spec.ts`.
+- **2026-10-07 - Offline sync API for the Windows hub till (#185, D15).** Device
+  ed25519 key at enrolment; `/sync/v1/*` device realm with signed requests
+  (`DeviceSyncGuard`); `sync_changes` change feed filled by a trigger on the 19
+  cloud-owned tables; bootstrap, pull, push (idempotent per opId through the AD-7
+  `applied_ops` ledger, seq-ordered, ops applied through the existing order and bill
+  services keeping the hub's ids, time and prices; lapsed permission accepted and
+  audited), session status and rejections. `tenants.max_offline_hours` (default 24).
+  Migration `20261008100000_offline_sync`. Tests: `test/sync.e2e-spec.ts`. See
+  `wiki/features/offline-sync.md`.

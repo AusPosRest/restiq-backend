@@ -35,6 +35,7 @@
 // floated ("any discount over 20%") - see DISCOUNT_THRESHOLD_FRACTION.
 import { BadRequestException, ConflictException, ForbiddenException, Injectable, NotFoundException } from '@nestjs/common'
 import { ManagerApproval, ManagerAuthService, PosPrincipal, RegionRegistryService, uuidv7 } from '../../platform'
+import type { Replay } from '../sync/replay'
 import { setTenantContext } from '../tenant-context'
 import { linkedPeripheral, queueFor } from '../device-routing'
 import { localDateKey } from '../clock/clock.util'
@@ -103,7 +104,7 @@ export class BillsService {
    * with no id to recover from. `created` tells the controller which status
    * code to answer with; the BillView body is identical either way.
    */
-  async createBill(staff: PosPrincipal, orderId: string): Promise<{ view: BillView; created: boolean }> {
+  async createBill(staff: PosPrincipal, orderId: string, replay?: Replay): Promise<{ view: BillView; created: boolean }> {
     const plane = this.plane()
     return plane.$transaction(async (tx) => {
       await setTenantContext(tx, staff.tenantId)
@@ -116,6 +117,7 @@ export class BillsService {
         orderId,
         createdByStaffId: staff.id,
         orderClosed: order.status === 'closed',
+        replay,
       })
       return { view: toBillView(bill), created }
     })
@@ -265,8 +267,13 @@ export class BillsService {
    * transaction. Not owner-only, unlike createBill: a cashier settling at a
    * register is frequently not the waiter who owns the order, and
    * SPEC-CAP-7 names no ownership restriction for this step.
+   *
+   * `replay` (restiq-backend#185): a bill the hub till already settled. It
+   * keeps the hub's tender ids and settle time. The hub checked the manager
+   * PIN for a large discount itself - a PIN never travels in the outbox - so
+   * here the gate is recorded as an audit event instead of asked again.
    */
-  async finalize(staff: PosPrincipal, billId: string, dto: FinalizeBillDto): Promise<BillView> {
+  async finalize(staff: PosPrincipal, billId: string, dto: FinalizeBillDto, replay?: { tenderIds: string[]; at: Date }): Promise<BillView> {
     if ((dto.discountMinor === undefined) !== (dto.discountReason === undefined)) {
       throw new BadRequestException({ code: 'validation_failed', message: 'discountMinor and discountReason must be given together' })
     }
@@ -285,7 +292,11 @@ export class BillsService {
       let approval: ManagerApproval | null = null
       if (discountMinor !== null) {
         const thresholdMinor = (bill.subtotalMinor * DISCOUNT_THRESHOLD_PERCENT) / 100n
-        if (discountMinor > thresholdMinor) {
+        if (discountMinor > thresholdMinor && replay) {
+          await tx.auditEvent.create({
+            data: { tenantId: staff.tenantId, actorId: staff.id, actorEmail: staff.name, action: 'sync.discount_approved_offline', reason: discountReason as string, occurredAt: replay.at },
+          })
+        } else if (discountMinor > thresholdMinor) {
           if (!dto.managerPin) {
             throw new BadRequestException({ code: 'manager_pin_required', message: 'A manager PIN is required for a discount above the threshold' })
           }
@@ -293,8 +304,9 @@ export class BillsService {
         }
       }
 
-      for (const tender of dto.tenders) {
+      for (const [i, tender] of dto.tenders.entries()) {
         await createTenderRecord(tx, {
+          replay: replay && { id: replay.tenderIds[i], at: replay.at },
           tenantId: staff.tenantId,
           billId,
           method: tender.method,
@@ -310,6 +322,7 @@ export class BillsService {
         discountMinor,
         discountReason,
         finalizedByStaffId: staff.id,
+        finalizedAt: replay?.at,
       })
 
       if (approval) {

@@ -5,7 +5,7 @@
 import { BadRequestException, ConflictException, Injectable, NotFoundException } from '@nestjs/common'
 import { createHash, randomBytes } from 'node:crypto'
 import type { Prisma } from '../../generated/prisma/client'
-import { OpsPrincipal, RegionRegistryService, uuidv7 } from '../../platform'
+import { OpsPrincipal, parseEd25519PublicKey, RegionRegistryService, uuidv7 } from '../../platform'
 import { DEVICE_STATUSES, DEVICE_TYPES, DeviceTypeValue, EnrollDeviceDto, GenerateCodeDto, HeartbeatDto } from './devices.dtos'
 
 export const CODE_TTL_MS = 15 * 60 * 1000
@@ -254,6 +254,10 @@ export class DevicesService {
   // for the audit_events row: an ops operator for the existing route, or a
   // device actor (null actorId, a synthetic actorEmail) for the public one.
   async enrollWithActor(actor: EnrollActor, dto: EnrollDeviceDto): Promise<{ device: DeviceView }> {
+    // Checked before the code is consumed, so a bad key does not burn the code.
+    if (dto.publicKey !== undefined && !parseEd25519PublicKey(dto.publicKey)) {
+      badRequest('publicKey must be a base64 SPKI DER ed25519 public key')
+    }
     const codeHash = hashCode(normalizeCode(dto.code))
     const reason = actor.reason ?? DEFAULT_ENROLL_REASON
     const plane = this.registry.planeFor(this.registry.homeRegion())
@@ -288,6 +292,7 @@ export class DevicesService {
           label: dto.label?.trim() || defaultLabel(record.deviceType, id),
           type: record.deviceType,
           hardwareKeyFingerprint: dto.hardwareKeyFingerprint,
+          publicKey: dto.publicKey ?? null,
           enrolledAt: now,
         },
       })
