@@ -918,3 +918,15 @@
   version and expire as before. Production start refuses to run without Mailjet
   settings. Migration `20261007200000_owner_password_reset`. Tests:
   `test/owner-password-reset.e2e-spec.ts`, `src/platform/mail.service.spec.ts`.
+- **2026-10-07 - Tenant subdomain addressing (D14).** `tenants.slug` (unique, 3-32
+  lowercase letters, digits, hyphens; reserved names refused; set at creation, never
+  changed). `POST /ops/v1/tenants` takes an optional `slug`, otherwise one is made
+  from the company name and numbered on a clash (409 `slug_taken`, 400 `slug_invalid`
+  / `slug_reserved`). `GET /ops/v1/tenant-slugs/:slug` reports free, taken, reserved
+  or invalid. `GET /public/v1/tenant` (`host` query or Host header, under
+  `BASE_DOMAIN`, default idelta.com.au) returns what a sign-in page needs, 404
+  `tenant_not_found` otherwise. The web server forwards the visitor's address in
+  `X-Restiq-Tenant-Host`, believed only with the proxy secret; the admin, POS and
+  guest guards then refuse a token for another tenant (403 `tenant_mismatch`).
+  Migration `20261007300000_tenant_slug`. Tests: `test/tenant-address.e2e-spec.ts`,
+  `src/platform/tenant-slug.spec.ts`.

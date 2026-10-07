@@ -11,6 +11,7 @@ import type { Request } from 'express'
 import { GuestPrincipal, verifyGuestToken } from './guest-jwt'
 import { IS_PUBLIC } from './ops-auth.guard'
 import { RegionRegistryService } from './region-registry.service'
+import { TenantAddressService } from './tenant-address.service'
 import { isTenantBlocked } from './tenant-lifecycle'
 
 type GuestRequest = Request & { guest?: GuestPrincipal }
@@ -30,6 +31,7 @@ export class GuestAuthGuard implements CanActivate {
   constructor(
     private readonly reflector: Reflector,
     private readonly registry: RegionRegistryService,
+    private readonly address: TenantAddressService,
   ) {}
 
   async canActivate(context: ExecutionContext): Promise<boolean> {
@@ -48,6 +50,7 @@ export class GuestAuthGuard implements CanActivate {
     if (await isTenantBlocked(this.registry, principal.tenantId)) {
       throw new ForbiddenException({ code: 'tenant_inactive', message: 'This tenant is no longer active' })
     }
+    await this.address.assertTokenMatchesAddress(request, principal.tenantId)
     request.guest = principal
     return true
   }

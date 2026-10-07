@@ -1,7 +1,7 @@
 import { BadRequestException, ConflictException, Injectable, NotFoundException } from '@nestjs/common'
 import { createHash, randomBytes } from 'node:crypto'
 import type { Prisma } from '../../generated/prisma/client'
-import { OpsPrincipal, PrismaService, RegionRegistryService, uuidv7 } from '../../platform'
+import { OpsPrincipal, PrismaService, RegionRegistryService, slugify, slugProblem, uuidv7 } from '../../platform'
 import { applyStarterSetup } from '../../admin/outlets/starter-setup'
 import { SubmitTenantDto } from './submit.dto'
 
@@ -59,7 +59,7 @@ export interface DraftView {
 }
 
 export interface ProvisionResult {
-  tenant: { id: string; name: string; status: string }
+  tenant: { id: string; name: string; slug: string; status: string }
   // inviteToken is the raw accept token, exposed exactly once here: there is
   // no mailer in this prototype, so the ops console must be able to show a
   // copyable accept link (issue #85). Only the hash is stored.
@@ -115,6 +115,7 @@ export class OpsTenantsService {
   async provision(operator: OpsPrincipal, dto: SubmitTenantDto): Promise<ProvisionResult> {
     this.validateTaxNumber(dto)
     this.validateGstRate(dto)
+    const slug = await this.chooseSlug(dto)
 
     const region = this.registry.homeRegion()
     const plane = this.registry.planeFor(region)
@@ -138,6 +139,7 @@ export class OpsTenantsService {
           data: {
             id: tenantId,
             name: dto.business.companyName,
+            slug,
             registeredAddress: dto.business.registeredAddress,
             contactName: dto.business.contactName,
             contactEmail: dto.business.contactEmail,
@@ -227,6 +229,9 @@ export class OpsTenantsService {
       })
     } catch (error) {
       if (isUniqueViolation(error)) {
+        // Both the tax number and the subdomain are unique; a slug lost in a race is the only way the second fires here.
+        const target = JSON.stringify((error as { meta?: unknown }).meta ?? '')
+        if (target.includes('slug')) throw new ConflictException({ code: 'slug_taken', message: 'That subdomain was just taken - choose another' })
         throw new ConflictException({
           code: 'conflict',
           message: 'A tenant with this tax registration number already exists',
@@ -236,9 +241,36 @@ export class OpsTenantsService {
     }
 
     return {
-      tenant: { id: tenantId, name: dto.business.companyName, status: 'provisioning' },
+      tenant: { id: tenantId, name: dto.business.companyName, slug, status: 'provisioning' },
       invite: { email: invite.email, expiresAt: invite.expiresAt.toISOString(), inviteToken },
     }
+  }
+
+  /** The subdomain the ops person asked for, checked; or one made from the company name, numbered on a clash. */
+  private async chooseSlug(dto: SubmitTenantDto): Promise<string> {
+    if (dto.slug !== undefined && dto.slug !== '') {
+      const slug = dto.slug.trim().toLowerCase()
+      const problem = slugProblem(slug)
+      if (problem === 'invalid') throw new BadRequestException({ code: 'slug_invalid', message: 'A subdomain is 3 to 32 lowercase letters, digits or hyphens, starting and ending with a letter or digit' })
+      if (problem === 'reserved') throw new BadRequestException({ code: 'slug_reserved', message: 'That subdomain is reserved - choose another' })
+      if (await this.slugTaken(slug)) throw new ConflictException({ code: 'slug_taken', message: 'That subdomain is already used by another restaurant' })
+      return slug
+    }
+    const base = slugify(dto.business.companyName)
+    for (let n = 1; n <= 50; n++) {
+      const candidate = n === 1 ? base : `${base.slice(0, 29)}-${n}`
+      if (slugProblem(candidate) === null && !(await this.slugTaken(candidate))) return candidate
+    }
+    throw new ConflictException({ code: 'slug_taken', message: 'No subdomain could be made from that company name - choose one' })
+  }
+
+  async slugTaken(slug: string): Promise<boolean> {
+    const plane = this.registry.planeFor(this.registry.homeRegion())
+    const found = await plane.$transaction(async (tx) => {
+      await tx.$executeRaw`SELECT set_config('app.operator_context', 'operator', true)`
+      return tx.tenant.findUnique({ where: { slug }, select: { id: true } })
+    })
+    return found !== null
   }
 
   private validateTaxNumber(dto: SubmitTenantDto): void {
