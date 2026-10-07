@@ -430,6 +430,24 @@ export async function commitFinalize(tx: Tx, params: CommitFinalizeParams): Prom
   // guard is for staff-driven transitions, not this one.
   await tx.order.update({ where: { id: bill.orderId }, data: { status: 'closed' } })
 
+  // issue #189: a restaurant that is taking real money is live. The first
+  // finalised bill of a still-provisioning tenant flips it to active (the
+  // owner's Go live and ops Activate stay as the other ways in), audited once
+  // with the same action Go live writes.
+  const wentLive = await tx.tenant.updateMany({ where: { id: params.tenantId, status: 'provisioning' }, data: { status: 'active' } })
+  if (wentLive.count > 0) {
+    await tx.auditEvent.create({
+      data: {
+        tenantId: params.tenantId,
+        actorId: null,
+        actorEmail: 'system:first-sale',
+        action: 'tenant.went_live',
+        reason: 'First sale',
+        occurredAt: new Date(),
+      },
+    })
+  }
+
   return loadBill(tx, params.tenantId, bill.id)
 }
 

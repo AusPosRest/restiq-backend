@@ -7,13 +7,10 @@ import { createHash, randomBytes } from 'node:crypto'
 import type { Prisma, PrismaClient } from '../../generated/prisma/client'
 import { OpsPrincipal, PrismaService, RegionRegistryService } from '../../platform'
 import {
-  CAPABILITY_DEFAULTS,
-  CAPABILITY_KEYS,
-  CapabilityKey,
-  ToggleCapabilityDto,
   UpdateBrandingDto,
   UpdateTenantDto,
 } from './directory.dtos'
+import { LAGGING_THRESHOLD_SECONDS } from '../sync-health/severity'
 import { OWNER_INVITE_TTL_HOURS } from './tenants.service'
 
 const STATUSES = ['provisioning', 'active', 'inactive'] as const
@@ -85,10 +82,20 @@ export interface TenantDetail {
     gstRatePercent: number | null
   }>
   brands: Array<{ id: string; name: string }>
-  outlets: Array<{ id: string; name: string; brandId: string; brandName: string; address: string; type: string; timezone: string }>
+  // issue #191: each outlet's real switches (outlet_capabilities - the ones
+  // guest QR, kiosk and menu photos read). The owner sets them; ops reads them.
+  outlets: Array<{
+    id: string
+    name: string
+    brandId: string
+    brandName: string
+    address: string
+    type: string
+    timezone: string
+    capabilities: Array<{ key: string; enabled: boolean }>
+  }>
   rolesCount: number
   ownerInvite: InviteView | null
-  capabilities: Array<{ key: CapabilityKey; enabled: boolean }>
 }
 
 interface Cursor {
@@ -219,8 +226,11 @@ export class TenantDirectoryService {
         include: {
           taxRegistrations: true,
           brands: { orderBy: { createdAt: 'asc' } },
-          outlets: { where: { deletedAt: null }, include: { brand: { select: { name: true } } }, orderBy: { createdAt: 'asc' } },
-          capabilities: true,
+          outlets: {
+            where: { deletedAt: null },
+            include: { brand: { select: { name: true } }, capabilities: { select: { key: true, enabled: true }, orderBy: { key: 'asc' } } },
+            orderBy: { createdAt: 'asc' },
+          },
           ownerInvites: { orderBy: { createdAt: 'desc' }, take: 1 },
           _count: { select: { roles: true } },
         },
@@ -229,7 +239,6 @@ export class TenantDirectoryService {
     })
     if (!result) throw new NotFoundException({ code: 'not_found', message: 'No such tenant' })
 
-    const overrides = new Map(result.capabilities.map((c) => [c.key, c.enabled]))
     const invite = result.ownerInvites[0]
 
     return {
@@ -267,6 +276,7 @@ export class TenantDirectoryService {
         address: o.address,
         type: o.type,
         timezone: o.timezone,
+        capabilities: o.capabilities,
       })),
       rolesCount: result._count.roles,
       ownerInvite: invite
@@ -279,22 +289,26 @@ export class TenantDirectoryService {
             createdAt: invite.createdAt.toISOString(),
           }
         : null,
-      capabilities: CAPABILITY_KEYS.map((key) => ({ key, enabled: overrides.get(key) ?? CAPABILITY_DEFAULTS[key] })),
     }
   }
 
   async kpi(key: string): Promise<{ key: KpiKey; value: number }> {
     if (!(KPI_KEYS as readonly string[]).includes(key)) badRequest(`key must be one of: ${KPI_KEYS.join(', ')}`)
     const kpiKey = key as KpiKey
-    // Device and DLQ counts read 0 until their fleet stories add the data.
-    if (kpiKey === 'devices_online' || kpiKey === 'open_dlq') return { key: kpiKey, value: 0 }
-
     const plane = this.registry.planeFor(this.registry.homeRegion())
     const value = await plane.$transaction(async (tx) => {
       await setOperatorContext(tx)
-      return kpiKey === 'active_tenants'
-        ? tx.tenant.count({ where: { status: 'active', deletedAt: null } })
-        : tx.outlet.count({ where: { deletedAt: null, tenant: { deletedAt: null } } })
+      switch (kpiKey) {
+        case 'active_tenants':
+          return tx.tenant.count({ where: { status: 'active', deletedAt: null } })
+        case 'outlets':
+          return tx.outlet.count({ where: { deletedAt: null, tenant: { deletedAt: null } } })
+        // issue #189: online = heard from within sync health's lagging threshold.
+        case 'devices_online':
+          return tx.device.count({ where: { status: 'active', lastContactAt: { gte: new Date(Date.now() - LAGGING_THRESHOLD_SECONDS * 1000) } } })
+        case 'open_dlq':
+          return tx.syncDeadLetter.count({ where: { resolvedAt: null } })
+      }
     })
     return { key: kpiKey, value }
   }
@@ -317,26 +331,6 @@ export class TenantDirectoryService {
     return { tenant: updated }
   }
 
-  async toggleCapability(
-    operator: OpsPrincipal,
-    id: string,
-    key: string,
-    dto: ToggleCapabilityDto,
-  ): Promise<{ capability: { key: CapabilityKey; enabled: boolean } }> {
-    if (!(CAPABILITY_KEYS as readonly string[]).includes(key)) {
-      badRequest(`key must be one of: ${CAPABILITY_KEYS.join(', ')}`)
-    }
-    const capKey = key as CapabilityKey
-    const action = `tenant.capability.${capKey}.${dto.enabled ? 'enabled' : 'disabled'}`
-    await this.mutate(operator, id, action, dto.reason, async (tx) => {
-      await tx.tenantCapability.upsert({
-        where: { tenantId_key: { tenantId: id, key: capKey } },
-        create: { tenantId: id, key: capKey, enabled: dto.enabled },
-        update: { enabled: dto.enabled },
-      })
-    })
-    return { capability: { key: capKey, enabled: dto.enabled } }
-  }
 
   async updateBranding(
     operator: OpsPrincipal,

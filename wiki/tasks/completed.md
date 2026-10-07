@@ -1,5 +1,17 @@
 # Completed
 
+- **2026-10-08** - Owner invite details (issue #193). `POST /admin/v1/auth/invite-details { token }` returns `{ restaurantName, email, firstName }` for an unused, unexpired invite. It uses the same errors as accept and consumes nothing.
+- **2026-10-08** - One capability list (issue #191):
+  - `GET /ops/v1/tenants/:id` returns `outlets[].capabilities`, the real `outlet_capabilities` switches that guest QR, kiosk and menu photos read.
+  - The tenant-level toggle (`PUT …/capabilities/:key`, `CAPABILITY_KEYS`, `CAPABILITY_DEFAULTS`, `ToggleCapabilityDto`) is removed. Nothing read `tenant_capabilities`. The table stays, unused.
+- **2026-10-08** - Live status after the first sales (issue #189):
+  - `commitFinalize` flips a `provisioning` tenant to `active` on its first finalised bill, audited as `tenant.went_live` with reason "First sale".
+  - Ops KPI `devices_online` counts active devices heard from within the 1 h lagging threshold. `open_dlq` counts unresolved dead letters.
+  - Owner dashboard `sales` is today's tenders per outlet, on the outlet's local day.
+- **2026-10-08** - Device enrolment returns the restaurant and outlet names (issue #187).
+  - `DevicesService.enrollWithActor` reads `tenantName` and `outletName` in the enrolment transaction and returns them next to `device` (`EnrollResult`).
+  - This lets a till show "Binflow Indiranagar" instead of a UUID, and lets the PIN pad sign it into its own outlet.
+  - `DeviceView` is unchanged.
 - **2026-09-22** - Production readiness prep (issue #175, audit PROD-06..11):
   - `fly.toml` is always on (min 1 machine, auto-stop off) with 1 GB.
   - `enableShutdownHooks()`.

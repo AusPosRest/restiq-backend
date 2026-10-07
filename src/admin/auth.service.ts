@@ -7,6 +7,12 @@ import { createHash, randomBytes } from 'node:crypto'
 import type { Prisma } from '../generated/prisma/client'
 import { AdminPrincipal, AttemptLimiter, AttemptRule, MailService, RegionRegistryService, signAdminToken } from '../platform'
 
+export interface InviteDetails {
+  restaurantName: string
+  email: string
+  firstName: string
+}
+
 export interface AcceptInviteResult {
   token: string
   owner: { id: string; tenantId: string; email: string; firstName: string; lastName: string }
@@ -171,6 +177,22 @@ export class AdminAuthService {
           occurredAt: new Date(),
         },
       })
+    })
+  }
+
+  /** Who an unused, unexpired invite is for (issue #193) - reads only, consumes nothing. */
+  async inviteDetails(token: string): Promise<InviteDetails> {
+    const tokenHash = createHash('sha256').update(token).digest('hex')
+    const plane = this.registry.planeFor(this.registry.homeRegion())
+    return plane.$transaction(async (tx) => {
+      await setInviteAcceptContext(tx)
+      const invite = await tx.ownerInvite.findUnique({ where: { tokenHash } })
+      if (!invite) throw new BadRequestException({ code: 'invite_invalid', message: 'This invite link is not valid' })
+      if (invite.usedAt) throw new ConflictException({ code: 'invite_already_used', message: 'This invite has already been used' })
+      if (invite.expiresAt.getTime() <= Date.now()) throw new BadRequestException({ code: 'invite_expired', message: 'This invite has expired' })
+      await tx.$executeRaw`SELECT set_config('app.tenant_id', ${invite.tenantId}, true)`
+      const tenant = await tx.tenant.findUnique({ where: { id: invite.tenantId }, select: { name: true } })
+      return { restaurantName: tenant?.name ?? '', email: invite.email, firstName: invite.firstName }
     })
   }
 

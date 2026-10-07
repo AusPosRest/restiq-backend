@@ -149,6 +149,30 @@ describe('/admin/v1/auth/login (e2e)', () => {
     await prisma.$disconnect()
   })
 
+  it('describes an unused invite (restaurant + email) without consuming it, and refuses a used one (issue #193)', async () => {
+    const token = randomBytes(32).toString('hex')
+    await prisma.ownerInvite.create({
+      data: {
+        tenantId: tenantAId,
+        email: 'ravi@details-test.example',
+        firstName: 'Ravi',
+        lastName: 'Kumar',
+        tokenHash: createHash('sha256').update(token).digest('hex'),
+        expiresAt: new Date(Date.now() + 60 * 60 * 1000),
+      },
+    })
+    const details = await request(httpServer).post('/admin/v1/auth/invite-details').send({ token })
+    expect(details.status).toBe(200)
+    expect(details.body).toEqual({ restaurantName: 'Login Test Co A', email: 'ravi@details-test.example', firstName: 'Ravi' })
+    // Reading it twice is fine - nothing was consumed.
+    expect((await request(httpServer).post('/admin/v1/auth/invite-details').send({ token })).status).toBe(200)
+
+    expect((await request(httpServer).post('/admin/v1/auth/accept-invite').send({ token, password: PASSWORD })).status).toBe(200)
+    const used = await request(httpServer).post('/admin/v1/auth/invite-details').send({ token })
+    expect(used.status).toBe(409)
+    expect((await request(httpServer).post('/admin/v1/auth/invite-details').send({ token: 'nope' })).status).toBe(400)
+  })
+
   it('logs in and the returned token authorizes only this owner\'s tenant', async () => {
     const res = await request(httpServer).post('/admin/v1/auth/login').send({ email: ownerAEmail, password: PASSWORD })
     expect(res.status).toBe(200)

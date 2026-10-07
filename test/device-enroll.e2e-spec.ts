@@ -181,6 +181,8 @@ describe('/device/v1/enroll (e2e)', () => {
     expect(res.status).toBe(201)
     const body = deviceOf(res)
     expect(body).toMatchObject({ tenantId, outletId, type: 'pos', role: 'terminal', status: 'active', label: 'Kitchen Terminal' })
+    // issue #187: the names ride along so the device never shows raw ids.
+    expect(res.body).toMatchObject({ tenantName: 'Spice Route Hospitality', outletName: 'Indiranagar' })
 
     const deviceRow = await prisma.device.findUnique({ where: { id: body.id } })
     expect(deviceRow?.status).toBe('active')

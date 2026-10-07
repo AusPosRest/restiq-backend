@@ -253,6 +253,27 @@ describe('/admin/v1/dashboard (e2e)', () => {
     }
   })
 
+  it('reports today\'s takings per outlet from finalised bills, and nothing for an outlet with no sales today (issue #189)', async () => {
+    const { tenantId, token } = await createOwner(prisma)
+    const busy = await createOutlet(prisma, tenantId, 'Indiranagar')
+    const quiet = await createOutlet(prisma, tenantId, 'Koramangala')
+    const sell = async (outletId: string, amountMinor: number, createdAt: Date) => {
+      const order = await prisma.order.create({ data: { tenantId, outletId, status: 'closed' } })
+      const bill = await prisma.bill.create({
+        data: { tenantId, outletId, orderId: order.id, subtotalMinor: BigInt(amountMinor), taxMinor: 0n, status: 'finalized', finalizedAt: createdAt },
+      })
+      await prisma.tender.create({ data: { tenantId, billId: bill.id, method: 'cash', amountMinor: BigInt(amountMinor), createdAt } })
+    }
+    await sell(busy, 105630, new Date())
+    await sell(busy, 26145, new Date())
+    await sell(busy, 99900, new Date(Date.now() - 3 * 24 * 60 * 60 * 1000)) // not today
+
+    const body = (await authed(request(httpServer).get('/admin/v1/dashboard'), token)).body as DashboardBody
+    const byId = new Map(body.outlets.map((outlet) => [outlet.outletId, outlet]))
+    expect(byId.get(busy)?.sales).toMatchObject({ hasData: true, amountMinor: 131775, currency: 'INR' })
+    expect(byId.get(quiet)?.sales).toMatchObject({ hasData: false, amountMinor: 0 })
+  })
+
   it('returns an honest zero-state dashboard when the tenant has no outlets yet', async () => {
     const { token } = await createOwner(prisma)
     const res = await authed(request(httpServer).get('/admin/v1/dashboard'), token)

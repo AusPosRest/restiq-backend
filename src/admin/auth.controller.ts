@@ -1,13 +1,21 @@
 import { Body, Controller, HttpCode, Post } from '@nestjs/common'
 import { ClientIp, Public } from '../platform'
-import { AcceptInviteDto } from './accept-invite.dto'
-import { AcceptInviteResult, AdminAuthService, OwnerSessionResult } from './auth.service'
+import { AcceptInviteDto, InviteDetailsDto } from './accept-invite.dto'
+import { AcceptInviteResult, AdminAuthService, InviteDetails, OwnerSessionResult } from './auth.service'
 import { LoginDto } from './login.dto'
 import { ForgotPasswordDto, ResetPasswordDto } from './password-reset.dto'
 
 @Controller('admin/v1/auth')
 export class AdminAuthController {
   constructor(private readonly auth: AdminAuthService) {}
+
+  // issue #193: who the invite is for. POST so the token never sits in a URL or access log.
+  @Public()
+  @Post('invite-details')
+  @HttpCode(200)
+  inviteDetails(@Body() dto: InviteDetailsDto): Promise<InviteDetails> {
+    return this.auth.inviteDetails(dto.token)
+  }
 
   @Public()
   @Post('accept-invite')
