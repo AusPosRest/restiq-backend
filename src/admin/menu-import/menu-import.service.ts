@@ -89,7 +89,7 @@ async function findDuplicates(
   items: DraftItem[],
   categoriesByName: Map<string, { id: string }>,
 ): Promise<DraftDuplicate[]> {
-  const existing = await tx.menuItem.findMany({ where: { tenantId }, select: { categoryId: true, name: true } })
+  const existing = await tx.menuItem.findMany({ where: { tenantId, archivedAt: null }, select: { categoryId: true, name: true } })
   const onMenu = new Set(existing.map((item) => `${item.categoryId}|${item.name.toLowerCase()}`))
   const seen = new Set<string>()
   const duplicates: DraftDuplicate[] = []

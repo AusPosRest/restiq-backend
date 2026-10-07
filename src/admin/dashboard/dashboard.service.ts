@@ -82,7 +82,7 @@ export class DashboardService {
       const [outlets, staffCount, menuItemCount, devicesByOutlet, wentLive] = await Promise.all([
         tx.outlet.findMany({ where: { tenantId: owner.tenantId, deletedAt: null }, orderBy: { createdAt: 'asc' } }),
         tx.staffUser.count({ where: { tenantId: owner.tenantId } }),
-        tx.menuItem.count({ where: { tenantId: owner.tenantId, available: true } }),
+        tx.menuItem.count({ where: { tenantId: owner.tenantId, available: true, archivedAt: null } }),
         tx.device.groupBy({
           by: ['outletId'],
           where: { tenantId: owner.tenantId, status: 'active', outletId: { not: null } },

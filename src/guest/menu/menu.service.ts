@@ -110,7 +110,7 @@ export class GuestMenuService {
       await setTenantContext(tx, guest.tenantId)
       const categories = await tx.menuCategory.findMany({
         where: { tenantId: guest.tenantId },
-        include: { items: { include: ITEM_INCLUDE, orderBy: { createdAt: 'asc' } } },
+        include: { items: { where: { archivedAt: null }, include: ITEM_INCLUDE, orderBy: { createdAt: 'asc' } } },
         orderBy: { sortOrder: 'asc' },
       })
 
@@ -132,7 +132,7 @@ export class GuestMenuService {
     return plane.$transaction(async (tx) => {
       await setTenantContext(tx, guest.tenantId)
       const item = await tx.menuItem.findUnique({ where: { id: itemId }, include: ITEM_INCLUDE })
-      if (!item || item.tenantId !== guest.tenantId) {
+      if (!item || item.tenantId !== guest.tenantId || item.archivedAt) {
         throw new NotFoundException({ code: 'not_found', message: 'No such menu item' })
       }
       return toItemView(tx, guest.tenantId, guest.outletId, item)
