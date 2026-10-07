@@ -749,6 +749,8 @@ model StaffUser {
   pinHash        String?   @map("pin_hash")
   pinIssuedAt    DateTime? @map("pin_issued_at") @db.Timestamptz(6)
   pinRevokedAt   DateTime? @map("pin_revoked_at") @db.Timestamptz(6)
+  // #197: the outlets this person may sign in at; empty = every outlet.
+  outletIds      String[]  @default([]) @map("outlet_ids") @db.Uuid
   sessionVersion Int       @default(0) @map("session_version")
   createdAt      DateTime  @default(now()) @map("created_at") @db.Timestamptz(6)
   updatedAt      DateTime  @updatedAt @map("updated_at") @db.Timestamptz(6)

@@ -1,5 +1,10 @@
 # Completed
 
+- **2026-10-08** - Staff assigned to outlets (issue #197):
+  - `staff_users.outlet_ids` (uuid[]). Empty means every outlet, so existing staff keep working.
+  - The owner staff API (`POST`/`PATCH /admin/v1/staff`) takes `outletIds` (this tenant's live outlets only, else 400) and returns them. Changing them ends the person's open POS sessions.
+  - POS PIN login offers only the assigned outlets and signs straight in when there is one. Picking another outlet is refused with 403 `outlet_not_assigned`.
+  - On an enrolled till (`deviceId`), sign-in goes straight to that till's outlet, or 403 `outlet_not_assigned` if the person doesn't work there.
 - **2026-10-08** - Owner invite details (issue #193). `POST /admin/v1/auth/invite-details { token }` returns `{ restaurantName, email, firstName }` for an unused, unexpired invite. It uses the same errors as accept and consumes nothing.
 - **2026-10-08** - One capability list (issue #191):
   - `GET /ops/v1/tenants/:id` returns `outlets[].capabilities`, the real `outlet_capabilities` switches that guest QR, kiosk and menu photos read.
