@@ -10,6 +10,7 @@ export { DEVICE_TYPES } from './devices/devices.dtos'
 export type { DeviceTypeValue } from './devices/devices.dtos'
 // #132: one agreements implementation, published from /ops and signed from /admin.
 export { AgreementsService } from './agreements/agreements.service'
+export { pdfResponse } from './agreements/agreements.controller'
 export { SignAgreementDto } from './agreements/agreements.dtos'
 export type { AgreementSignatureView, OwnerAgreementView } from './agreements/agreements.dtos'
 // #153: one product-directory implementation, curated from /ops and imported from /admin.

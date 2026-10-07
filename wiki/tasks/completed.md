@@ -908,3 +908,11 @@
   `table_has_active_order`. Tests: `test/floor-plan.e2e-spec.ts`,
   `test/tenant-onboarding.e2e-spec.ts`, `test/pos-counter-orders.e2e-spec.ts`,
   `test/guest-order-placement.e2e-spec.ts`.
+- **2026-10-07 - Agreements are an uploaded PDF (#179).** `POST /ops/v1/agreements`
+  is multipart (title, reason, PDF up to 5 MB, checked by its `%PDF-` bytes) and
+  the file is stored with its SHA-256; `GET /ops/v1/agreements/:id/file` and
+  `GET /admin/v1/agreement/:versionId/file` stream it inline; the text `body` is
+  gone from the API. Signing sends the `fileSha256` the owner was shown (409
+  `file_changed` otherwise) and the evidence hash covers it; versions published
+  as text before this have no file and answer 409 `no_file`. Migration
+  `20261007100000_agreement_pdf`. Tests: `test/agreements.e2e-spec.ts`.

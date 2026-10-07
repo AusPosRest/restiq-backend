@@ -276,7 +276,7 @@ describe('row-level security on region-plane tables (e2e)', () => {
 
   it('agreement_signatures: fail closed under the wrong tenant, visible under the correct one and to operators (issue #132)', async () => {
     const version = await admin.agreementVersion.create({
-      data: { version: 9_999, title: 'RLS Probe Terms', body: 'x', bodySha256: 'x', publishedBy: 'rls@probe.example' },
+      data: { version: 9_999, title: 'RLS Probe Terms', body: 'x', fileSha256: 'x', publishedBy: 'rls@probe.example' },
     })
     await admin.agreementSignature.create({
       data: { tenantId, agreementVersionId: version.id, signerOwnerId: randomUUID(), signerName: 'Probe Owner', signerEmail: 'rls@probe.example', evidenceSha256: 'x', signedAt: new Date() },
