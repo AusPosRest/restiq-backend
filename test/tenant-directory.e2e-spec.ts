@@ -451,6 +451,24 @@ describe('/ops/v1/tenants directory (e2e)', () => {
       expect(((await authed(request(httpServer).get('/ops/v1/dashboard/kpis/open_dlq'))).body as { value: number }).value).toBe(0)
     })
 
+    it('counts devices heard from within the hour and unresolved dead letters (issue #189)', async () => {
+      const tenant = await prisma.tenant.findFirstOrThrow({ where: { deletedAt: null } })
+      const outlet = await prisma.outlet.findFirstOrThrow({ where: { tenantId: tenant.id } })
+      const device = (lastContactAt: Date | null) =>
+        prisma.device.create({ data: { tenantId: tenant.id, outletId: outlet.id, label: 'Till', type: 'pos', hardwareKeyFingerprint: `fp-${Math.random()}`, enrolledAt: new Date(), lastContactAt } })
+      const fresh = await device(new Date())
+      await device(new Date(Date.now() - 2 * 60 * 60 * 1000))
+      await device(null)
+      await prisma.syncDeadLetter.create({ data: { tenantId: tenant.id, deviceId: fresh.id, opId: uuidv7(), reasonCode: 'stale', reasonText: 'x' } })
+      await prisma.syncDeadLetter.create({ data: { tenantId: tenant.id, deviceId: fresh.id, opId: uuidv7(), reasonCode: 'stale', reasonText: 'x', resolvedAt: new Date() } })
+
+      expect(((await authed(request(httpServer).get('/ops/v1/dashboard/kpis/devices_online'))).body as { value: number }).value).toBe(1)
+      expect(((await authed(request(httpServer).get('/ops/v1/dashboard/kpis/open_dlq'))).body as { value: number }).value).toBe(1)
+
+      await prisma.syncDeadLetter.deleteMany({ where: { deviceId: fresh.id } })
+      await prisma.device.deleteMany({ where: { label: 'Till', tenantId: tenant.id } })
+    })
+
     it('rejects an unknown KPI key', async () => {
       expect((await authed(request(httpServer).get('/ops/v1/dashboard/kpis/mrr'))).status).toBe(400)
     })
