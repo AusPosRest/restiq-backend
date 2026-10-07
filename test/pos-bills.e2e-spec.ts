@@ -341,6 +341,33 @@ describe('/pos/v1 bill and settle (e2e)', () => {
       expect(rows).toHaveLength(1)
     })
 
+    it('a repeat POST after the order changed returns the recomputed totals, not the ones from when the bill was first made', async () => {
+      const tenantId = await createTenant(prisma)
+      const outletId = await createOutlet(prisma, tenantId)
+      const tableId = await createTable(prisma, tenantId, outletId)
+      const owner = await createStaff(prisma, tenantId, outletId, 'Asha')
+      const itemId = await createItemWithPrice(prisma, tenantId, 10000)
+      const opened = await authed(request(httpServer).post(`/pos/v1/outlets/${outletId}/tables/${tableId}/order`), owner.token).send()
+      const orderId = (opened.body as OrderBody).id
+      await authed(request(httpServer).post(`/pos/v1/orders/${orderId}/lines`), owner.token).send({ itemId, quantity: 2 }).expect(201)
+
+      const first = (await authed(request(httpServer).post(`/pos/v1/orders/${orderId}/bill`), owner.token).send()).body as BillBody
+      // The order is still open, so the cashier can keep editing it after the bill exists.
+      const added = await authed(request(httpServer).post(`/pos/v1/orders/${orderId}/lines`), owner.token).send({ itemId, quantity: 3 }).expect(201)
+      const addedLineId = (added.body as { lines: Array<{ id: string }> }).lines.at(-1)!.id
+      await authed(request(httpServer).delete(`/pos/v1/orders/${orderId}/lines/${addedLineId}`), owner.token).expect(200)
+      await authed(request(httpServer).post(`/pos/v1/orders/${orderId}/lines`), owner.token).send({ itemId, quantity: 1 }).expect(201)
+      const orderNow = await authed(request(httpServer).get(`/pos/v1/orders/${orderId}`), owner.token)
+      const stepLine = (orderNow.body as { lines: Array<{ id: string }> }).lines[0].id
+      await authed(request(httpServer).patch(`/pos/v1/orders/${orderId}/lines/${stepLine}`), owner.token).send({ quantity: 5 }).expect(200)
+
+      const again = await authed(request(httpServer).post(`/pos/v1/orders/${orderId}/bill`), owner.token).send()
+      expect(again.status).toBe(200)
+      const live = await authed(request(httpServer).get(`/pos/v1/bills/${first.id}`), owner.token)
+      expect((again.body as BillBody).subtotalMinor).toBe((live.body as BillBody).subtotalMinor)
+      expect((again.body as BillBody).subtotalMinor).toBe(60000)
+    })
+
     it('is safe under concurrent POST for the same order: one created, one returned from the existing row (same id)', async () => {
       const tenantId = await createTenant(prisma)
       const outletId = await createOutlet(prisma, tenantId)
