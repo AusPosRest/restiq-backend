@@ -100,7 +100,7 @@ export class SubscriptionsService {
     const invoices = await plane.$transaction(async (tx) => {
       await setOperatorContext(tx)
       await this.requireTenant(tx, tenantId)
-      return tx.invoice.findMany({ where: { tenantId }, orderBy: { createdAt: 'desc' } })
+      return tx.invoice.findMany({ where: { tenantId }, orderBy: [{ createdAt: 'desc' }, { period: 'desc' }] })
     })
     return {
       invoices: invoices.map((invoice) => ({

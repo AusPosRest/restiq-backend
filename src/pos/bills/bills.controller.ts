@@ -23,6 +23,7 @@ export class PosBillsController {
 
   // issue #158: today's payments at the outlet, for the POS Payments screen.
   @Get('outlets/:outletId/payments')
+  @AnyStaff() // ponytail: same reach as before the permission catalogue; narrow to a permission key if waiters shouldn't see tender totals
   listPayments(@CurrentStaff() staff: PosPrincipal, @Param('outletId', ParseUUIDPipe) outletId: string): Promise<PaymentHistoryView> {
     return this.bills.listPaymentsToday(staff, outletId)
   }

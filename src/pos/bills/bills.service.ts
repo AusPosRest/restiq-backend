@@ -152,7 +152,7 @@ export class BillsService {
       const since = new Date(now.getTime() - 48 * 60 * 60 * 1000)
       const rows = await tx.tender.findMany({
         where: { tenantId: staff.tenantId, createdAt: { gte: since }, bill: { outletId, status: 'finalized' } },
-        orderBy: { createdAt: 'desc' },
+        orderBy: [{ createdAt: 'desc' }, { id: 'desc' }],
         include: {
           bill: {
             select: {
