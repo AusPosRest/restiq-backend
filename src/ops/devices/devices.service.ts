@@ -30,6 +30,12 @@ export interface DeviceView {
   pairedPosId: string | null
 }
 
+export interface EnrollResult {
+  device: DeviceView
+  tenantName: string | null
+  outletName: string | null
+}
+
 // Who to hold accountable for the enroll() audit_events row - an ops
 // operator, or (src/device/enroll) a device that enrolled itself with no
 // operator session at all. actorId is nullable on audit_events for exactly
@@ -253,7 +259,7 @@ export class DevicesService {
   // one-time-use/expiry semantics). `actor` carries whoever is accountable
   // for the audit_events row: an ops operator for the existing route, or a
   // device actor (null actorId, a synthetic actorEmail) for the public one.
-  async enrollWithActor(actor: EnrollActor, dto: EnrollDeviceDto): Promise<{ device: DeviceView }> {
+  async enrollWithActor(actor: EnrollActor, dto: EnrollDeviceDto): Promise<EnrollResult> {
     const codeHash = hashCode(normalizeCode(dto.code))
     const reason = actor.reason ?? DEFAULT_ENROLL_REASON
     const plane = this.registry.planeFor(this.registry.homeRegion())
@@ -319,7 +325,12 @@ export class DevicesService {
         })
       }
 
-      return { device: toDeviceView(device) }
+      // issue #187: the device shows these instead of raw ids (its card, the POS PIN pad).
+      const [tenant, outlet] = await Promise.all([
+        tx.tenant.findUnique({ where: { id: record.tenantId }, select: { name: true } }),
+        tx.outlet.findUnique({ where: { id: record.outletId }, select: { name: true } }),
+      ])
+      return { device: toDeviceView(device), tenantName: tenant?.name ?? null, outletName: outlet?.name ?? null }
     })
   }
 
