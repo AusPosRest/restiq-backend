@@ -48,8 +48,10 @@ export default tseslint.config(
               // core - qr-self-order/CAP-5 (guest/bills) imports through it
               // to reuse the real Bill/Tender money path (AD-18) without a
               // NestJS module cycle (PosModule already imports GuestModule).
-              group: ['**/pos/*', '!**/pos/index', '!**/pos/bills'],
-              message: 'Import the pos module through its barrel (src/pos), or pos/bills through its own scoped barrel (src/pos/bills)',
+              // pos/payments has the same kind of scoped barrel for
+              // confirmIntent, which the kiosk card payment reuses (issue #144).
+              group: ['**/pos/*', '!**/pos/index', '!**/pos/bills', '!**/pos/payments'],
+              message: 'Import the pos module through its barrel (src/pos), or pos/bills / pos/payments through their scoped barrels',
             },
             {
               group: ['**/guest/*', '!**/guest/index'],
