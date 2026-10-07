@@ -65,6 +65,12 @@
   `tenders.reference` (migration `20260915120000_external_tender`; CHECKs: external needs no
   intent and must carry a reference). `TenderDto.reference` required for external (1-64 chars,
   trimmed); `TenderView.reference` on bills and invoices. e2e in `pos-bills.e2e-spec.ts`.
+- **2026-09-15** - Menu photos setting, issue #148 (backend half of restiq-web#230):
+  `GET /pos/v1/menu` items carry `photoUrl`; new outlet capability key `menu_photos`
+  (free-text key, no migration, **absent row = on**). When an owner turns it off, POS
+  and guest menu reads (list + item) return `photoUrl: null`. New cases in
+  `pos-menu.e2e-spec.ts` and `guest-menu.e2e-spec.ts`; typecheck/lint clean.
+
 - **2026-09-12** - Kiosk ordering, issue #138 (backend half of restiq-web#214):
   `table_sessions.table_id` nullable, `OrderSource.kiosk`, nullable guest-principal
   `tableId`; `POST /guest/v1/kiosk/sessions { outletId, deviceId }` starts a table-less
