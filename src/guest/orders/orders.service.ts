@@ -18,11 +18,11 @@
 // piece of pos/orders' machinery genuinely shared here is the kitchen fire
 // hook itself (src/kitchen, AD-16), which has no such dependency and is
 // injected the same way pos/orders does.
-import { BadRequestException, GoneException, Injectable, NotFoundException } from '@nestjs/common'
+import { BadRequestException, ConflictException, GoneException, Injectable, NotFoundException } from '@nestjs/common'
 import { resolveComboSelection, resolveCurrentPrice } from '../../admin'
 import type { Order, Prisma, PriceChannel, TableSession, Ticket } from '../../generated/prisma/client'
 import { KitchenTicketsService } from '../../kitchen'
-import { GuestPrincipal, RegionRegistryService, uuidv7 } from '../../platform'
+import { GuestPrincipal, RegionRegistryService, reserveTokenNumber } from '../../platform'
 import { isSessionInactive } from '../sessions/sessions.service'
 import { setTenantContext } from '../tenant-context'
 import { GuestOrderStatusView, GuestOrderStep, GuestOrderStepView, GuestSessionOrdersView, PlacedOrderLineModifierView, PlacedOrderLineView, PlacedOrderView } from './orders.dtos'
@@ -156,15 +156,12 @@ export class GuestOrdersService {
       // order - same gapless token reservation as pos/orders' createCounterOrder,
       // in the same transaction, so a failed placement never burns a number.
       const kiosk = session.tableId === null
-      const tokenNumber = kiosk
-        ? (
-            await tx.tokenNumberCounter.upsert({
-              where: { outletId: guest.outletId },
-              create: { id: uuidv7(), tenantId: guest.tenantId, outletId: guest.outletId, lastNumber: 1 },
-              update: { lastNumber: { increment: 1 } },
-            })
-          ).lastNumber
-        : null
+      const tokenNumber = kiosk ? await reserveTokenNumber(tx, guest.tenantId, guest.outletId) : null
+      // One live order per table (orders_one_active_per_table): say so with a 409 instead of letting the unique index surface as a 500.
+      if (session.tableId) {
+        const live = await tx.order.findFirst({ where: { tenantId: guest.tenantId, tableId: session.tableId, status: { not: 'closed' } }, select: { id: true } })
+        if (live) throw new ConflictException({ code: 'table_has_active_order', message: 'This table already has an order in progress - ask your server to add to it' })
+      }
       const order = await tx.order.create({
         data: {
           tenantId: guest.tenantId,

@@ -232,6 +232,22 @@ describe('/pos/v1 QSR counter and token mode (e2e)', () => {
       expect((second.body as OrderBody).tokenNumber).toBe(2)
     })
 
+    it('moves past token numbers already in use when the counter has fallen behind them (F-1)', async () => {
+      const tenantId = await createTenant(prisma)
+      const outletId = await createOutlet(prisma, tenantId)
+      const staff = await createStaff(prisma, tenantId, outletId)
+      const first = await authed(request(httpServer).post(`/pos/v1/outlets/${outletId}/counter-orders`), staff.token).send()
+      expect((first.body as OrderBody).tokenNumber).toBe(1)
+      // Tokens 2..5 exist (e.g. seeded or imported orders) but the counter still says 1.
+      for (const tokenNumber of [2, 5]) {
+        await prisma.order.create({ data: { tenantId, outletId, tableId: null, ownerId: staff.id, status: 'closed', tokenNumber } })
+      }
+
+      const next = await authed(request(httpServer).post(`/pos/v1/outlets/${outletId}/counter-orders`), staff.token).send()
+      expect(next.status).toBe(201)
+      expect((next.body as OrderBody).tokenNumber).toBe(6)
+    })
+
     it('rejects an outlet from a different tenant', async () => {
       const tenantId = await createTenant(prisma)
       const outletId = await createOutlet(prisma, tenantId)

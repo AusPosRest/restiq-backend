@@ -341,6 +341,24 @@ describe('/guest/v1/orders order placement into the real pipeline (e2e)', () => 
       expect(await prisma.order.count()).toBe(0)
     })
 
+    it('409s with table_has_active_order when the table already has a live order (F-2)', async () => {
+      const tenantId = await createTenant(prisma)
+      const outletId = await createOutlet(prisma, tenantId)
+      const tableId = await createTable(prisma, tenantId, outletId)
+      await enableQrOrdering(prisma, tenantId, outletId)
+      const item = await createItemWithPrice(prisma, tenantId, 19000)
+      const { tokenA } = await startAndJoin(outletId, tableId)
+      await authed(request(httpServer).post('/guest/v1/cart/lines'), tokenA).send({ itemId: item, quantity: 1 })
+      // A server opened the table first.
+      await prisma.order.create({ data: { tenantId, outletId, tableId, ownerId: null, status: 'open' } })
+
+      const res = await authed(request(httpServer).post('/guest/v1/orders'), tokenA).send({})
+      expect(res.status).toBe(409)
+      expect((res.body as { error: { code: string } }).error.code).toBe('table_has_active_order')
+      // The cart is kept so the guests can still order once the server adds to the live order.
+      expect(await prisma.cartLine.count()).toBe(1)
+    })
+
     it('410s placement once the session is closed', async () => {
       const tenantId = await createTenant(prisma)
       const outletId = await createOutlet(prisma, tenantId)

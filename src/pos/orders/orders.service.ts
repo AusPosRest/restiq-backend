@@ -7,7 +7,7 @@
 import { BadRequestException, ConflictException, ForbiddenException, Injectable, NotFoundException } from '@nestjs/common'
 import type { Order, Prisma } from '../../generated/prisma/client'
 import { KitchenTicketsService } from '../../kitchen'
-import { PosPrincipal, RegionRegistryService, uuidv7 } from '../../platform'
+import { PosPrincipal, RegionRegistryService, reserveTokenNumber, uuidv7 } from '../../platform'
 import { OrderLineView, OrderView, TableMapEntry, TransferOrderDto, UpdateOrderStatusDto } from './orders.dtos'
 
 export type Tx = Prisma.TransactionClient
@@ -244,14 +244,10 @@ export class OrdersService {
       // failure never touches the counter, and if anything below still
       // fails, the whole transaction (counter increment included) rolls
       // back with it. Either way, no gap.
-      const counter = await tx.tokenNumberCounter.upsert({
-        where: { outletId },
-        create: { id: uuidv7(), tenantId: staff.tenantId, outletId, lastNumber: 1 },
-        update: { lastNumber: { increment: 1 } },
-      })
+      const tokenNumber = await reserveTokenNumber(tx, staff.tenantId, outletId)
 
       const created = await tx.order.create({
-        data: { tenantId: staff.tenantId, outletId, tableId: null, ownerId: staff.id, status: 'open', tokenNumber: counter.lastNumber },
+        data: { tenantId: staff.tenantId, outletId, tableId: null, ownerId: staff.id, status: 'open', tokenNumber },
       })
       return buildOrderView(tx, created)
     })
