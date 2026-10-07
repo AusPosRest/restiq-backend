@@ -41,7 +41,8 @@ async function wipe(prisma: PrismaClient): Promise<void> {
   await prisma.enrolmentCode.deleteMany()
   await prisma.menuImportDraft.deleteMany()
   await prisma.itemOutletOverride.deleteMany()
-  await prisma.comboComponent.deleteMany()
+  await prisma.comboSlotOption.deleteMany()
+  await prisma.comboSlot.deleteMany()
   await prisma.combo.deleteMany()
   await prisma.itemAllergen.deleteMany()
   await prisma.allergen.deleteMany()
@@ -129,7 +130,7 @@ async function createItemWithPrice(prisma: PrismaClient, tenantId: string, price
 async function createStaffToken(prisma: PrismaClient, tenantId: string, outletId: string): Promise<string> {
   const role = await prisma.role.create({ data: { tenantId, name: `Cashier-${uuidv7()}`, isSystem: false } })
   const staff = await prisma.staffUser.create({ data: { tenantId, roleId: role.id, name: 'Cashier' } })
-  return signPosToken({ id: staff.id, tenantId, outletId, name: 'Cashier' })
+  return signPosToken({ sessionVersion: 0, id: staff.id, tenantId, outletId, name: 'Cashier' })
 }
 
 describe('/guest/v1/kiosk kiosk ordering (e2e)', () => {
