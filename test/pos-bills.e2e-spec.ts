@@ -966,7 +966,9 @@ describe('/pos/v1 bill and settle (e2e)', () => {
       expect(body.date).toMatch(/^\d{4}-\d{2}-\d{2}$/)
       expect(body.count).toBe(3)
       expect(body.totalMinor).toBe(42000)
-      expect(body.payments.map((p) => p.method)).toEqual(['external', 'upi_manual', 'cash'])
+      // The two tenders of one bill are written in one transaction, so their order is a tie; newest-first holds across bills.
+      expect(body.payments.map((p) => p.method).slice(0, 2).sort()).toEqual(['external', 'upi_manual'])
+      expect(body.payments[2]?.method).toBe('cash')
       expect(body.payments[2]?.amountMinor).toBe(21000)
       expect(body.payments[2]?.takenBy?.name).toBe('Asha')
       expect(body.payments[2]?.tableLabel).toBe('T1')
