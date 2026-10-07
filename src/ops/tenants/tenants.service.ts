@@ -1,13 +1,29 @@
-import { BadRequestException, ConflictException, Injectable, NotFoundException } from '@nestjs/common'
+import { BadRequestException, ConflictException, Injectable, Logger, NotFoundException } from '@nestjs/common'
 import { createHash, randomBytes } from 'node:crypto'
 import type { Prisma } from '../../generated/prisma/client'
-import { OpsPrincipal, PrismaService, RegionRegistryService, slugify, slugProblem, uuidv7 } from '../../platform'
+import { MailMessage, MailService, OpsPrincipal, PrismaService, RegionRegistryService, slugify, slugProblem, uuidv7, webLink } from '../../platform'
 import { applyStarterSetup } from '../../admin/outlets/starter-setup'
 import { SubmitTenantDto } from './submit.dto'
 
 export const WIZARD_STEP_COUNT = 5
 const DRAFT_STEP_MAX_BYTES = 16_384
 export const OWNER_INVITE_TTL_HOURS = 7 * 24
+
+/** #198: the owner invite email, sent on onboarding and on every regenerated invite. */
+export function ownerInviteEmail(to: string, firstName: string, restaurant: string, token: string): MailMessage {
+  const link = webLink(`/admin/invite/${token}`)
+  const days = OWNER_INVITE_TTL_HOURS / 24
+  return {
+    to,
+    subject: `Set up ${restaurant} on RESTIQ`,
+    text: `Hi ${firstName},\n\n${restaurant} is ready on RESTIQ. Open this link within ${days} days to choose your password and sign in to the owner console:\n${link}\n\nIf you weren't expecting this, ignore this email.`,
+    html: `<p>Hi ${escapeHtml(firstName)},</p><p>${escapeHtml(restaurant)} is ready on RESTIQ.</p><p><a href="${link}">Set up your owner account</a> (the link works for ${days} days).</p><p>If you weren't expecting this, ignore this email.</p>`,
+  }
+}
+
+function escapeHtml(value: string): string {
+  return value.replace(/[&<>"']/g, (c) => `&#${c.charCodeAt(0)};`)
+}
 const DEFAULT_PROVISION_REASON = 'Provisioned via console onboarding wizard'
 
 // Seeded so the owner lands in a working system (FR-2): the six cloneable
@@ -68,9 +84,12 @@ export interface ProvisionResult {
 
 @Injectable()
 export class OpsTenantsService {
+  private readonly logger = new Logger(OpsTenantsService.name)
+
   constructor(
     private readonly prisma: PrismaService,
     private readonly registry: RegionRegistryService,
+    private readonly mail: MailService,
   ) {}
 
   // --- Drafts (control plane): an operator's in-flight wizard, never a tenant.
@@ -239,6 +258,11 @@ export class OpsTenantsService {
       }
       throw error
     }
+
+    // Sent after the commit, in the background: a mail outage must not undo the onboarding.
+    void this.mail
+      .send(ownerInviteEmail(invite.email, dto.ownerInvite.firstName, dto.business.companyName, inviteToken))
+      .catch((error: unknown) => this.logger.error(`Owner invite email failed: ${String(error)}`))
 
     return {
       tenant: { id: tenantId, name: dto.business.companyName, slug, status: 'provisioning' },

@@ -2097,3 +2097,17 @@ model CatalogProduct {
   @@index([currency])
   @@map("catalog_products")
 }
+
+// #198: MAIL_PROVIDER=simulator keeps every outgoing email here for the dev inbox (GET /dev/v1/inbox)
+// instead of sending it. Production refuses any provider but mailjet (production-config.ts).
+model SimulatedMessage {
+  id        String   @id @default(uuid(7)) @db.Uuid
+  to        String
+  subject   String
+  text      String
+  html      String?
+  createdAt DateTime @default(now()) @map("created_at") @db.Timestamptz(6)
+
+  @@index([createdAt])
+  @@map("simulated_messages")
+}

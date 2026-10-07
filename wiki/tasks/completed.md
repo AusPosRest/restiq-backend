@@ -1,5 +1,8 @@
 # Completed
 
+- **2026-10-08** - Mail simulator and owner invite emails (issue #198):
+  - `MAIL_PROVIDER=simulator` stores every outgoing email in `simulated_messages` instead of sending it. `GET /dev/v1/inbox?to=` lists the newest 100 and answers 404 for any other provider. Production still refuses anything but `mailjet`.
+  - Onboarding a tenant and regenerating its owner invite email the invite link to the owner (in the background, after the commit). The ops console still shows the copyable link.
 - **2026-10-08** - Staff assigned to outlets (issue #197):
   - `staff_users.outlet_ids` (uuid[]). Empty means every outlet, so existing staff keep working.
   - The owner staff API (`POST`/`PATCH /admin/v1/staff`) takes `outletIds` (this tenant's live outlets only, else 400) and returns them. Changing them ends the person's open POS sessions.
