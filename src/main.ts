@@ -29,6 +29,9 @@ async function bootstrap(): Promise<void> {
   // restiq-backend#175: on SIGTERM (every Fly deploy/restart) Nest runs its
   // shutdown hooks - in-flight requests finish and the DB pool closes cleanly.
   app.enableShutdownHooks()
+  // Uploaded item photos travel inline as data:image URLs (issue #142, up to
+  // ~280 KB of base64) - above Express's 100 KB JSON default.
+  app.useBodyParser('json', { limit: '512kb' })
   // credentials: the operator's session cookie rides this same path.
   app.enableCors({ origin: webOrigin, credentials: true })
 
