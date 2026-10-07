@@ -60,6 +60,15 @@ export class PosAuthService {
     await this.limiter.refund(rules)
 
     const outlets = await this.listOutlets(tenantId, staff.outletIds)
+
+    // #197: an enrolled till belongs to one outlet - sign in there, and only if this person works there.
+    const tillOutletId = dto.deviceId ? await this.deviceOutletId(tenantId, dto.deviceId) : null
+    if (tillOutletId) {
+      const tillOutlet = outlets.find((outlet) => outlet.id === tillOutletId)
+      if (!tillOutlet) throw new ForbiddenException({ code: 'outlet_not_assigned', message: `${staff.name} isn't set up to work at this outlet` })
+      return this.finalize(staff, tillOutlet)
+    }
+
     if (outlets.length === 0) {
       const message = staff.outletIds.length > 0 ? `None of ${staff.name}'s outlets are open - ask the owner to update their outlets` : 'This tenant has no outlets configured yet'
       throw new ConflictException({ code: 'no_outlets', message })
@@ -116,6 +125,15 @@ export class PosAuthService {
       { key: `pos-pin:ip:${tenantId}:${ip}`, ...IP_RULE },
       { key: `pos-pin:untrusted:${tenantId}`, ...UNTRUSTED_TENANT_RULE },
     ]
+  }
+
+  private async deviceOutletId(tenantId: string, deviceId: string): Promise<string | null> {
+    const plane = this.plane()
+    const device = await plane.$transaction(async (tx) => {
+      await setTenantContext(tx, tenantId)
+      return tx.device.findFirst({ where: { id: deviceId, tenantId, status: 'active', revokedAt: null }, select: { outletId: true } })
+    })
+    return device?.outletId ?? null
   }
 
   private async findStaffByPin(tenantId: string, pin: string): Promise<StaffUser | null> {

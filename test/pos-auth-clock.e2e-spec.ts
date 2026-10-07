@@ -304,6 +304,26 @@ describe('/pos/v1/auth and /pos/v1/clock (e2e)', () => {
       expect((res.body as ErrorBody).error.code).toBe('outlet_not_assigned')
     })
 
+    it('on an enrolled till, signs in at that till\'s outlet - and only if the person works there', async () => {
+      const tenantId = await createTenant(prisma)
+      const outletA = await createOutlet(prisma, tenantId, 'A1')
+      const outletB = await createOutlet(prisma, tenantId, 'A2')
+      await createStaffWithPin(prisma, tenantId, 'Rahul Iyer', '5678')
+      const elsewhere = await createStaffWithPin(prisma, tenantId, 'Meena Das', '4321')
+      await prisma.staffUser.update({ where: { id: elsewhere }, data: { outletIds: [outletB] } })
+      const till = await prisma.device.create({
+        data: { tenantId, outletId: outletA, label: 'Till 1', type: 'pos', hardwareKeyFingerprint: `fp-${uuidv7()}`, enrolledAt: new Date() },
+      })
+
+      const ok = await request(httpServer).post('/pos/v1/auth/login').send({ tenantId, pin: '5678', deviceId: till.id })
+      expect(ok.status).toBe(200)
+      expect((ok.body as AuthenticatedBody).outlet.id).toBe(outletA)
+
+      const refused = await request(httpServer).post('/pos/v1/auth/login').send({ tenantId, pin: '4321', deviceId: till.id })
+      expect(refused.status).toBe(403)
+      expect((refused.body as ErrorBody).error.code).toBe('outlet_not_assigned')
+    })
+
     it('rejects a garbage pendingToken', async () => {
       const res = await request(httpServer)
         .post('/pos/v1/auth/select-outlet')
