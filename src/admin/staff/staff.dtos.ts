@@ -2,7 +2,7 @@
 // comes from the signed-in owner's session (AD-5), same posture as every
 // other admin DTO. roleId is validated against the tenant's seeded roles in
 // the service, not here - the DTO only checks shape.
-import { IsEmail, IsNotEmpty, IsOptional, IsString, IsUUID, MaxLength, MinLength } from 'class-validator'
+import { ArrayMaxSize, IsArray, IsEmail, IsNotEmpty, IsOptional, IsString, IsUUID, MaxLength, MinLength } from 'class-validator'
 
 export class CreateStaffDto {
   @IsString() @MinLength(1) @MaxLength(200)
@@ -13,6 +13,10 @@ export class CreateStaffDto {
 
   @IsUUID()
   roleId!: string
+
+  // #197: outlets this person may sign in at; omitted or empty = every outlet.
+  @IsOptional() @IsArray() @ArrayMaxSize(200) @IsUUID('all', { each: true })
+  outletIds?: string[]
 }
 
 export class UpdateStaffDto {
@@ -21,6 +25,9 @@ export class UpdateStaffDto {
 
   @IsOptional() @IsUUID()
   roleId?: string
+
+  @IsOptional() @IsArray() @ArrayMaxSize(200) @IsUUID('all', { each: true })
+  outletIds?: string[]
 
   // Required only when roleId is present (checked in the service, not here -
   // a plain rename carries no reason). Per SPEC's Constraints: role change is

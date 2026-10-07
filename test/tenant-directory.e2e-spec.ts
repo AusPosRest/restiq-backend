@@ -6,7 +6,7 @@ import { Test } from '@nestjs/testing'
 import * as argon2 from 'argon2'
 import { createHash } from 'node:crypto'
 import request from 'supertest'
-import { afterAll, beforeAll, describe, expect, it } from 'vitest'
+import { afterAll, beforeAll, describe, expect, it, vi } from 'vitest'
 import { AppModule } from '../src/app.module'
 import { createPrismaClient, PrismaClient } from '../src/db/client'
 import { signOpsToken, uuidv7 } from '../src/platform'
@@ -349,6 +349,8 @@ describe('/ops/v1/tenants directory (e2e)', () => {
     })
 
     it('regenerates the owner invite, invalidating the old token', async () => {
+      vi.stubEnv('MAIL_PROVIDER', 'simulator')
+      await prisma.simulatedMessage.deleteMany({ where: { to: 'owner@alpha.example' } })
       const res = await authed(request(httpServer).post(`/ops/v1/tenants/${ids.alpha}/owner-invite/regenerate`)).send({
         reason: 'Original invite email bounced',
       })
@@ -367,6 +369,15 @@ describe('/ops/v1/tenants directory (e2e)', () => {
       expect(invites[0]?.tokenHash).not.toBe(INVITE_TOKEN_HASH)
       expect(invites[0]?.tokenHash).toBe(createHash('sha256').update(body.inviteToken).digest('hex'))
       expect(await prisma.auditEvent.count({ where: { tenantId: ids.alpha, action: 'tenant.owner_invite_regenerated' } })).toBe(1)
+
+      // #198: the new link is emailed to the owner too (sent in the background).
+      const mail = await vi.waitFor(async () => {
+        const row = await prisma.simulatedMessage.findFirst({ where: { to: 'owner@alpha.example' } })
+        if (!row) throw new Error('no invite email yet')
+        return row
+      })
+      expect(mail.text).toContain(`/admin/invite/${body.inviteToken}`)
+      vi.unstubAllEnvs()
     })
 
     it('404s regenerating when the tenant has no invite', async () => {

@@ -1,8 +1,10 @@
-// Sends the platform's own emails (owner password reset today). Two providers, picked by
-// MAIL_PROVIDER: `mailjet` (the real one, API key and secret in the environment) and `log`
-// (the default: the message goes to the server log and nowhere else, for development and tests).
+// Sends the platform's own emails (owner password reset and owner invites). Three providers, picked by
+// MAIL_PROVIDER: `mailjet` (the real one, API key and secret in the environment), `simulator` (#198: the
+// message is stored in simulated_messages and shown by the dev inbox, GET /dev/v1/inbox) and `log`
+// (the default: the message goes to the server log and nowhere else, for tests).
 // Production refuses to start unless Mailjet is configured (production-config.ts).
-import { Injectable, Logger } from '@nestjs/common'
+import { Injectable, Logger, NotFoundException } from '@nestjs/common'
+import { PrismaService } from './prisma.service'
 
 export interface MailMessage {
   to: string
@@ -11,14 +13,34 @@ export interface MailMessage {
   html?: string
 }
 
+export interface InboxMessage extends MailMessage {
+  id: string
+  sentAt: string
+}
+
 const MAILJET_SEND_URL = 'https://api.mailjet.com/v3.1/send'
+const INBOX_LIMIT = 100
+
+/** An absolute link into the web app, for emails. */
+export function webLink(path: string): string {
+  return `${(process.env.ADMIN_APP_URL ?? process.env.WEB_ORIGIN ?? 'http://localhost:3100').replace(/\/$/, '')}${path}`
+}
+
+const provider = (): string => process.env.MAIL_PROVIDER ?? 'log'
 
 @Injectable()
 export class MailService {
   private readonly logger = new Logger(MailService.name)
 
+  constructor(private readonly prisma: PrismaService) {}
+
   async send(message: MailMessage): Promise<void> {
-    if ((process.env.MAIL_PROVIDER ?? 'log') !== 'mailjet') {
+    if (provider() === 'simulator') {
+      await this.prisma.client.simulatedMessage.create({ data: { to: message.to, subject: message.subject, text: message.text, html: message.html } })
+      this.logger.log(`[mail:simulator] to=${message.to} subject="${message.subject}"`)
+      return
+    }
+    if (provider() !== 'mailjet') {
       this.logger.log(`[mail:log] to=${message.to} subject="${message.subject}"\n${message.text}`)
       return
     }
@@ -41,5 +63,16 @@ export class MailService {
       signal: AbortSignal.timeout(10_000),
     })
     if (!response.ok) throw new Error(`Mailjet answered ${response.status}`)
+  }
+
+  /** The simulator's newest messages, optionally for one address. 404 unless the simulator is the provider. */
+  async inbox(to?: string): Promise<InboxMessage[]> {
+    if (provider() !== 'simulator') throw new NotFoundException({ code: 'not_found', message: 'The mail simulator is off' })
+    const rows = await this.prisma.client.simulatedMessage.findMany({
+      where: to ? { to: { equals: to.trim(), mode: 'insensitive' } } : {},
+      orderBy: { createdAt: 'desc' },
+      take: INBOX_LIMIT,
+    })
+    return rows.map((row) => ({ id: row.id, to: row.to, subject: row.subject, text: row.text, html: row.html ?? undefined, sentAt: row.createdAt.toISOString() }))
   }
 }

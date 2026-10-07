@@ -1,10 +1,10 @@
-// pos/CAP-1 (AD-13): PIN login for a shared device. StaffUser has no
-// outletId column (it's tenant-wide - a staff member can work any outlet),
-// so this is a two-step flow: verify the PIN against this tenant's active
+// pos/CAP-1 (AD-13): PIN login for a shared device. A staff member works the
+// outlets in StaffUser.outletIds (#197; empty = every outlet), so this is a
+// two-step flow: verify the PIN against this tenant's active
 // StaffUser rows, then either finalise immediately (single-outlet tenant) or
 // hand back a short-lived pending token plus the outlet list for the staff
 // member to pick from.
-import { BadRequestException, ConflictException, Injectable, UnauthorizedException } from '@nestjs/common'
+import { BadRequestException, ConflictException, ForbiddenException, Injectable, UnauthorizedException } from '@nestjs/common'
 import * as argon2 from 'argon2'
 import { pinStatus } from '../../admin'
 import { AttemptLimiter, AttemptRule, PosPrincipal, PosTokenClaims, RegionRegistryService, signPosPendingToken, signPosToken, verifyPosPendingToken } from '../../platform'
@@ -59,9 +59,19 @@ export class PosAuthService {
     }
     await this.limiter.refund(rules)
 
-    const outlets = await this.listOutlets(tenantId)
+    const outlets = await this.listOutlets(tenantId, staff.outletIds)
+
+    // #197: an enrolled till belongs to one outlet - sign in there, and only if this person works there.
+    const tillOutletId = dto.deviceId ? await this.deviceOutletId(tenantId, dto.deviceId) : null
+    if (tillOutletId) {
+      const tillOutlet = outlets.find((outlet) => outlet.id === tillOutletId)
+      if (!tillOutlet) throw new ForbiddenException({ code: 'outlet_not_assigned', message: `${staff.name} isn't set up to work at this outlet` })
+      return this.finalize(staff, tillOutlet)
+    }
+
     if (outlets.length === 0) {
-      throw new ConflictException({ code: 'no_outlets', message: 'This tenant has no outlets configured yet' })
+      const message = staff.outletIds.length > 0 ? `None of ${staff.name}'s outlets are open - ask the owner to update their outlets` : 'This tenant has no outlets configured yet'
+      throw new ConflictException({ code: 'no_outlets', message })
     }
 
     if (outlets.length > 1) {
@@ -93,6 +103,9 @@ export class PosAuthService {
       if (!outletRow || outletRow.tenantId !== pending.tenantId || outletRow.deletedAt) {
         throw new BadRequestException({ code: 'invalid_outlet', message: "Select one of this tenant's outlets" })
       }
+      if (staffRow.outletIds.length > 0 && !staffRow.outletIds.includes(outletRow.id)) {
+        throw new ForbiddenException({ code: 'outlet_not_assigned', message: `${staffRow.name} isn't set up to work at ${outletRow.name}` })
+      }
       return { staff: staffRow, outlet: outletRow }
     })
 
@@ -112,6 +125,15 @@ export class PosAuthService {
       { key: `pos-pin:ip:${tenantId}:${ip}`, ...IP_RULE },
       { key: `pos-pin:untrusted:${tenantId}`, ...UNTRUSTED_TENANT_RULE },
     ]
+  }
+
+  private async deviceOutletId(tenantId: string, deviceId: string): Promise<string | null> {
+    const plane = this.plane()
+    const device = await plane.$transaction(async (tx) => {
+      await setTenantContext(tx, tenantId)
+      return tx.device.findFirst({ where: { id: deviceId, tenantId, status: 'active', revokedAt: null }, select: { outletId: true } })
+    })
+    return device?.outletId ?? null
   }
 
   private async findStaffByPin(tenantId: string, pin: string): Promise<StaffUser | null> {
@@ -134,11 +156,15 @@ export class PosAuthService {
     return null
   }
 
-  private async listOutlets(tenantId: string): Promise<Outlet[]> {
+  /** This tenant's live outlets, narrowed to the staff member's own when they have any (#197). */
+  private async listOutlets(tenantId: string, staffOutletIds: string[]): Promise<Outlet[]> {
     const plane = this.plane()
     return plane.$transaction(async (tx) => {
       await setTenantContext(tx, tenantId)
-      return tx.outlet.findMany({ where: { tenantId, deletedAt: null }, orderBy: { createdAt: 'asc' } })
+      return tx.outlet.findMany({
+        where: { tenantId, deletedAt: null, ...(staffOutletIds.length > 0 ? { id: { in: staffOutletIds } } : {}) },
+        orderBy: { createdAt: 'asc' },
+      })
     })
   }
 

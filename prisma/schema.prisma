@@ -749,6 +749,8 @@ model StaffUser {
   pinHash        String?   @map("pin_hash")
   pinIssuedAt    DateTime? @map("pin_issued_at") @db.Timestamptz(6)
   pinRevokedAt   DateTime? @map("pin_revoked_at") @db.Timestamptz(6)
+  // #197: the outlets this person may sign in at; empty = every outlet.
+  outletIds      String[]  @default([]) @map("outlet_ids") @db.Uuid
   sessionVersion Int       @default(0) @map("session_version")
   createdAt      DateTime  @default(now()) @map("created_at") @db.Timestamptz(6)
   updatedAt      DateTime  @updatedAt @map("updated_at") @db.Timestamptz(6)
@@ -2099,4 +2101,18 @@ model CatalogProduct {
 
   @@index([currency])
   @@map("catalog_products")
+}
+
+// #198: MAIL_PROVIDER=simulator keeps every outgoing email here for the dev inbox (GET /dev/v1/inbox)
+// instead of sending it. Production refuses any provider but mailjet (production-config.ts).
+model SimulatedMessage {
+  id        String   @id @default(uuid(7)) @db.Uuid
+  to        String
+  subject   String
+  text      String
+  html      String?
+  createdAt DateTime @default(now()) @map("created_at") @db.Timestamptz(6)
+
+  @@index([createdAt])
+  @@map("simulated_messages")
 }

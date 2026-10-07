@@ -5,7 +5,7 @@ import { BadRequestException, ConflictException, Injectable, Logger, Unauthorize
 import * as argon2 from 'argon2'
 import { createHash, randomBytes } from 'node:crypto'
 import type { Prisma } from '../generated/prisma/client'
-import { AdminPrincipal, AttemptLimiter, AttemptRule, MailService, RegionRegistryService, signAdminToken } from '../platform'
+import { AdminPrincipal, AttemptLimiter, AttemptRule, MailService, RegionRegistryService, signAdminToken, webLink } from '../platform'
 
 export interface InviteDetails {
   restaurantName: string
@@ -139,7 +139,7 @@ export class AdminAuthService {
         await tx.ownerPasswordReset.create({
           data: { tenantId: owner.tenantId, ownerId: owner.id, tokenHash: createHash('sha256').update(raw).digest('hex'), expiresAt: new Date(Date.now() + RESET_TOKEN_TTL_MS) },
         })
-        issued.push(`${(process.env.ADMIN_APP_URL ?? process.env.WEB_ORIGIN ?? 'http://localhost:3100').replace(/\/$/, '')}/admin/reset-password?token=${raw}`)
+        issued.push(webLink(`/admin/reset-password?token=${raw}`))
       }
       return issued
     })
