@@ -69,6 +69,7 @@ async function wipe(prisma: PrismaClient): Promise<void> {
   await prisma.menuCategory.deleteMany()
   await prisma.billShare.deleteMany()
   await prisma.tender.deleteMany()
+  await prisma.paymentIntent.deleteMany()
   await prisma.bill.deleteMany()
   await prisma.billNumberCounter.deleteMany()
   await prisma.tokenNumberCounter.deleteMany()
@@ -278,7 +279,8 @@ describe('/guest/v1 table sessions (e2e)', () => {
     const { pin } = startRes.body as StartResult
     const wrongPin = pin === '0000' ? '1111' : '0000'
 
-    for (let i = 0; i < 5; i++) {
+    // #171: 10 wrong guesses per table per 15 minutes (shared limiter).
+    for (let i = 0; i < 10; i++) {
       const res = await request(httpServer).post('/guest/v1/sessions/join').send({ outletId, tableId, pin: wrongPin, name: 'Rohan' })
       expect(res.status).toBe(403)
     }
@@ -331,9 +333,9 @@ describe('/guest/v1 table sessions (e2e)', () => {
       .send({ outletId, tableId, name: 'Asha', phone: '+91 90000 11111' })
     const { token } = startRes.body as StartResult
 
-    const role = await prisma.role.create({ data: { tenantId, name: `Waiter-${uuidv7()}`, isSystem: false } })
+    const role = await prisma.role.upsert({ where: { tenantId_name: { tenantId, name: 'Cashier' } }, update: {}, create: { tenantId, name: 'Cashier', isSystem: true, isManager: false } })
     const staff = await prisma.staffUser.create({ data: { tenantId, roleId: role.id, name: 'Server Priya' } })
-    const posToken = signPosToken({ id: staff.id, tenantId, outletId, name: staff.name })
+    const posToken = signPosToken({ sessionVersion: 0, id: staff.id, tenantId, outletId, name: staff.name })
 
     const closeRes = await request(httpServer).post(`/pos/v1/tables/${tableId}/close-session`).set('Authorization', `Bearer ${posToken}`)
     expect(closeRes.status).toBe(200)

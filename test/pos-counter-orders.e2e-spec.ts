@@ -55,6 +55,7 @@ async function wipe(prisma: PrismaClient): Promise<void> {
   await prisma.orderLine.deleteMany()
   await prisma.billShare.deleteMany()
   await prisma.tender.deleteMany()
+  await prisma.paymentIntent.deleteMany()
   await prisma.bill.deleteMany()
   await prisma.billNumberCounter.deleteMany()
   await prisma.tokenNumberCounter.deleteMany()
@@ -136,9 +137,9 @@ async function createOutlet(prisma: PrismaClient, tenantId: string, name = 'Kora
 }
 
 async function createStaff(prisma: PrismaClient, tenantId: string, outletId: string, name = 'Ravi'): Promise<{ id: string; token: string }> {
-  const role = await prisma.role.create({ data: { tenantId, name: `Cashier-${uuidv7()}`, isSystem: false } })
+  const role = await prisma.role.upsert({ where: { tenantId_name: { tenantId, name: 'Cashier' } }, update: {}, create: { tenantId, name: 'Cashier', isSystem: true, isManager: false } })
   const staff = await prisma.staffUser.create({ data: { tenantId, roleId: role.id, name } })
-  const token = signPosToken({ id: staff.id, tenantId, outletId, name })
+  const token = signPosToken({ sessionVersion: 0, id: staff.id, tenantId, outletId, name })
   return { id: staff.id, token }
 }
 
@@ -229,6 +230,22 @@ describe('/pos/v1 QSR counter and token mode (e2e)', () => {
 
       const second = await authed(request(httpServer).post(`/pos/v1/outlets/${outletId}/counter-orders`), staff.token).send()
       expect((second.body as OrderBody).tokenNumber).toBe(2)
+    })
+
+    it('moves past token numbers already in use when the counter has fallen behind them (F-1)', async () => {
+      const tenantId = await createTenant(prisma)
+      const outletId = await createOutlet(prisma, tenantId)
+      const staff = await createStaff(prisma, tenantId, outletId)
+      const first = await authed(request(httpServer).post(`/pos/v1/outlets/${outletId}/counter-orders`), staff.token).send()
+      expect((first.body as OrderBody).tokenNumber).toBe(1)
+      // Tokens 2..5 exist (e.g. seeded or imported orders) but the counter still says 1.
+      for (const tokenNumber of [2, 5]) {
+        await prisma.order.create({ data: { tenantId, outletId, tableId: null, ownerId: staff.id, status: 'closed', tokenNumber } })
+      }
+
+      const next = await authed(request(httpServer).post(`/pos/v1/outlets/${outletId}/counter-orders`), staff.token).send()
+      expect(next.status).toBe(201)
+      expect((next.body as OrderBody).tokenNumber).toBe(6)
     })
 
     it('rejects an outlet from a different tenant', async () => {

@@ -6,6 +6,7 @@ import { BadRequestException, ConflictException, Injectable, NotFoundException }
 import type { Prisma } from '../../generated/prisma/client'
 import { AdminPrincipal, RegionRegistryService } from '../../platform'
 import { ChecklistService } from '../checklist/checklist.service'
+import { commitItems, currencyForCountry } from '../menu/commit-items'
 import { DraftItem, extractDraftItems, MenuImportSourceType } from './extraction'
 import { DraftItemView, MenuImportCommitResult, MenuImportDraftView, PatchDraftItemDto } from './menu-import.dtos'
 import { resolveSourceType } from './upload-validation'
@@ -22,10 +23,6 @@ interface DraftPayload {
 
 async function setTenantContext(tx: Prisma.TransactionClient, tenantId: string): Promise<void> {
   await tx.$executeRaw`SELECT set_config('app.tenant_id', ${tenantId}, true)`
-}
-
-function currencyForCountry(country: string): string {
-  return country === 'IN' ? 'INR' : 'AUD'
 }
 
 function round2(value: number): number {
@@ -75,6 +72,51 @@ function isUniqueViolation(error: unknown): boolean {
   return typeof error === 'object' && error !== null && (error as { code?: unknown }).code === 'P2002'
 }
 
+interface DraftDuplicate {
+  id: string
+  name: string
+  category: string
+  reason: 'on_menu' | 'repeated'
+}
+
+// Case-insensitive, so it is stricter than the exact-match unique index.
+async function findDuplicates(
+  tx: Prisma.TransactionClient,
+  tenantId: string,
+  items: DraftItem[],
+  categoriesByName: Map<string, { id: string }>,
+): Promise<DraftDuplicate[]> {
+  const existing = await tx.menuItem.findMany({ where: { tenantId, archivedAt: null }, select: { categoryId: true, name: true } })
+  const onMenu = new Set(existing.map((item) => `${item.categoryId}|${item.name.toLowerCase()}`))
+  const seen = new Set<string>()
+  const duplicates: DraftDuplicate[] = []
+  for (const item of items) {
+    const name = item.name.toLowerCase()
+    const categoryId = categoriesByName.get(item.category.toLowerCase())?.id
+    const inDraft = `${item.category.toLowerCase()}|${name}`
+    if (categoryId && onMenu.has(`${categoryId}|${name}`)) {
+      duplicates.push({ id: item.id, name: item.name, category: item.category, reason: 'on_menu' })
+    } else if (seen.has(inDraft)) {
+      duplicates.push({ id: item.id, name: item.name, category: item.category, reason: 'repeated' })
+    }
+    seen.add(inDraft)
+  }
+  return duplicates
+}
+
+function duplicatesMessage(duplicates: DraftDuplicate[]): string {
+  const names = (reason: DraftDuplicate['reason']): string =>
+    duplicates
+      .filter((d) => d.reason === reason)
+      .map((d) => `${d.name} (${d.category})`)
+      .join(', ')
+  const parts: string[] = []
+  if (names('on_menu')) parts.push(`Already on your menu: ${names('on_menu')}.`)
+  if (names('repeated')) parts.push(`In this import more than once: ${names('repeated')}.`)
+  parts.push(`Rename or remove ${duplicates.length === 1 ? 'that row' : 'those rows'}, then commit again.`)
+  return parts.join(' ')
+}
+
 @Injectable()
 export class MenuImportService {
   constructor(
@@ -106,7 +148,7 @@ export class MenuImportService {
     })
   }
 
-  async patch(owner: AdminPrincipal, importId: string, edits: PatchDraftItemDto[]): Promise<MenuImportDraftView> {
+  async patch(owner: AdminPrincipal, importId: string, edits: PatchDraftItemDto[], removeIds: readonly string[] = []): Promise<MenuImportDraftView> {
     const plane = this.registry.planeFor(this.registry.homeRegion())
 
     return plane.$transaction(async (tx) => {
@@ -127,6 +169,11 @@ export class MenuImportService {
           throw new BadRequestException({ code: 'validation_failed', message: `No draft item with id ${edit.id}` })
         }
         applyEdit(item, edit)
+      }
+      for (const id of removeIds) {
+        if (!byId.delete(id)) {
+          throw new BadRequestException({ code: 'validation_failed', message: `No draft item with id ${id}` })
+        }
       }
 
       const updated = await tx.menuImportDraft.update({
@@ -159,37 +206,15 @@ export class MenuImportService {
 
         const existingCategories = await tx.menuCategory.findMany({ where: { tenantId: owner.tenantId } })
         const categoriesByName = new Map(existingCategories.map((category) => [category.name.toLowerCase(), { id: category.id }]))
-        let nextSortOrder = existingCategories.length
 
-        const createdCategories: MenuImportCommitResult['categories'] = []
-        const createdItems: MenuImportCommitResult['items'] = []
-
-        for (const draftItem of payload.items) {
-          const key = draftItem.category.toLowerCase()
-          let category = categoriesByName.get(key)
-          if (!category) {
-            nextSortOrder += 1
-            const created = await tx.menuCategory.create({ data: { tenantId: owner.tenantId, name: draftItem.category, sortOrder: nextSortOrder } })
-            category = { id: created.id }
-            categoriesByName.set(key, category)
-            createdCategories.push({ id: created.id, name: draftItem.category })
-          }
-
-          // AD-11: the item's first price is still an insert, never an UPDATE.
-          const item = await tx.menuItem.create({
-            data: { tenantId: owner.tenantId, categoryId: category.id, name: draftItem.name, shortName: draftItem.shortName },
-          })
-          const price = await tx.itemPrice.create({
-            data: { tenantId: owner.tenantId, itemId: item.id, priceMinor: BigInt(draftItem.priceMinor), currency: draftItem.currency },
-          })
-          createdItems.push({
-            id: item.id,
-            name: item.name,
-            shortName: item.shortName,
-            categoryId: category.id,
-            price: { id: price.id, priceMinor: draftItem.priceMinor, currency: price.currency },
-          })
+        // restiq-web#247: name every clash before writing, instead of letting
+        // the (tenant, category, name) unique index fail with a generic message.
+        const duplicates = await findDuplicates(tx, owner.tenantId, payload.items, categoriesByName)
+        if (duplicates.length > 0) {
+          throw new ConflictException({ code: 'duplicate_items', message: duplicatesMessage(duplicates), duplicates })
         }
+
+        const { categories: createdCategories, items: createdItems } = await commitItems(tx, owner.tenantId, payload.items)
 
         await tx.auditEvent.create({
           data: {
@@ -211,7 +236,8 @@ export class MenuImportService {
       if (isUniqueViolation(error)) {
         throw new ConflictException({
           code: 'conflict',
-          message: 'This import has duplicate item names within a category - fix the draft and try again',
+          // Only reachable if an item was added between the pre-check and this write.
+          message: 'One of these items was just added to your menu - commit again to see which',
         })
       }
       throw error

@@ -78,6 +78,7 @@ async function wipe(prisma: PrismaClient): Promise<void> {
   await prisma.menuItem.deleteMany()
   await prisma.menuCategory.deleteMany()
   await prisma.tender.deleteMany()
+  await prisma.paymentIntent.deleteMany()
   await prisma.bill.deleteMany()
   await prisma.billNumberCounter.deleteMany()
   await prisma.tokenNumberCounter.deleteMany()
@@ -156,9 +157,9 @@ async function createStation(prisma: PrismaClient, tenantId: string, outletId: s
 }
 
 async function createStaff(prisma: PrismaClient, tenantId: string, outletId: string, name: string): Promise<string> {
-  const role = await prisma.role.create({ data: { tenantId, name: `Waiter-${uuidv7()}`, isSystem: false } })
+  const role = await prisma.role.upsert({ where: { tenantId_name: { tenantId, name: 'Cashier' } }, update: {}, create: { tenantId, name: 'Cashier', isSystem: true, isManager: false } })
   const staff = await prisma.staffUser.create({ data: { tenantId, roleId: role.id, name } })
-  return signPosToken({ id: staff.id, tenantId, outletId, name })
+  return signPosToken({ sessionVersion: 0, id: staff.id, tenantId, outletId, name })
 }
 
 async function createItemWithPrice(prisma: PrismaClient, tenantId: string, priceMinor: number, opts?: { stationId?: string; shortName?: string }): Promise<string> {

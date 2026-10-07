@@ -35,3 +35,7 @@ the task entry to `tasks/completed.md` after every feature or bug fix.
 - [Completed](tasks/completed.md)
 - [In progress](tasks/in-progress.md)
 - [Planned](tasks/planned.md)
+
+## Operations
+
+- [ops/](ops/README.md) - launch configuration, release, backup/restore, alerts and staging rehearsal runbooks (issue #175)

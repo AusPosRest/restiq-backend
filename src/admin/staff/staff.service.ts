@@ -15,7 +15,7 @@ import { BadRequestException, ConflictException, Injectable, NotFoundException }
 import * as argon2 from 'argon2'
 import { randomInt } from 'node:crypto'
 import type { Prisma } from '../../generated/prisma/client'
-import { AdminPrincipal, RegionRegistryService, uuidv7 } from '../../platform'
+import { AdminPrincipal, Permission, permissionsFor, RegionRegistryService, uuidv7 } from '../../platform'
 import { setTenantContext } from '../menu/tenant-context'
 import { CreateStaffDto, UpdateStaffDto } from './staff.dtos'
 
@@ -25,6 +25,8 @@ export interface RoleView {
   id: string
   name: string
   isSystem: boolean
+  /** #169: what this role may do on the POS/KDS - the catalog the API enforces. */
+  permissions: Permission[]
 }
 
 export type PinStatus = 'none' | 'active' | 'revoked'
@@ -98,7 +100,7 @@ export class StaffService {
     return plane.$transaction(async (tx) => {
       await setTenantContext(tx, tenantId)
       const roles = await tx.role.findMany({ where: { tenantId }, orderBy: { name: 'asc' } })
-      return roles.map((role) => ({ id: role.id, name: role.name, isSystem: role.isSystem }))
+      return roles.map((role) => ({ id: role.id, name: role.name, isSystem: role.isSystem, permissions: [...permissionsFor(role.name)] }))
     })
   }
 
@@ -175,7 +177,8 @@ export class StaffService {
       const now = new Date()
       const updated = await tx.staffUser.update({
         where: { id: staffId },
-        data: { name: dto.name?.trim(), roleId: dto.roleId },
+        // #169: a role change ends the staff member's open POS/KDS sessions.
+        data: { name: dto.name?.trim(), roleId: dto.roleId, ...(roleChanging ? { sessionVersion: { increment: 1 } } : {}) },
         include: STAFF_INCLUDE,
       })
 
@@ -205,7 +208,8 @@ export class StaffService {
       await this.findOwnedStaff(tx, owner.tenantId, staffId)
       // Re-issuing always supersedes any prior PIN, revoked or not - a fresh
       // PIN is unconditionally active from this point.
-      await tx.staffUser.update({ where: { id: staffId }, data: { pinHash, pinIssuedAt: new Date(), pinRevokedAt: null } })
+      // #169: and ends every session opened with the old PIN.
+      await tx.staffUser.update({ where: { id: staffId }, data: { pinHash, pinIssuedAt: new Date(), pinRevokedAt: null, sessionVersion: { increment: 1 } } })
     })
 
     return { pin }
@@ -220,7 +224,7 @@ export class StaffService {
       if (staff.pinRevokedAt) throw new ConflictException({ code: 'conflict', message: 'This PIN is already revoked' })
 
       const now = new Date()
-      const updated = await tx.staffUser.update({ where: { id: staffId }, data: { pinRevokedAt: now }, include: STAFF_INCLUDE })
+      const updated = await tx.staffUser.update({ where: { id: staffId }, data: { pinRevokedAt: now, sessionVersion: { increment: 1 } }, include: STAFF_INCLUDE })
 
       // AD-6: PIN revoke is destructive and security-relevant, so it carries
       // an audited reason in the same transaction as the mutation - unlike

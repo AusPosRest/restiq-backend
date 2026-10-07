@@ -1,6 +1,6 @@
 import { Body, Controller, Get, HttpCode, Param, ParseUUIDPipe, Post, Query, Res } from '@nestjs/common'
 import type { Response } from 'express'
-import { CurrentStaff, PosPrincipal } from '../../platform'
+import { AnyStaff, CurrentStaff, PosPrincipal, RequirePermission } from '../../platform'
 import { CreatePaymentIntentDto, PaymentIntentView, SimulateIntentDto } from './intents.dtos'
 import { PaymentIntentsService } from './intents.service'
 
@@ -15,6 +15,7 @@ export class PosPaymentIntentsController {
   // flag, so set here rather than via a static @HttpCode (same as bills'
   // create).
   @Post('bills/:id/intents')
+  @RequirePermission('settle_bills')
   async create(
     @CurrentStaff() staff: PosPrincipal,
     @Param('id') billId: string,
@@ -27,17 +28,20 @@ export class PosPaymentIntentsController {
   }
 
   @Get('payment-intents/:id')
+  @AnyStaff()
   getOne(@CurrentStaff() staff: PosPrincipal, @Param('id') id: string): Promise<PaymentIntentView> {
     return this.intents.getIntent(staff, id)
   }
 
   @Post('payment-intents/:id/cancel')
+  @RequirePermission('settle_bills')
   @HttpCode(200)
   cancel(@CurrentStaff() staff: PosPrincipal, @Param('id') id: string): Promise<PaymentIntentView> {
     return this.intents.cancelIntent(staff, id)
   }
 
   @Post('payment-intents/:id/simulate')
+  @RequirePermission('settle_bills')
   @HttpCode(200)
   simulate(@CurrentStaff() staff: PosPrincipal, @Param('id') id: string, @Body() dto: SimulateIntentDto): Promise<PaymentIntentView> {
     return this.intents.simulate(staff, id, dto)
@@ -45,6 +49,7 @@ export class PosPaymentIntentsController {
 
   // ?deviceId= is the polling terminal (issue #134): a linked terminal drains only its own queue.
   @Get('outlets/:outletId/payment-intents')
+  @AnyStaff()
   listPending(
     @CurrentStaff() staff: PosPrincipal,
     @Param('outletId') outletId: string,

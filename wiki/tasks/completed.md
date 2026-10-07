@@ -1,5 +1,46 @@
 # Completed
 
+- **2026-09-22** - Production readiness prep (issue #175, audit PROD-06..11):
+  - `fly.toml` is always on (min 1 machine, auto-stop off) with 1 GB.
+  - `enableShutdownHooks()`.
+  - `assertProductionConfig()` refuses a production boot with a missing or unsafe HOME_REGION,
+    JWT secrets, PROXY_SHARED_SECRET, PAYMENTS_SIMULATOR or WEB_ORIGIN.
+  - `WebhookAlertChannel` posts silent-device alerts to `ALERT_WEBHOOK_URL`.
+  - Runbooks in `wiki/ops/`: launch configuration, release, backup/restore, alerts,
+    staging rehearsal.
+  - None of it has been applied to live infrastructure yet.
+
+- **2026-09-22** - Shared sign-in throttling (issue #171, audit PROD-03):
+  - Atomic, database-backed counters in `auth_attempts` (additive migration
+    `20260922130000_auth_attempts`), counted before the secret is checked.
+  - Covers POS PIN, owner, operator, manager PIN and guest join.
+  - The POS is keyed by trusted device or client IP (never the guessed PIN), plus a
+    tenant cap for unbound browsers.
+  - `TRUST_PROXY_HOPS` (1 on Fly) controls `req.ip`.
+  - The in-memory lockout modules are removed.
+  - e2e: new `test/login-throttle.e2e-spec.ts`; lockout tests in pos-auth-clock,
+    admin-auth and guest-session updated.
+  - pos-menu's wipe now clears guest sessions (an order-dependent FK failure).
+
+- **2026-09-22** - Simulated card payments can't be used in production (issue #170, audit
+  PROD-01):
+  - The `PAYMENTS_SIMULATOR` flag defaults off, and `fly.toml` pins it off.
+  - With it off, the services refuse creating, approving (route and `confirmIntent`) and
+    settling any simulated payment, including intents or tenders made while it was on.
+  - Cash and external-terminal tenders still work.
+  - e2e: 4 new tests in `test/pos-payment-intents.e2e-spec.ts`.
+
+- **2026-09-22** - POS/KDS sessions end when access changes, and the API enforces staff
+  permissions (issue #169, audit PROD-02/PROD-04):
+  - `staff_users.session_version` goes in the token as `sv`.
+  - The guard re-reads staff + role on every request and refuses a token after a PIN
+    revoke/reissue, role change or logout, and refuses any token without `sv`.
+  - The permission catalog is enforced per route and fails closed.
+  - Roles now return their `permissions`.
+  - Migration `20260922120000_staff_session_version` is additive.
+  - e2e: new `test/pos-sessions.e2e-spec.ts`; helpers moved to real system role names.
+  - See [pos-cashier-waiter.md](../features/pos-cashier-waiter.md).
+
 - **2026-09-19** - Combo menu, issue #160 (backend half of restiq-web#264). Combos are built
   from slots (`combo_slots`, `combo_slot_options`: pick N of these, or one fixed item, with
   per-option extra charges); `combos` gains `photo_url`, `available`, `archived_at` (live names
@@ -10,11 +51,33 @@
   tickets carry `comboName`; invoice lines carry `components`; combo refunds are whole.
   Migration `20260919120000_combo_slots` (checked against a demo-DB copy with existing combo
   components). e2e: new `test/combos.e2e-spec.ts`, plus `menu-management` and `pos-bills` updates.
+- **2026-09-16** - POS payment history, issue #158. `GET pos/v1/outlets/:outletId/payments`
+  (today's tenders on finalized bills at the outlet in the outlet's local day, per-method totals,
+  `takenBy`). `bills.service.ts#listPaymentsToday`; e2e cases in `pos-bills.e2e-spec.ts`.
+  Web: restiq-web#253.
+- **2026-09-16** - Product directory, issue #153. `catalog_products` (migration
+  `20260916100000_catalog_products`, platform-wide, `TEXT[]` tags, currency as market);
+  ops CRUD `ops/v1/catalog/products`; owner `admin/v1/menu/directory` list/tags/import.
+  Menu-import commit loop extracted to `src/admin/menu/commit-items.ts` and shared.
+  e2e in `product-directory.e2e-spec.ts`. Web: restiq-web#245.
 
 - **2026-09-15** - External payment tender, issue #146. `TenderMethod.external` +
   `tenders.reference` (migration `20260915120000_external_tender`; CHECKs: external needs no
   intent and must carry a reference). `TenderDto.reference` required for external (1-64 chars,
   trimmed); `TenderView.reference` on bills and invoices. e2e in `pos-bills.e2e-spec.ts`.
+- **2026-09-15** - Menu photos setting, issue #148 (backend half of restiq-web#230):
+  `GET /pos/v1/menu` items carry `photoUrl`; new outlet capability key `menu_photos`
+  (free-text key, no migration, **absent row = on**). When an owner turns it off, POS
+  and guest menu reads (list + item) return `photoUrl: null`. New cases in
+  `pos-menu.e2e-spec.ts` and `guest-menu.e2e-spec.ts`; typecheck/lint clean.
+
+- **2026-09-12** - Kiosk ordering, issue #138 (backend half of restiq-web#214):
+  `table_sessions.table_id` nullable, `OrderSource.kiosk`, nullable guest-principal
+  `tableId`; `POST /guest/v1/kiosk/sessions { outletId, deviceId }` starts a table-less
+  session bound to an active kiosk device behind the outlet's `kiosk` capability (404 /
+  403 `kiosk_disabled`); a kiosk order reserves a gap-free token number and lands as
+  `source: 'kiosk'` for the kitchen and POS. `test/guest-kiosk.e2e-spec.ts`; guest, RLS
+  and payments-report suites green; typecheck/lint clean.
 
 - **2026-09-12** - Device topology, issue #134. `devices.paired_pos_id`,
   `print_jobs.target_device_id`, `payment_intents.target_device_id`
@@ -823,3 +886,25 @@
   counter-orders suites green. See
   [wiki/features/pos-cashier-waiter.md](../features/pos-cashier-waiter.md)
   (Payments, first slice).
+- **2026-09-12** - Admin devices: owner-scoped revoke (issue #140).
+  `POST admin/v1/outlets/:outletId/devices/:deviceId/revoke { reason }` on
+  `AdminDevicesService` - status → revoked with `revokedAt`, peripherals
+  linked to a revoked POS fall back to the outlet, queued print jobs /
+  payment intents for the device go to the outlet-wide queue, audit row
+  `device.revoked` with the owner as actor; 404 cross-tenant/outlet, 409 on a
+  second revoke, 400 without a reason. 3 new e2e tests in
+  `test/admin-devices.e2e-spec.ts`. See
+  [wiki/features/tenant-admin.md](../features/tenant-admin.md) CAP-6.
+- **2026-10-07 - Starter setup per outlet type (D2) and two 500 fixes.**
+  `src/admin/outlets/starter-setup.ts` holds the starting stations, tables and
+  switches for `dine_in`, `qsr`, `cloud_kitchen` and `food_court`. It is applied
+  to every outlet when a tenant is provisioned and on demand through
+  `POST /admin/v1/outlets/:outletId/starter-setup`; running it again adds only
+  what is missing and never overrides the owner. New
+  `DELETE /admin/v1/outlets/:outletId/floor-plan/stations/:stationId` removes a
+  station (its menu items go back to no station). F-1: counter and kiosk token
+  numbers now move past tokens already in use (`reserveTokenNumber`). F-2: a guest
+  order on a table that already has a live order answers 409
+  `table_has_active_order`. Tests: `test/floor-plan.e2e-spec.ts`,
+  `test/tenant-onboarding.e2e-spec.ts`, `test/pos-counter-orders.e2e-spec.ts`,
+  `test/guest-order-placement.e2e-spec.ts`.

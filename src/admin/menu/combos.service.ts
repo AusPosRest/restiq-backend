@@ -27,7 +27,7 @@ async function assertRefsBelongToTenant(tx: Tx, tenantId: string, dto: SaveCombo
   const byId = new Map(items.map((i) => [i.id, i]))
   for (const option of options) {
     const item = byId.get(option.itemId)
-    if (!item) throw new BadRequestException({ code: 'validation_failed', message: `No such item: ${option.itemId}` })
+    if (!item || item.archivedAt) throw new BadRequestException({ code: 'validation_failed', message: `No such item: ${option.itemId}` })
     if (option.variantId && !item.variants.some((v) => v.id === option.variantId)) {
       throw new BadRequestException({ code: 'validation_failed', message: `That size does not belong to ${item.name}` })
     }

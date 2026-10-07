@@ -99,6 +99,7 @@ async function wipe(prisma: PrismaClient): Promise<void> {
   await prisma.orderLine.deleteMany()
   await prisma.billShare.deleteMany()
   await prisma.tender.deleteMany()
+  await prisma.paymentIntent.deleteMany()
   await prisma.bill.deleteMany()
   await prisma.billNumberCounter.deleteMany()
   await prisma.tokenNumberCounter.deleteMany()
@@ -240,10 +241,10 @@ async function createStaff(
   name: string,
   opts?: { isManager?: boolean; pin?: string },
 ): Promise<{ id: string; token: string }> {
-  const role = await prisma.role.create({ data: { tenantId, name: `Role-${uuidv7()}`, isSystem: false, isManager: opts?.isManager ?? false } })
+  const role = await prisma.role.upsert({ where: { tenantId_name: { tenantId, name: opts?.isManager ? 'Manager' : 'Cashier' } }, update: {}, create: { tenantId, name: opts?.isManager ? 'Manager' : 'Cashier', isSystem: true, isManager: opts?.isManager ?? false } })
   const pinHash = opts?.pin ? await argon2.hash(opts.pin) : undefined
   const staff = await prisma.staffUser.create({ data: { tenantId, roleId: role.id, name, pinHash } })
-  const token = signPosToken({ id: staff.id, tenantId, outletId, name })
+  const token = signPosToken({ sessionVersion: 0, id: staff.id, tenantId, outletId, name })
   return { id: staff.id, token }
 }
 
@@ -338,6 +339,33 @@ describe('/pos/v1 bill and settle (e2e)', () => {
 
       const rows = await prisma.bill.findMany({ where: { orderId } })
       expect(rows).toHaveLength(1)
+    })
+
+    it('a repeat POST after the order changed returns the recomputed totals, not the ones from when the bill was first made', async () => {
+      const tenantId = await createTenant(prisma)
+      const outletId = await createOutlet(prisma, tenantId)
+      const tableId = await createTable(prisma, tenantId, outletId)
+      const owner = await createStaff(prisma, tenantId, outletId, 'Asha')
+      const itemId = await createItemWithPrice(prisma, tenantId, 10000)
+      const opened = await authed(request(httpServer).post(`/pos/v1/outlets/${outletId}/tables/${tableId}/order`), owner.token).send()
+      const orderId = (opened.body as OrderBody).id
+      await authed(request(httpServer).post(`/pos/v1/orders/${orderId}/lines`), owner.token).send({ itemId, quantity: 2 }).expect(201)
+
+      const first = (await authed(request(httpServer).post(`/pos/v1/orders/${orderId}/bill`), owner.token).send()).body as BillBody
+      // The order is still open, so the cashier can keep editing it after the bill exists.
+      const added = await authed(request(httpServer).post(`/pos/v1/orders/${orderId}/lines`), owner.token).send({ itemId, quantity: 3 }).expect(201)
+      const addedLineId = (added.body as { lines: Array<{ id: string }> }).lines.at(-1)!.id
+      await authed(request(httpServer).delete(`/pos/v1/orders/${orderId}/lines/${addedLineId}`), owner.token).expect(200)
+      await authed(request(httpServer).post(`/pos/v1/orders/${orderId}/lines`), owner.token).send({ itemId, quantity: 1 }).expect(201)
+      const orderNow = await authed(request(httpServer).get(`/pos/v1/orders/${orderId}`), owner.token)
+      const stepLine = (orderNow.body as { lines: Array<{ id: string }> }).lines[0].id
+      await authed(request(httpServer).patch(`/pos/v1/orders/${orderId}/lines/${stepLine}`), owner.token).send({ quantity: 5 }).expect(200)
+
+      const again = await authed(request(httpServer).post(`/pos/v1/orders/${orderId}/bill`), owner.token).send()
+      expect(again.status).toBe(200)
+      const live = await authed(request(httpServer).get(`/pos/v1/bills/${first.id}`), owner.token)
+      expect((again.body as BillBody).subtotalMinor).toBe((live.body as BillBody).subtotalMinor)
+      expect((again.body as BillBody).subtotalMinor).toBe(60000)
     })
 
     it('is safe under concurrent POST for the same order: one created, one returned from the existing row (same id)', async () => {
@@ -919,6 +947,76 @@ describe('/pos/v1 bill and settle (e2e)', () => {
 
       const res = await authed(request(httpServer).get(`/pos/v1/bills/${billId}/invoice`), otherStaff.token)
       expect(res.status).toBe(404)
+    })
+  })
+  // issue #158: today's payment history at the outlet.
+  describe('GET /pos/v1/outlets/:outletId/payments', () => {
+    interface PaymentsBody {
+      outletId: string
+      date: string
+      currency: string
+      totalMinor: number
+      count: number
+      byMethod: Array<{ method: string; count: number; amountMinor: number }>
+      payments: Array<{ id: string; billNumber: number | null; tableLabel: string | null; method: string; amountMinor: number; reference: string | null; takenBy: { name: string } | null; createdAt: string }>
+    }
+
+    async function finalizedBill(tenantId: string, outletId: string, tenders: Array<Record<string, unknown>>): Promise<{ orderId: string; ownerToken: string; billId: string }> {
+      const { orderId, ownerToken } = await setUpSentOrder(tenantId, outletId, 10000)
+      const created = await authed(request(httpServer).post(`/pos/v1/orders/${orderId}/bill`), ownerToken).send()
+      const billId = (created.body as BillBody).id
+      await authed(request(httpServer).post(`/pos/v1/bills/${billId}/finalize`), ownerToken).send({ tenders }).expect(200)
+      return { orderId, ownerToken, billId }
+    }
+
+    it('lists only today\'s tenders on finalized bills at this outlet, newest first, with per-method totals', async () => {
+      const tenantId = await createTenant(prisma)
+      const outletId = await createOutlet(prisma, tenantId)
+      const otherOutletId = await createOutlet(prisma, tenantId, 'Koramangala')
+
+      const first = await finalizedBill(tenantId, outletId, [{ method: 'cash', amountMinor: 21000 }])
+      const second = await finalizedBill(tenantId, outletId, [
+        { method: 'upi_manual', amountMinor: 11000, riskAcknowledged: true },
+        { method: 'external', amountMinor: 10000, reference: 'EFT-1' },
+      ])
+      // Elsewhere: another outlet's bill, a still-open bill here, and a two-day-old tender here.
+      await finalizedBill(tenantId, otherOutletId, [{ method: 'cash', amountMinor: 21000 }])
+      const open = await setUpSentOrder(tenantId, outletId, 10000)
+      await authed(request(httpServer).post(`/pos/v1/orders/${open.orderId}/bill`), open.ownerToken).send()
+      const stale = await finalizedBill(tenantId, outletId, [{ method: 'cash', amountMinor: 21000 }])
+      await prisma.tender.updateMany({ where: { billId: stale.billId }, data: { createdAt: new Date(Date.now() - 2 * 24 * 60 * 60 * 1000) } })
+
+      const res = await authed(request(httpServer).get(`/pos/v1/outlets/${outletId}/payments`), first.ownerToken).expect(200)
+      const body = res.body as PaymentsBody
+      expect(body.outletId).toBe(outletId)
+      expect(body.currency).toBe('INR')
+      expect(body.date).toMatch(/^\d{4}-\d{2}-\d{2}$/)
+      expect(body.count).toBe(3)
+      expect(body.totalMinor).toBe(42000)
+      // The two tenders of one bill are written in one transaction, so their order is a tie; newest-first holds across bills.
+      expect(body.payments.map((p) => p.method).slice(0, 2).sort()).toEqual(['external', 'upi_manual'])
+      expect(body.payments[2]?.method).toBe('cash')
+      expect(body.payments[2]?.amountMinor).toBe(21000)
+      expect(body.payments[2]?.takenBy?.name).toBe('Asha')
+      expect(body.payments[2]?.tableLabel).toBe('T1')
+      expect(body.payments[2]?.billNumber).toBe(1)
+      expect(body.payments.find((p) => p.method === 'external')?.reference).toBe('EFT-1')
+      expect(body.byMethod).toEqual([
+        { method: 'cash', count: 1, amountMinor: 21000 },
+        { method: 'upi_manual', count: 1, amountMinor: 11000 },
+        { method: 'external', count: 1, amountMinor: 10000 },
+      ])
+      void second
+    })
+
+    it('404s for an outlet outside the tenant', async () => {
+      const tenantId = await createTenant(prisma)
+      const outletId = await createOutlet(prisma, tenantId)
+      const otherTenant = await createTenant(prisma, 'Other')
+      const otherOutlet = await createOutlet(prisma, otherTenant)
+      const staff = await createStaff(prisma, tenantId, outletId, 'Asha')
+      await authed(request(httpServer).get(`/pos/v1/outlets/${otherOutlet}/payments`), staff.token).expect(404)
+      await request(httpServer).get(`/pos/v1/outlets/${outletId}/payments`).expect(401)
     })
   })
 })

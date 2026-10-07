@@ -1,5 +1,5 @@
 import { Controller, Get, Param } from '@nestjs/common'
-import { CurrentStaff, PosPrincipal } from '../../platform'
+import { AnyStaff, CurrentStaff, PosPrincipal } from '../../platform'
 import { AttendanceView } from './attendance.dtos'
 import { AttendanceService } from './attendance.service'
 
@@ -8,6 +8,7 @@ export class PosAttendanceController {
   constructor(private readonly attendance: AttendanceService) {}
 
   @Get('outlets/:outletId/attendance')
+  @AnyStaff()
   getAttendance(@CurrentStaff() staff: PosPrincipal, @Param('outletId') outletId: string): Promise<AttendanceView> {
     return this.attendance.getAttendance(staff, outletId)
   }

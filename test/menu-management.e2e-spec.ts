@@ -114,6 +114,7 @@ async function wipe(prisma: PrismaClient): Promise<void> {
   await prisma.menuCategory.deleteMany()
   await prisma.billShare.deleteMany()
   await prisma.tender.deleteMany()
+  await prisma.paymentIntent.deleteMany()
   await prisma.bill.deleteMany()
   await prisma.billNumberCounter.deleteMany()
   await prisma.tokenNumberCounter.deleteMany()
@@ -333,6 +334,26 @@ describe('/admin/v1/menu (e2e)', () => {
       expect(res.status).toBe(404)
     })
 
+    it('accepts an uploaded data:image photo, clears it with null, and rejects other schemes (issue #142)', async () => {
+      const { token } = await createOwner(prisma)
+      const category = await createCategory(token)
+      const item = await createItem(token, category.id)
+      const photo = `data:image/jpeg;base64,${'A'.repeat(4000)}`
+
+      const set = await authed(request(httpServer).patch(`/admin/v1/menu/items/${item.id}`), token).send({ photoUrl: photo })
+      expect(set.status).toBe(200)
+      expect((set.body as ItemBody).photoUrl).toBe(photo)
+
+      const cleared = await authed(request(httpServer).patch(`/admin/v1/menu/items/${item.id}`), token).send({ photoUrl: null })
+      expect(cleared.status).toBe(200)
+      expect((cleared.body as ItemBody).photoUrl).toBeNull()
+
+      for (const bad of ['javascript:alert(1)', 'http://cdn.example.com/a.jpg', 'data:text/html;base64,PGgxPg==']) {
+        const res = await authed(request(httpServer).patch(`/admin/v1/menu/items/${item.id}`), token).send({ photoUrl: bad })
+        expect(res.status).toBe(400)
+      }
+    })
+
     it('creates an item with photoUrl, nameHindi, and vegMarker, and reads them back', async () => {
       const { token } = await createOwner(prisma)
       const category = await createCategory(token)
@@ -389,6 +410,50 @@ describe('/admin/v1/menu (e2e)', () => {
       })
       expect(res.status).toBe(400)
       expect((res.body as ErrorBody).error.code).toBe('validation_failed')
+    })
+
+    describe('delete (archive) - restiq-web#248', () => {
+      it('archives the item: gone from list and GET, audited, row kept, category count drops, name reusable', async () => {
+        const { tenantId, token } = await createOwner(prisma)
+        const category = await createCategory(token)
+        const item = await createItem(token, category.id)
+
+        const res = await authed(request(httpServer).delete(`/admin/v1/menu/items/${item.id}`), token)
+        expect(res.status).toBe(204)
+
+        const list = await authed(request(httpServer).get('/admin/v1/menu/items'), token)
+        expect((list.body as ItemBody[]).map((i) => i.id)).not.toContain(item.id)
+        expect((await authed(request(httpServer).get(`/admin/v1/menu/items/${item.id}`), token)).status).toBe(404)
+        expect((await prisma.menuItem.findUnique({ where: { id: item.id } }))?.archivedAt).toBeInstanceOf(Date)
+        expect(await prisma.auditEvent.count({ where: { tenantId, action: 'menu.item_archived' } })).toBe(1)
+
+        const categories = await authed(request(httpServer).get('/admin/v1/menu/categories'), token)
+        expect((categories.body as CategoryBody[])[0]?.itemCount).toBe(0)
+
+        const again = await authed(request(httpServer).post('/admin/v1/menu/items'), token).send({ categoryId: category.id, name: 'Butter Chicken', shortName: 'Btr Chkn' })
+        expect(again.status).toBe(201)
+      })
+
+      it('refuses to delete a category whose only items are deleted ones, with its own code', async () => {
+        const { token } = await createOwner(prisma)
+        const category = await createCategory(token)
+        const item = await createItem(token, category.id)
+        await authed(request(httpServer).delete(`/admin/v1/menu/items/${item.id}`), token)
+
+        const res = await authed(request(httpServer).delete(`/admin/v1/menu/categories/${category.id}`), token)
+        expect(res.status).toBe(409)
+        expect((res.body as ErrorBody).error.code).toBe('category_has_history')
+      })
+
+      it('404s when another tenant tries to delete the item', async () => {
+        const owner1 = await createOwner(prisma)
+        const owner2 = await createOwner(prisma)
+        const category = await createCategory(owner1.token)
+        const item = await createItem(owner1.token, category.id)
+
+        const res = await authed(request(httpServer).delete(`/admin/v1/menu/items/${item.id}`), owner2.token)
+        expect(res.status).toBe(404)
+      })
     })
 
     describe('allergen tags CRUD on an item', () => {
@@ -554,6 +619,28 @@ describe('/admin/v1/menu (e2e)', () => {
       expect(rows[0]?.priceMinor).toBe(19000n)
       expect(rows[1]?.id).toBe(secondBody.id)
       expect(rows[1]?.priceMinor).toBe(21000n)
+    })
+
+    it('a price with no channel prices every channel, including ones that already had their own price', async () => {
+      const { tenantId, token } = await createOwner(prisma)
+      const category = await createCategory(token)
+      const item = await createItem(token, category.id, {})
+      const post = (body: Record<string, unknown>) =>
+        authed(request(httpServer).post(`/admin/v1/menu/items/${item.id}/prices`), token).send({ currency: 'INR', reason: 'Set price', ...body })
+      const current = async (channel: string) =>
+        ((await authed(request(httpServer).get(`/admin/v1/menu/items/${item.id}/price?channel=${channel}`), token)).body as { priceMinor?: number }).priceMinor ?? null
+
+      // Old data: a dine-in price set on its own, which would shadow a newer unscoped one.
+      await post({ channel: 'dine_in', priceMinor: 19000 }).expect(201)
+      expect(await current('qr')).toBeNull()
+
+      const res = await post({ priceMinor: 21000 })
+      expect(res.status).toBe(201)
+      expect((res.body as ItemPriceBody).channel).toBeNull()
+      for (const channel of ['dine_in', 'qr', 'takeaway', 'aggregator', 'delivery']) expect(await current(channel)).toBe(21000)
+      // One unscoped row plus one for the channel that had its own price - and a single audit entry.
+      expect(await prisma.itemPrice.count({ where: { itemId: item.id } })).toBe(3)
+      expect(await prisma.auditEvent.count({ where: { tenantId, action: 'menu.item.price_changed' } })).toBe(2)
     })
 
     it('requires a reason (price change is security-relevant) and audits it', async () => {

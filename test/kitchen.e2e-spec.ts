@@ -100,6 +100,7 @@ async function wipe(prisma: PrismaClient): Promise<void> {
   await prisma.menuCategory.deleteMany()
   await prisma.billShare.deleteMany()
   await prisma.tender.deleteMany()
+  await prisma.paymentIntent.deleteMany()
   await prisma.bill.deleteMany()
   await prisma.billNumberCounter.deleteMany()
   await prisma.tokenNumberCounter.deleteMany()
@@ -168,9 +169,9 @@ async function createTable(prisma: PrismaClient, tenantId: string, outletId: str
 }
 
 async function createStaff(prisma: PrismaClient, tenantId: string, outletId: string, name: string): Promise<{ id: string; token: string }> {
-  const role = await prisma.role.create({ data: { tenantId, name: `Waiter-${uuidv7()}`, isSystem: false } })
+  const role = await prisma.role.upsert({ where: { tenantId_name: { tenantId, name: 'Cashier' } }, update: {}, create: { tenantId, name: 'Cashier', isSystem: true, isManager: false } })
   const staff = await prisma.staffUser.create({ data: { tenantId, roleId: role.id, name } })
-  const token = signPosToken({ id: staff.id, tenantId, outletId, name })
+  const token = signPosToken({ sessionVersion: 0, id: staff.id, tenantId, outletId, name })
   return { id: staff.id, token }
 }
 
@@ -366,6 +367,34 @@ describe('/kitchen/v1 ticket domain, routing, and fire-on-send (e2e)', () => {
 
       const bumped = (await authed(request(httpServer).get(`/kitchen/v1/outlets/${outletId}/bumped`), waiter.token)).body as BumpedTicketBody[]
       expect(bumped.map((t) => t.id)).toEqual([ticket?.id])
+    })
+
+    it('bumped list ignores tickets bumped > 12 hours ago and prevents reopening them', async () => {
+      const tenantId = await createTenant(prisma)
+      const outletId = await createOutlet(prisma, tenantId)
+      const tableId = await createTable(prisma, tenantId, outletId)
+      const waiter = await createStaff(prisma, tenantId, outletId, 'Asha')
+      const tandoor = await createStation(prisma, tenantId, outletId, 'Tandoor')
+      const item = await createItem(prisma, tenantId, 19000, { stationId: tandoor })
+      const orderId = await openOrder(outletId, tableId, waiter.token)
+      await addLine(orderId, item, waiter.token)
+      await fire(orderId, waiter.token)
+
+      const [ticket] = (await authed(request(httpServer).get(`/kitchen/v1/outlets/${outletId}/stations/${tandoor}/queue`), waiter.token)).body as TicketBody[]
+      await authed(request(httpServer).post(`/kitchen/v1/tickets/${ticket?.id}/bump`), waiter.token).send()
+
+      const thirteenHoursAgo = new Date(Date.now() - 13 * 60 * 60 * 1000)
+      await prisma.ticket.update({
+        where: { id: ticket?.id },
+        data: { bumpedAt: thirteenHoursAgo }
+      })
+
+      const bumped = (await authed(request(httpServer).get(`/kitchen/v1/outlets/${outletId}/bumped`), waiter.token)).body as BumpedTicketBody[]
+      expect(bumped).toHaveLength(0)
+
+      const recallRes = await authed(request(httpServer).post(`/kitchen/v1/tickets/${ticket?.id}/recall`), waiter.token).send()
+      expect(recallRes.status).toBe(409)
+      expect((recallRes.body as ErrorBody).error.code).toBe('conflict')
     })
 
     it('rejects bumping an already-bumped ticket', async () => {

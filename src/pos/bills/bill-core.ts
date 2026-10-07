@@ -17,7 +17,7 @@
 // '!**/pos/bills' exception to the pos-module-boundary rule) with no cycle.
 import { BadRequestException, ConflictException, NotFoundException } from '@nestjs/common'
 import type { Prisma } from '../../generated/prisma/client'
-import { uuidv7 } from '../../platform'
+import { paymentsSimulatorEnabled, uuidv7 } from '../../platform'
 import { BillView, InvoiceCreditNoteView, InvoiceLineView, InvoiceView, TaxBreakdownLineView, TenderView } from './bills.dtos'
 import { computeTax, TaxBreakdownLine, TaxCountry, TaxResult } from './tax'
 
@@ -372,6 +372,18 @@ export async function commitFinalize(tx: Tx, params: CommitFinalizeParams): Prom
     })
   }
 
+  // #170: a tender written by the simulated terminal (while it was on)
+  // collected no money - with the simulator off it can't settle a bill.
+  if (!paymentsSimulatorEnabled()) {
+    const simulated = await tx.tender.count({ where: { billId: bill.id, paymentIntent: { provider: 'simulated' } } })
+    if (simulated > 0) {
+      throw new ConflictException({
+        code: 'simulated_tender',
+        message: 'This bill has a simulated card payment that collected no money - it cannot be settled while simulated payments are off',
+      })
+    }
+  }
+
   const totalMinor = computeTotalMinor(bill.subtotalMinor, bill.taxMinor, params.discountMinor ?? 0n, bill.pricesIncludeTax)
   const tenderAgg = await tx.tender.aggregate({ where: { billId: bill.id }, _sum: { amountMinor: true } })
   const tenderTotal = tenderAgg._sum.amountMinor ?? 0n
@@ -425,7 +437,7 @@ export async function commitFinalize(tx: Tx, params: CommitFinalizeParams): Prom
 // provisioning to price the tenant's seed menu - Tenant carries no currency
 // column of its own, so this is the one place that rule is re-derived rather
 // than read back.
-function currencyForCountry(country: TaxCountry): string {
+export function currencyForCountry(country: TaxCountry): string {
   return country === 'IN' ? 'INR' : 'AUD'
 }
 

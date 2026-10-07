@@ -20,18 +20,29 @@ primary_region = "syd"
     size = "performance-1x"
     memory = "2gb"
 
+[env]
+  # restiq-backend#170: the simulated card terminal approves payments with no
+  # money moving. Never on in production - card is taken on the venue's own
+  # terminal and recorded as an external payment until a real provider lands.
+  PAYMENTS_SIMULATOR = "off"
+  # restiq-backend#171: Fly's edge proxy is the one hop in front of the app,
+  # so req.ip is the real client for sign-in throttling - never a raw header.
+  TRUST_PROXY_HOPS = "1"
+
 [build]
 
 [http_service]
   internal_port = 8080
   force_https = true
 
-  # Scale to zero. Fly stops the machine when it is idle and starts it again on
-  # the next request, which costs a 2-6 second wait on that first request.
-  # Set min_machines_running to 1 before the first real venue trades.
-  auto_stop_machines = "stop"
+  # restiq-backend#175 (audit PROD-07): always on. Scale-to-zero cost the
+  # first request after idle a 2-6 s cold start - a till waiting on a PIN
+  # login or a payment. One machine stays up; Fly may start more under load.
+  # A second always-on machine (min 2) is the upgrade for surviving a host
+  # failure without a restart gap.
+  auto_stop_machines = "off"
   auto_start_machines = true
-  min_machines_running = 0
+  min_machines_running = 1
 
   [[http_service.checks]]
     # Deliberately /health and not /health/db. This check decides whether the
@@ -42,6 +53,9 @@ primary_region = "syd"
     timeout = "5s"
     grace_period = "10s"
 
+# restiq-backend#175: 256 MB left no headroom for Node + Prisma + pg pool.
+# 1 GB is a starting point, not a measured size - the staging load test
+# (wiki/ops/staging-rehearsal.md) decides the real one.
 [[vm]]
   size = "shared-cpu-1x"
-  memory = "256mb"
+  memory = "1gb"

@@ -367,6 +367,9 @@ model MenuItem {
   // the outlet's designated default/expo station at fire time, not here.
   stationId  String?    @map("station_id") @db.Uuid
   createdAt  DateTime   @default(now()) @map("created_at") @db.Timestamptz(6)
+  // restiq-web#248: set when the owner deletes the item. The row stays (order
+  // and cart lines reference it); every menu read filters archivedAt: null.
+  archivedAt DateTime?  @map("archived_at") @db.Timestamptz(6)
 
   tenant          Tenant               @relation(fields: [tenantId], references: [id])
   category        MenuCategory         @relation(fields: [categoryId], references: [id])
@@ -380,9 +383,10 @@ model MenuItem {
   orderLines      OrderLine[]
   cartLines       CartLine[]
 
-  // No two items in the same category may share a name (also the natural
-  // forced-failure anchor for the menu-import commit atomicity test).
-  @@unique([tenantId, categoryId, name])
+  // No two LIVE items in the same category may share a name: a partial unique
+  // index (menu_items_live_name_per_category, WHERE archived_at IS NULL) in
+  // 20260916120000_menu_item_archive/migration.sql, so a deleted item's name
+  // can be reused. Prisma's schema DSL has no partial-index syntax.
   @@map("menu_items")
 }
 
@@ -721,6 +725,7 @@ model StaffUser {
   pinHash      String?   @map("pin_hash")
   pinIssuedAt  DateTime? @map("pin_issued_at") @db.Timestamptz(6)
   pinRevokedAt DateTime? @map("pin_revoked_at") @db.Timestamptz(6)
+  sessionVersion Int      @default(0) @map("session_version")
   createdAt    DateTime  @default(now()) @map("created_at") @db.Timestamptz(6)
   updatedAt    DateTime  @updatedAt @map("updated_at") @db.Timestamptz(6)
 
@@ -849,11 +854,13 @@ enum TableSessionStatus {
 }
 
 model TableSession {
-  id                  String             @id @default(uuid(7)) @db.Uuid
-  tenantId            String             @map("tenant_id") @db.Uuid
-  outletId            String             @map("outlet_id") @db.Uuid
-  tableId             String             @map("table_id") @db.Uuid
-  status              TableSessionStatus @default(open)
+  id       String              @id @default(uuid(7)) @db.Uuid
+  tenantId String              @map("tenant_id") @db.Uuid
+  outletId String              @map("outlet_id") @db.Uuid
+  // Nullable since issue #138: a kiosk session has no table - the order it
+  // places gets a token number instead (see Order.tokenNumber).
+  tableId  String?             @map("table_id") @db.Uuid
+  status   TableSessionStatus  @default(open)
   // 4-digit PIN gating who can join this table's shared cart - deliberately
   // NOT credential-grade (SPEC qr-self-order Constraints; AD-17). It protects
   // against a stranger joining the wrong table's order, not money or an
@@ -874,7 +881,7 @@ model TableSession {
 
   tenant    Tenant      @relation(fields: [tenantId], references: [id])
   outlet    Outlet      @relation(fields: [outletId], references: [id])
-  table     DiningTable @relation(fields: [tableId], references: [id])
+  table     DiningTable? @relation(fields: [tableId], references: [id])
   guests    Guest[]
   cartLines CartLine[]
   // qr-self-order/CAP-4 (issue #77): the real Order(s) placed from this
@@ -1243,6 +1250,8 @@ enum OrderStatus {
 enum OrderSource {
   pos
   qr
+  // Issue #138: placed from a self-service kiosk (a table-less guest session).
+  kiosk
 }
 
 model Order {
@@ -2025,4 +2034,40 @@ model AgreementSignature {
   @@unique([tenantId, agreementVersionId])
   @@index([tenantId])
   @@map("agreement_signatures")
+}
+
+// restiq-backend#171: shared failed sign-in counters - see
+// src/platform/attempt-limiter.ts. Written only through raw atomic SQL there.
+model AuthAttempt {
+  key             String   @id
+  attempts        Int
+  windowStartedAt DateTime @map("window_started_at") @db.Timestamptz(6)
+
+  @@index([windowStartedAt])
+  @@map("auth_attempts")
+}
+
+// Product directory (issue #153): a platform-wide library operators curate
+// and tenants copy from. No tenant_id, no RLS - every tenant browses the
+// same rows (same shape as agreement_versions). An import is a copy into
+// menu_items/item_prices; nothing links back, so tenant edits never touch
+// the directory and directory edits never touch a tenant.
+model CatalogProduct {
+  id                  String     @id @default(uuid(7)) @db.Uuid
+  name                String
+  shortName           String     @map("short_name")
+  nameHindi           String?    @map("name_hindi")
+  vegMarker           VegMarker? @map("veg_marker")
+  photoUrl            String?    @map("photo_url")
+  category            String
+  suggestedPriceMinor BigInt     @map("suggested_price_minor")
+  // ponytail: the currency doubles as the market (INR = India, AUD =
+  // Australia); a tenant only sees products priced in its own currency.
+  currency            String     @db.Char(3)
+  tags                String[]   @default([])
+  createdAt           DateTime   @default(now()) @map("created_at") @db.Timestamptz(6)
+  updatedAt           DateTime   @updatedAt @map("updated_at") @db.Timestamptz(6)
+
+  @@index([currency])
+  @@map("catalog_products")
 }

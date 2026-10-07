@@ -1,7 +1,7 @@
 import { UnauthorizedException } from '@nestjs/common'
 import * as argon2 from 'argon2'
 import { beforeAll, beforeEach, describe, expect, it, vi } from 'vitest'
-import type { ControlPlaneAuditEntry, ControlPlaneAuditService, PrismaService } from '../platform'
+import type { AttemptLimiter, ControlPlaneAuditEntry, ControlPlaneAuditService, PrismaService } from '../platform'
 import { OpsAuthService } from './auth.service'
 
 interface StoredOperator {
@@ -45,11 +45,13 @@ describe('OpsAuthService', () => {
         return Promise.resolve()
       },
     } as ControlPlaneAuditService
-    service = new OpsAuthService(prisma, audit)
+    // The shared throttle has its own e2e coverage (test/login-throttle.e2e-spec.ts).
+    const limiter = { consume: () => Promise.resolve(), refund: () => Promise.resolve() } as unknown as AttemptLimiter
+    service = new OpsAuthService(prisma, audit, limiter)
   })
 
   it('returns a token and the operator for valid credentials, and audits the login', async () => {
-    const result = await service.login(EMAIL, PASSWORD)
+    const result = await service.login(EMAIL, PASSWORD, '127.0.0.1')
     expect(result.operator).toEqual({ id: OPERATOR_ID, email: EMAIL })
     expect(result.token).toBeTruthy()
     expect(auditEntries.map((e) => e.action)).toEqual(['operator.login.succeeded'])
@@ -57,22 +59,22 @@ describe('OpsAuthService', () => {
   })
 
   it('normalizes the email before lookup', async () => {
-    await service.login(`  ${EMAIL.toUpperCase()}  `, PASSWORD)
+    await service.login(`  ${EMAIL.toUpperCase()}  `, PASSWORD, '127.0.0.1')
     expect(findUnique).toHaveBeenCalledWith({ where: { email: EMAIL } })
   })
 
   it('rejects a wrong password with the generic message and audits the failure', async () => {
-    const attempt = service.login(EMAIL, 'wrong-password')
+    const attempt = service.login(EMAIL, 'wrong-password', '127.0.0.1')
     await expect(attempt).rejects.toThrow(UnauthorizedException)
-    await expect(service.login(EMAIL, 'wrong-password')).rejects.toMatchObject({
+    await expect(service.login(EMAIL, 'wrong-password', '127.0.0.1')).rejects.toMatchObject({
       response: { code: 'invalid_credentials', message: 'Incorrect email or password' },
     })
     expect(auditEntries.map((e) => e.action)).toContain('operator.login.failed')
   })
 
   it('rejects an unknown email with the exact same generic error as a wrong password', async () => {
-    const unknownEmail = service.login('nobody@restiq.example', PASSWORD).catch((e: unknown) => e)
-    const wrongPassword = service.login(EMAIL, 'wrong-password').catch((e: unknown) => e)
+    const unknownEmail = service.login('nobody@restiq.example', PASSWORD, '127.0.0.1').catch((e: unknown) => e)
+    const wrongPassword = service.login(EMAIL, 'wrong-password', '127.0.0.1').catch((e: unknown) => e)
     const [a, b] = await Promise.all([unknownEmail, wrongPassword])
     expect(a).toBeInstanceOf(UnauthorizedException)
     expect((a as UnauthorizedException).getResponse()).toEqual((b as UnauthorizedException).getResponse())

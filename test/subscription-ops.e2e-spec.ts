@@ -59,6 +59,7 @@ async function wipe(prisma: PrismaClient): Promise<void> {
   await prisma.menuCategory.deleteMany()
   await prisma.billShare.deleteMany()
   await prisma.tender.deleteMany()
+  await prisma.paymentIntent.deleteMany()
   await prisma.bill.deleteMany()
   await prisma.billNumberCounter.deleteMany()
   await prisma.tokenNumberCounter.deleteMany()

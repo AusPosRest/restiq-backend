@@ -1,5 +1,5 @@
 import { Controller, HttpCode, Post } from '@nestjs/common'
-import { CurrentStaff, PosPrincipal } from '../../platform'
+import { AnyStaff, CurrentStaff, PosPrincipal } from '../../platform'
 import { ClockEventView } from '../auth/auth.dtos'
 import { ClockService } from './clock.service'
 
@@ -8,6 +8,7 @@ export class PosClockController {
   constructor(private readonly clock: ClockService) {}
 
   @Post('out')
+  @AnyStaff()
   @HttpCode(200)
   clockOut(@CurrentStaff() staff: PosPrincipal): Promise<ClockEventView> {
     return this.clock.clockOut(staff)

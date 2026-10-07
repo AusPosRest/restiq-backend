@@ -1,12 +1,11 @@
 // CAP-1: an invited owner accepts their invite, sets a password, and lands
 // with an admin-realm (aud:"admin") session in one call - no extra login step.
 // Issue #118 adds the returning-owner counterpart: password login.
-import { BadRequestException, ConflictException, HttpException, Injectable, UnauthorizedException } from '@nestjs/common'
+import { BadRequestException, ConflictException, Injectable, UnauthorizedException } from '@nestjs/common'
 import * as argon2 from 'argon2'
 import { createHash } from 'node:crypto'
 import type { Prisma } from '../generated/prisma/client'
-import { AdminPrincipal, RegionRegistryService, signAdminToken } from '../platform'
-import { clearAttempts, isLockedOut, recordFailedAttempt } from './login-lockout'
+import { AdminPrincipal, AttemptLimiter, AttemptRule, RegionRegistryService, signAdminToken } from '../platform'
 
 export interface AcceptInviteResult {
   token: string
@@ -29,6 +28,16 @@ async function setOwnerLoginContext(tx: Prisma.TransactionClient): Promise<void>
   await tx.$executeRaw`SELECT set_config('app.owner_login_context', 'login', true)`
 }
 
+// restiq-backend#171: per account (5 per 15 minutes) and per client IP (30
+// per 15 minutes, so one address can't walk through many accounts), shared
+// across instances - see platform/attempt-limiter.ts.
+function ownerLoginRules(email: string, ip: string): AttemptRule[] {
+  return [
+    { key: `owner-login:email:${email}`, max: 5, windowSeconds: 15 * 60 },
+    { key: `owner-login:ip:${ip}`, max: 30, windowSeconds: 15 * 60 },
+  ]
+}
+
 @Injectable()
 export class AdminAuthService {
   // Verified when the email matches no OwnerUser (or matches more than one -
@@ -37,14 +46,15 @@ export class AdminAuthService {
   // OpsAuthService.dummyHash).
   private dummyHash?: Promise<string>
 
-  constructor(private readonly registry: RegionRegistryService) {}
+  constructor(
+    private readonly registry: RegionRegistryService,
+    private readonly limiter: AttemptLimiter,
+  ) {}
 
-  async login(email: string, password: string): Promise<OwnerSessionResult> {
+  async login(email: string, password: string, ip: string): Promise<OwnerSessionResult> {
     const normalized = email.trim().toLowerCase()
-
-    if (isLockedOut(normalized)) {
-      throw new HttpException({ code: 'locked_out', message: 'Too many incorrect attempts - try again shortly' }, 429)
-    }
+    const rules = ownerLoginRules(normalized, ip)
+    await this.limiter.consume(rules)
 
     const plane = this.registry.planeFor(this.registry.homeRegion())
     const candidates = await plane.$transaction(async (tx) => {
@@ -64,11 +74,10 @@ export class AdminAuthService {
     const verified = await argon2.verify(hash, password)
 
     if (!owner || !verified) {
-      recordFailedAttempt(normalized)
       // Generic on purpose: never reveal which of email/password was wrong.
       throw new UnauthorizedException({ code: 'invalid_credentials', message: 'Email or password is incorrect' })
     }
-    clearAttempts(normalized)
+    await this.limiter.refund(rules)
 
     const principal: AdminPrincipal = { id: owner.id, tenantId: owner.tenantId, email: owner.email }
     return {

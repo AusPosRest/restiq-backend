@@ -90,6 +90,7 @@ async function wipe(prisma: PrismaClient): Promise<void> {
   await prisma.menuCategory.deleteMany()
   await prisma.billShare.deleteMany()
   await prisma.tender.deleteMany()
+  await prisma.paymentIntent.deleteMany()
   await prisma.bill.deleteMany()
   await prisma.billNumberCounter.deleteMany()
   await prisma.tokenNumberCounter.deleteMany()
@@ -143,10 +144,10 @@ async function createOwner(prisma: PrismaClient, name = 'Spice Route Hospitality
   return { tenantId, token }
 }
 
-async function createOutlet(prisma: PrismaClient, tenantId: string, name = 'Indiranagar'): Promise<string> {
+async function createOutlet(prisma: PrismaClient, tenantId: string, name = 'Indiranagar', type: 'dine_in' | 'qsr' | 'cloud_kitchen' | 'food_court' = 'dine_in'): Promise<string> {
   const brand = await prisma.brand.create({ data: { tenantId, name: 'Spice Route' } })
   const outlet = await prisma.outlet.create({
-    data: { tenantId, brandId: brand.id, name, address: 'A1', type: 'dine_in', timezone: 'Asia/Kolkata' },
+    data: { tenantId, brandId: brand.id, name, address: 'A1', type, timezone: 'Asia/Kolkata' },
   })
   return outlet.id
 }
@@ -522,6 +523,82 @@ describe('/admin/v1/outlets/:outletId/floor-plan (e2e)', () => {
       const outletId = await createOutlet(prisma, tenantId)
       const res = await request(httpServer).get(base(outletId))
       expect(res.status).toBe(401)
+    })
+  })
+
+  describe('POST /admin/v1/outlets/:outletId/starter-setup (D2)', () => {
+    const run = (outletId: string, token: string) => authed(request(httpServer).post(`/admin/v1/outlets/${outletId}/starter-setup`), token)
+
+    it('gives a dine-in outlet its stations, a main hall of 8 tables and its switches', async () => {
+      const { tenantId, token } = await createOwner(prisma)
+      const outletId = await createOutlet(prisma, tenantId, 'Indiranagar', 'dine_in')
+
+      const res = await run(outletId, token)
+      expect(res.status).toBe(200)
+      expect(res.body).toMatchObject({ type: 'dine_in', tablesCreated: 8 })
+      expect((res.body as { stationsCreated: string[] }).stationsCreated).toEqual(['Hot Kitchen', 'Cold / Salad', 'Bar', 'Dessert', 'Expo (pass)'])
+
+      const plan = (await authed(request(httpServer).get(base(outletId)), token)).body as FloorPlanBody
+      expect(plan.floors).toHaveLength(1)
+      expect(plan.floors[0]?.tables.map((t) => t.label)).toEqual(['T1', 'T2', 'T3', 'T4', 'T5', 'T6', 'T7', 'T8'])
+      expect(plan.stations).toHaveLength(5)
+      const caps = await prisma.outletCapability.findMany({ where: { outletId } })
+      expect(caps.find((c) => c.key === 'qr_ordering')?.enabled).toBe(true)
+    })
+
+    it('gives a food-court stall one station, no table map, and token and kiosk switches on', async () => {
+      const { tenantId, token } = await createOwner(prisma)
+      const outletId = await createOutlet(prisma, tenantId, 'Stall 7', 'food_court')
+
+      const res = await run(outletId, token)
+      expect(res.body).toMatchObject({ type: 'food_court', stationsCreated: ['Stall prep'], tablesCreated: 0 })
+      expect(await prisma.floor.count({ where: { outletId } })).toBe(0)
+      const caps = Object.fromEntries((await prisma.outletCapability.findMany({ where: { outletId } })).map((c) => [c.key, c.enabled]))
+      expect(caps).toMatchObject({ token_queue: true, kiosk: true, qr_ordering: false })
+    })
+
+    it('only adds what is missing when run again, and never overrides the owner', async () => {
+      const { tenantId, token } = await createOwner(prisma)
+      const outletId = await createOutlet(prisma, tenantId, 'Indiranagar', 'dine_in')
+      await run(outletId, token)
+      // The owner turns the QR switch off, removes a table and a station, and adds their own.
+      await authed(request(httpServer).patch(`/admin/v1/outlets/${outletId}/capabilities/qr_ordering`), token).send({ enabled: false }).expect(200)
+      const before = (await authed(request(httpServer).get(base(outletId)), token)).body as FloorPlanBody
+      await authed(request(httpServer).delete(`${base(outletId)}/tables/${before.floors[0].tables[0].id}`), token).expect(204)
+      const bar = before.stations.find((s) => s.name === 'Bar')!
+      await authed(request(httpServer).delete(`${base(outletId)}/stations/${bar.id}`), token).expect(204)
+      await authed(request(httpServer).post(`${base(outletId)}/stations`), token).send({ name: 'Tandoor', ageingThresholdMinutes: 12, noPrinterAcknowledged: true }).expect(201)
+
+      const again = await run(outletId, token)
+      // Nothing was re-added: the floor exists, the removed table stays gone, and the QR switch stays off.
+      expect(again.body).toMatchObject({ tablesCreated: 0, capabilitiesSet: [] })
+      const after = (await authed(request(httpServer).get(base(outletId)), token)).body as FloorPlanBody
+      expect(after.floors[0]?.tables).toHaveLength(7)
+      expect(after.stations.map((s) => s.name).sort()).toEqual(['Cold / Salad', 'Dessert', 'Expo (pass)', 'Hot Kitchen', 'Tandoor'])
+      expect((await prisma.outletCapability.findFirstOrThrow({ where: { outletId, key: 'qr_ordering' } })).enabled).toBe(false)
+    })
+
+    it('unlinks menu items from a removed station and lets the owner reuse its name', async () => {
+      const { tenantId, token } = await createOwner(prisma)
+      const outletId = await createOutlet(prisma, tenantId, 'Indiranagar', 'qsr')
+      await run(outletId, token)
+      const plan = (await authed(request(httpServer).get(base(outletId)), token)).body as FloorPlanBody
+      const grill = plan.stations.find((s) => s.name === 'Grill')!
+      const category = await prisma.menuCategory.create({ data: { tenantId, name: 'Mains', sortOrder: 1 } })
+      const item = await prisma.menuItem.create({ data: { tenantId, categoryId: category.id, name: 'Kebab', shortName: 'Kebab', stationId: grill.id } })
+
+      await authed(request(httpServer).delete(`${base(outletId)}/stations/${grill.id}`), token).expect(204)
+      expect((await prisma.menuItem.findUniqueOrThrow({ where: { id: item.id } })).stationId).toBeNull()
+      await authed(request(httpServer).delete(`${base(outletId)}/stations/${grill.id}`), token).expect(404)
+      await authed(request(httpServer).post(`${base(outletId)}/stations`), token).send({ name: 'Grill', ageingThresholdMinutes: 10, noPrinterAcknowledged: true }).expect(201)
+    })
+
+    it('404s for another tenant\'s outlet and 401s without a session', async () => {
+      const mine = await createOwner(prisma)
+      const other = await createOwner(prisma, 'Other Co')
+      const theirs = await createOutlet(prisma, other.tenantId)
+      expect((await run(theirs, mine.token)).status).toBe(404)
+      expect((await request(httpServer).post(`/admin/v1/outlets/${theirs}/starter-setup`)).status).toBe(401)
     })
   })
 })

@@ -51,6 +51,99 @@ story by story.
   day's open clock-in; `409 not_clocked_in` if the staff member's latest
   event isn't already an open clock-in (`src/pos/clock/clock.service.ts`).
 
+### Sessions and permissions (issue #169)
+
+- **Session version.** A POS/KDS token carries `sv`, the staff member's
+  `staff_users.session_version` at login.
+  - `PosAuthGuard` re-reads the staff row on every `/pos` and `/kitchen`
+    request.
+  - It returns 401 `session_revoked` if the row is gone, belongs to another
+    tenant, has a revoked PIN, or has a different version.
+  - The version is bumped by: PIN issue/reissue, PIN revoke, role change, and
+    `POST /pos/v1/auth/logout` (which signs that staff member out on every
+    device).
+  - A token with no `sv`, meaning anything issued before #169, is refused, so
+    everyone logs in once more after that deploy.
+- **Role from the database.** The role is never in the token; the guard reads it
+  from the staff row, so a role change takes effect on the next request.
+- **Permission catalog** (`src/platform/permissions.ts`). Every non-public
+  handler carries either `@RequirePermission(key)` or `@AnyStaff()`. The guard
+  refuses a handler with neither (fail closed).
+
+  | Role | Permissions |
+  |---|---|
+  | Owner, Manager | all |
+  | Cashier | take_orders, fire_kitchen, settle_bills, discounts |
+  | Waiter | take_orders, fire_kitchen |
+  | Kitchen | fire_kitchen |
+  | Accountant | settle_bills, z_report |
+
+- **How routes map to permissions:**
+
+  | Permission | Routes |
+  |---|---|
+  | take_orders | open/counter order, lines, combos, transfer, request bill, print bill |
+  | fire_kitchen | send to kitchen (order status); KDS bump/recall/refire |
+  | settle_bills | payment intents, finalize, refund, shifts (open, cash movements, close), close table session |
+  | any staff | reads (menu, orders, bills, KDS queues, shift view, attendance); printer/terminal polling; heartbeat; clock out; logout |
+
+- **Manager PIN stays a second gate.** It still covers refunds, void-after-fire
+  and discounts over threshold. It adds to the caller's permission and never
+  replaces it.
+- **Owner UI.** `GET /admin/v1/roles` returns each role's `permissions`, so the
+  owner's Staff matrix shows the table the API enforces.
+- **Tests.** Covered by `test/pos-sessions.e2e-spec.ts`.
+
+### Sign-in throttling (issue #171)
+
+`src/platform/attempt-limiter.ts` replaces the three in-memory lockouts
+(POS PIN, owner login, guest join). Those reset on restart, weren't shared
+between instances, and the POS one was keyed by the guessed PIN, so rotating
+guesses never tripped it.
+
+**How it works:**
+- Counters live in `auth_attempts`, one row per key, using a fixed window.
+- Each attempt is counted **before** the secret is checked, in one atomic
+  upsert.
+- Once over the limit, the key answers 429 `locked_out` until its window ends.
+- A correct secret gives back only its own attempt; earlier failures still
+  count.
+- Rows are purged a day after their window.
+
+**Limits by path:**
+
+| Path | Keys (limit / window) |
+|---|---|
+| POS PIN, enrolled device | `pos-pin:device:<tenant>:<device>` 10 / 15 min |
+| POS PIN, unbound browser | `pos-pin:ip:<tenant>:<ip>` 10 / 15 min **and** `pos-pin:untrusted:<tenant>` 30 / hour |
+| Owner login | per email 5 / 15 min, per IP 30 / 15 min |
+| Operator login | per email 5 / 15 min, per IP 30 / 15 min |
+| Manager PIN | per requesting staff member 5 / 15 min |
+| Guest table join | per table 10 / 15 min |
+
+**Trust rules:**
+- A device id is trusted only when it is an **active, unrevoked device of that
+  tenant**. Anything else is limited by IP.
+- Enrolled devices never count toward the tenant-wide cap for unbound
+  browsers, so an attacker can't lock the tills out.
+- `req.ip` is resolved through `TRUST_PROXY_HOPS`. It is 1 on Fly and 0 by
+  default, which means `X-Forwarded-For` is ignored.
+- Sign-ins reach the API through the web app's own server routes, so `req.ip`
+  there is the web server. Those routes send the browser's address in
+  `X-Restiq-Client-Ip`, and it is believed only with a matching
+  `X-Restiq-Proxy-Secret` (`PROXY_SHARED_SECRET`, compared in constant time).
+  See `src/platform/client-ip.ts`.
+
+**Tests:** `test/login-throttle.e2e-spec.ts` covers:
+- a burst of concurrent requests;
+- two app instances sharing one count;
+- a restart;
+- trusted, unknown, revoked and foreign device ids;
+- a busy shared till;
+- spoofed and proxied `X-Forwarded-For`;
+- the tenant cap;
+- manager PIN and operator login.
+
 ### CAP-1 integration points for later stories
 
 - CAP-11 (device & staff attendance status, story 11, since built - see
@@ -1303,6 +1396,22 @@ a real Postgres test DB)
 
 ## Payments, first slice - the simulated card terminal (issue #130, epic #129)
 
+> **Off in production (issue #170).** The simulator approves payments with no
+> money moving, so it runs only when `PAYMENTS_SIMULATOR=on` (local dev, demos,
+> e2e). `fly.toml` pins it `off`.
+>
+> **With it off:**
+> - sending to the terminal is refused with 409 `provider_unavailable`;
+> - `simulate` is 404;
+> - `confirmIntent` refuses a simulated intent (`simulator_disabled`), including
+>   one created while the simulator was on;
+> - `commitFinalize` refuses a bill that carries a simulated tender
+>   (`simulated_tender`).
+>
+> Cash and external-terminal payments (card on the venue's own machine plus a
+> reference, #146) are unaffected. Covered by the "with the simulator off"
+> block in `test/pos-payment-intents.e2e-spec.ts`.
+
 - **Intent:** the first concrete piece of the payments architecture
   (restiq-web/wiki/features/payments.md, ADR-001..012 in
   restiq-web/docs/DECISIONS.md): an electronic payment is a
@@ -1576,3 +1685,23 @@ a real Postgres test DB)
   connectivity status", singular and static, with no real device driver
   call in this prototype; wiring it to real `Printer` rows would imply a
   liveness check this codebase has nowhere to perform.
+
+## Payment history - today's payments at the outlet (issue #158)
+
+- **Intent:** a cashier sees every payment taken at their outlet today, who
+  took it, and per-method totals - without opening the owner's reports.
+- **Route:** `GET pos/v1/outlets/:outletId/payments` (pos realm; the outlet
+  must belong to the token's tenant, else 404) →
+  `{ outletId, date, asOf, currency, totalMinor, count, byMethod[], payments[] }`.
+  `payments[]` is every `tenders` row on a **finalized** bill at the outlet
+  whose `created_at` falls on today in `outlet.timezone` (48 h lookback +
+  `clock.util.ts#localDateKey`, the same "today" attendance uses), newest
+  first: `{ id, billId, billNumber, orderId, tableLabel, tokenNumber,
+  method, amountMinor, reference, takenBy: { staffId, name } | null,
+  createdAt }`. `takenBy` is the bill's finalising staff member.
+  `byMethod[]` is `{ method, count, amountMinor }` sorted by amount.
+- **Built in:** `bills.service.ts#listPaymentsToday`, `bills.dtos.ts`
+  `PaymentHistoryView`. `bill-core.ts#currencyForCountry` is now exported.
+- **Tests:** `pos-bills.e2e-spec.ts` ▸ "GET /pos/v1/outlets/:outletId/payments".
+- **Not built (by design):** refunds/credit notes in the list (separate
+  ledger), pagination, a date picker (today only, per the ask).

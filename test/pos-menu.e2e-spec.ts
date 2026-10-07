@@ -81,6 +81,7 @@ async function wipe(prisma: PrismaClient): Promise<void> {
   await prisma.menuItem.deleteMany()
   await prisma.menuCategory.deleteMany()
   await prisma.tender.deleteMany()
+  await prisma.paymentIntent.deleteMany()
   await prisma.bill.deleteMany()
   await prisma.billNumberCounter.deleteMany()
   await prisma.tokenNumberCounter.deleteMany()
@@ -91,6 +92,9 @@ async function wipe(prisma: PrismaClient): Promise<void> {
   await prisma.outletCapability.deleteMany()
   await prisma.station.deleteMany()
   await prisma.printer.deleteMany()
+  // Guest sessions FK to dining_tables (RESTRICT) - another file may have left some.
+  await prisma.guest.deleteMany()
+  await prisma.tableSession.deleteMany()
   await prisma.diningTable.deleteMany()
   await prisma.floor.deleteMany()
   await prisma.outlet.deleteMany()
@@ -135,9 +139,9 @@ async function createOutlet(prisma: PrismaClient, tenantId: string, name = 'Indi
 }
 
 async function createStaff(prisma: PrismaClient, tenantId: string, outletId: string, name: string): Promise<{ id: string; token: string }> {
-  const role = await prisma.role.create({ data: { tenantId, name: `Waiter-${uuidv7()}`, isSystem: false } })
+  const role = await prisma.role.upsert({ where: { tenantId_name: { tenantId, name: 'Cashier' } }, update: {}, create: { tenantId, name: 'Cashier', isSystem: true, isManager: false } })
   const staff = await prisma.staffUser.create({ data: { tenantId, roleId: role.id, name } })
-  const token = signPosToken({ id: staff.id, tenantId, outletId, name })
+  const token = signPosToken({ sessionVersion: 0, id: staff.id, tenantId, outletId, name })
   return { id: staff.id, token }
 }
 
@@ -221,6 +225,21 @@ describe('/pos/v1/menu (e2e)', () => {
     expect(body.categories).toEqual([expect.objectContaining({ id: categoryId })])
     expect(body.items).toHaveLength(1)
     expect(body.items[0]).toMatchObject({ id: itemId, categoryId, priceMinor: 19000, variants: [], available: true })
+  })
+
+  it('carries photoUrl by default, and nulls it once the outlet turns menu_photos off (#148)', async () => {
+    const tenantId = await createTenant(prisma)
+    const outletId = await createOutlet(prisma, tenantId)
+    const waiter = await createStaff(prisma, tenantId, outletId, 'Asha')
+    const { itemId } = await createItemWithPrice(prisma, tenantId, 19000)
+    await prisma.menuItem.update({ where: { id: itemId }, data: { photoUrl: 'https://cdn.example.com/dosa.jpg' } })
+
+    const on = await authed(request(httpServer).get('/pos/v1/menu'), waiter.token)
+    expect(on.body).toMatchObject({ items: [{ id: itemId, photoUrl: 'https://cdn.example.com/dosa.jpg' }] })
+
+    await prisma.outletCapability.create({ data: { tenantId, outletId, key: 'menu_photos', enabled: false } })
+    const off = await authed(request(httpServer).get('/pos/v1/menu'), waiter.token)
+    expect(off.body).toMatchObject({ items: [{ id: itemId, photoUrl: null }] })
   })
 
   it('prices a varianted item per-variant, with a null base price', async () => {

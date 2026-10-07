@@ -40,6 +40,7 @@ async function wipe(prisma: PrismaClient): Promise<void> {
   await prisma.menuCategory.deleteMany()
   await prisma.billShare.deleteMany()
   await prisma.tender.deleteMany()
+  await prisma.paymentIntent.deleteMany()
   await prisma.bill.deleteMany()
   await prisma.billNumberCounter.deleteMany()
   await prisma.tokenNumberCounter.deleteMany()
@@ -182,7 +183,7 @@ describe('/guest realm separation (e2e)', () => {
   })
 
   it('rejects a real pos session token on /guest', async () => {
-    const posToken = signPosToken({ id: uuidv7(), tenantId, outletId, name: 'Realm Staff' })
+    const posToken = signPosToken({ sessionVersion: 0, id: uuidv7(), tenantId, outletId, name: 'Realm Staff' })
     const res = await request(httpServer).get('/guest/v1/session').set('Authorization', `Bearer ${posToken}`)
     expect(res.status).toBe(401)
   })
@@ -213,7 +214,7 @@ describe('/guest realm separation (e2e)', () => {
   })
 
   it("rejects a pos session token on /guest's own routes", async () => {
-    const posToken = signPosToken({ id: uuidv7(), tenantId, outletId, name: 'Realm Staff' })
+    const posToken = signPosToken({ sessionVersion: 0, id: uuidv7(), tenantId, outletId, name: 'Realm Staff' })
     const res = await request(httpServer).get('/guest/v1/session').set('Authorization', `Bearer ${posToken}`)
     expect(res.status).toBe(401)
   })
