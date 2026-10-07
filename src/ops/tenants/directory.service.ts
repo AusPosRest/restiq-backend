@@ -7,10 +7,6 @@ import { createHash, randomBytes } from 'node:crypto'
 import type { Prisma, PrismaClient } from '../../generated/prisma/client'
 import { OpsPrincipal, PrismaService, RegionRegistryService } from '../../platform'
 import {
-  CAPABILITY_DEFAULTS,
-  CAPABILITY_KEYS,
-  CapabilityKey,
-  ToggleCapabilityDto,
   UpdateBrandingDto,
   UpdateTenantDto,
 } from './directory.dtos'
@@ -86,10 +82,20 @@ export interface TenantDetail {
     gstRatePercent: number | null
   }>
   brands: Array<{ id: string; name: string }>
-  outlets: Array<{ id: string; name: string; brandId: string; brandName: string; address: string; type: string; timezone: string }>
+  // issue #191: each outlet's real switches (outlet_capabilities - the ones
+  // guest QR, kiosk and menu photos read). The owner sets them; ops reads them.
+  outlets: Array<{
+    id: string
+    name: string
+    brandId: string
+    brandName: string
+    address: string
+    type: string
+    timezone: string
+    capabilities: Array<{ key: string; enabled: boolean }>
+  }>
   rolesCount: number
   ownerInvite: InviteView | null
-  capabilities: Array<{ key: CapabilityKey; enabled: boolean }>
 }
 
 interface Cursor {
@@ -220,8 +226,11 @@ export class TenantDirectoryService {
         include: {
           taxRegistrations: true,
           brands: { orderBy: { createdAt: 'asc' } },
-          outlets: { where: { deletedAt: null }, include: { brand: { select: { name: true } } }, orderBy: { createdAt: 'asc' } },
-          capabilities: true,
+          outlets: {
+            where: { deletedAt: null },
+            include: { brand: { select: { name: true } }, capabilities: { select: { key: true, enabled: true }, orderBy: { key: 'asc' } } },
+            orderBy: { createdAt: 'asc' },
+          },
           ownerInvites: { orderBy: { createdAt: 'desc' }, take: 1 },
           _count: { select: { roles: true } },
         },
@@ -230,7 +239,6 @@ export class TenantDirectoryService {
     })
     if (!result) throw new NotFoundException({ code: 'not_found', message: 'No such tenant' })
 
-    const overrides = new Map(result.capabilities.map((c) => [c.key, c.enabled]))
     const invite = result.ownerInvites[0]
 
     return {
@@ -268,6 +276,7 @@ export class TenantDirectoryService {
         address: o.address,
         type: o.type,
         timezone: o.timezone,
+        capabilities: o.capabilities,
       })),
       rolesCount: result._count.roles,
       ownerInvite: invite
@@ -280,7 +289,6 @@ export class TenantDirectoryService {
             createdAt: invite.createdAt.toISOString(),
           }
         : null,
-      capabilities: CAPABILITY_KEYS.map((key) => ({ key, enabled: overrides.get(key) ?? CAPABILITY_DEFAULTS[key] })),
     }
   }
 
@@ -323,26 +331,6 @@ export class TenantDirectoryService {
     return { tenant: updated }
   }
 
-  async toggleCapability(
-    operator: OpsPrincipal,
-    id: string,
-    key: string,
-    dto: ToggleCapabilityDto,
-  ): Promise<{ capability: { key: CapabilityKey; enabled: boolean } }> {
-    if (!(CAPABILITY_KEYS as readonly string[]).includes(key)) {
-      badRequest(`key must be one of: ${CAPABILITY_KEYS.join(', ')}`)
-    }
-    const capKey = key as CapabilityKey
-    const action = `tenant.capability.${capKey}.${dto.enabled ? 'enabled' : 'disabled'}`
-    await this.mutate(operator, id, action, dto.reason, async (tx) => {
-      await tx.tenantCapability.upsert({
-        where: { tenantId_key: { tenantId: id, key: capKey } },
-        create: { tenantId: id, key: capKey, enabled: dto.enabled },
-        update: { enabled: dto.enabled },
-      })
-    })
-    return { capability: { key: capKey, enabled: dto.enabled } }
-  }
 
   async updateBranding(
     operator: OpsPrincipal,

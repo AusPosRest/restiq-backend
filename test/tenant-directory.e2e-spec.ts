@@ -172,7 +172,10 @@ describe('/ops/v1/tenants directory (e2e)', () => {
         expiresAt: new Date(now + day),
       },
     })
-    await prisma.tenantCapability.create({ data: { tenantId: ids.alpha, key: 'reservations', enabled: true } })
+    // issue #191: the outlet switches are the real ones; the old tenant row is ignored.
+    await prisma.tenantCapability.create({ data: { tenantId: ids.alpha, key: 'self_order_qr', enabled: false } })
+    const alphaOutlet = await prisma.outlet.findFirstOrThrow({ where: { tenantId: ids.alpha } })
+    await prisma.outletCapability.create({ data: { tenantId: ids.alpha, outletId: alphaOutlet.id, key: 'qr_ordering', enabled: true } })
 
     const moduleRef = await Test.createTestingModule({ imports: [AppModule] }).compile()
     app = moduleRef.createNestApplication()
@@ -261,7 +264,6 @@ describe('/ops/v1/tenants directory (e2e)', () => {
         outlets: Array<Record<string, unknown>>
         rolesCount: number
         ownerInvite: Record<string, unknown> | null
-        capabilities: Array<{ key: string; enabled: boolean }>
       }
       expect(body.tenant).toMatchObject({
         id: ids.alpha,
@@ -279,12 +281,9 @@ describe('/ops/v1/tenants directory (e2e)', () => {
       expect(body.outlets[0]).toMatchObject({ name: 'Alpha One', brandName: 'Alpha Brand', type: 'dine_in' })
       expect(body.rolesCount).toBe(2)
       expect(body.ownerInvite).toMatchObject({ email: 'owner@alpha.example', status: 'pending' })
-      // Every known capability key appears; the stored override wins.
-      const byKey = new Map(body.capabilities.map((c) => [c.key, c.enabled]))
-      expect(byKey.get('reservations')).toBe(true)
-      expect(byKey.get('tables_floor_plan')).toBe(true)
-      expect(byKey.get('self_order_qr')).toBe(false)
-      expect(byKey.size).toBeGreaterThanOrEqual(6)
+      // issue #191: each outlet carries the switches guests actually hit; no tenant-level list.
+      expect(body.outlets[0].capabilities).toEqual([{ key: 'qr_ordering', enabled: true }])
+      expect(body).not.toHaveProperty('capabilities')
     })
 
     it('404s for an unknown tenant', async () => {
@@ -319,50 +318,9 @@ describe('/ops/v1/tenants directory (e2e)', () => {
       ).toBe(400)
     })
 
-    it('toggles a capability, audited with the key', async () => {
-      const res = await authed(request(httpServer).put(`/ops/v1/tenants/${ids.alpha}/capabilities/self_order_qr`)).send({
-        enabled: true,
-        reason: 'Tenant requested QR ordering pilot',
-      })
-      expect(res.status).toBe(200)
-      const row = await prisma.tenantCapability.findUnique({
-        where: { tenantId_key: { tenantId: ids.alpha, key: 'self_order_qr' } },
-      })
-      expect(row?.enabled).toBe(true)
-      const audit = await prisma.auditEvent.findMany({
-        where: { tenantId: ids.alpha, action: 'tenant.capability.self_order_qr.enabled' },
-      })
-      expect(audit).toHaveLength(1)
-      expect(audit[0]?.reason).toBe('Tenant requested QR ordering pilot')
-
-      // Toggling back off updates the same row and audits again.
-      const off = await authed(request(httpServer).put(`/ops/v1/tenants/${ids.alpha}/capabilities/self_order_qr`)).send({
-        enabled: false,
-        reason: 'Pilot ended',
-      })
-      expect(off.status).toBe(200)
-      expect(
-        (await prisma.tenantCapability.findUnique({ where: { tenantId_key: { tenantId: ids.alpha, key: 'self_order_qr' } } }))
-          ?.enabled,
-      ).toBe(false)
-      expect(
-        await prisma.auditEvent.count({ where: { tenantId: ids.alpha, action: 'tenant.capability.self_order_qr.disabled' } }),
-      ).toBe(1)
-    })
-
-    it('rejects a capability toggle without a reason or with an unknown key', async () => {
-      expect(
-        (await authed(request(httpServer).put(`/ops/v1/tenants/${ids.alpha}/capabilities/self_order_qr`)).send({ enabled: true }))
-          .status,
-      ).toBe(400)
-      expect(
-        (
-          await authed(request(httpServer).put(`/ops/v1/tenants/${ids.alpha}/capabilities/time_travel`)).send({
-            enabled: true,
-            reason: 'x',
-          })
-        ).status,
-      ).toBe(400)
+    it('has no tenant-level capability toggle any more (issue #191)', async () => {
+      const res = await authed(request(httpServer).put(`/ops/v1/tenants/${ids.alpha}/capabilities/self_order_qr`)).send({ enabled: true, reason: 'x' })
+      expect(res.status).toBe(404)
     })
 
     it('updates branding tokens, audited', async () => {
