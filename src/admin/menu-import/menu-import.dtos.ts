@@ -27,6 +27,10 @@ export class PatchMenuImportDraftDto {
   @ValidateNested({ each: true })
   @Type(() => PatchDraftItemDto)
   items!: PatchDraftItemDto[]
+
+  // Rows the owner drops before commit, e.g. ones already on the menu (restiq-web#247).
+  @IsOptional() @IsArray() @IsUUID('all', { each: true })
+  removeIds?: string[]
 }
 
 export interface DraftItemView {
