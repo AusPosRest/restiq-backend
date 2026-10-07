@@ -21,7 +21,7 @@
 // rollup.
 import { Injectable, NotFoundException } from '@nestjs/common'
 import { AdminPrincipal, RegionRegistryService } from '../../platform'
-import { localDateKey } from '../../pos/clock/clock.util'
+import { localDateKey } from '../../pos'
 import { setTenantContext } from '../menu/tenant-context'
 
 export interface DashboardMetric {
