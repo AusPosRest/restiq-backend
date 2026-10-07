@@ -908,3 +908,13 @@
   `table_has_active_order`. Tests: `test/floor-plan.e2e-spec.ts`,
   `test/tenant-onboarding.e2e-spec.ts`, `test/pos-counter-orders.e2e-spec.ts`,
   `test/guest-order-placement.e2e-spec.ts`.
+- **2026-10-07 - Owner password reset by email, revocable owner sessions (#181).**
+  `POST /admin/v1/auth/forgot-password` always answers 202 (never says whether the
+  email is registered; 3 per email and 10 per address in 15 minutes) and emails a
+  single-use, one-hour link through `MailService` (`MAIL_PROVIDER=mailjet`, or `log`
+  in development). `POST /admin/v1/auth/reset-password` sets the password (10+
+  characters), uses the link up and moves `owner_users.session_version` on, so every
+  older owner token answers 401 `session_revoked`. Tokens issued before this carry no
+  version and expire as before. Production start refuses to run without Mailjet
+  settings. Migration `20261007200000_owner_password_reset`. Tests:
+  `test/owner-password-reset.e2e-spec.ts`, `src/platform/mail.service.spec.ts`.

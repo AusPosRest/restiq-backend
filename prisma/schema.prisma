@@ -144,6 +144,7 @@ model Tenant {
   itemOutletOverrides ItemOutletOverride[]
   menuImportDrafts    MenuImportDraft[]
   ownerInvites        OwnerInvite[]
+  ownerPasswordResets OwnerPasswordReset[]
   ownerUsers          OwnerUser[]
   agreementSignatures AgreementSignature[]
   capabilities        TenantCapability[]
@@ -671,19 +672,40 @@ model OwnerInvite {
 // invite acceptance. A separate model from OperatorUser by design (AD-3's
 // disjoint-realm rule extends to AD-10) - no shared identity table.
 model OwnerUser {
-  id           String   @id @default(uuid(7)) @db.Uuid
-  tenantId     String   @map("tenant_id") @db.Uuid
-  email        String
-  firstName    String   @map("first_name")
-  lastName     String   @map("last_name")
-  passwordHash String   @map("password_hash")
-  createdAt    DateTime @default(now()) @map("created_at") @db.Timestamptz(6)
-  updatedAt    DateTime @updatedAt @map("updated_at") @db.Timestamptz(6)
+  id             String   @id @default(uuid(7)) @db.Uuid
+  tenantId       String   @map("tenant_id") @db.Uuid
+  email          String
+  firstName      String   @map("first_name")
+  lastName       String   @map("last_name")
+  passwordHash   String   @map("password_hash")
+  // Bumped by a password reset; owner tokens carry it and are refused once it moves on (#181).
+  sessionVersion Int      @default(0) @map("session_version")
+  createdAt      DateTime @default(now()) @map("created_at") @db.Timestamptz(6)
+  updatedAt      DateTime @updatedAt @map("updated_at") @db.Timestamptz(6)
 
-  tenant Tenant @relation(fields: [tenantId], references: [id])
+  tenant         Tenant               @relation(fields: [tenantId], references: [id])
+  passwordResets OwnerPasswordReset[]
 
   @@unique([tenantId, email])
   @@map("owner_users")
+}
+
+// Owner password reset (#181): one single-use, one-hour token per request; only its hash is stored.
+model OwnerPasswordReset {
+  id        String    @id @default(uuid(7)) @db.Uuid
+  tenantId  String    @map("tenant_id") @db.Uuid
+  ownerId   String    @map("owner_id") @db.Uuid
+  tokenHash String    @unique @map("token_hash")
+  expiresAt DateTime  @map("expires_at") @db.Timestamptz(6)
+  usedAt    DateTime? @map("used_at") @db.Timestamptz(6)
+  createdAt DateTime  @default(now()) @map("created_at") @db.Timestamptz(6)
+
+  tenant Tenant    @relation(fields: [tenantId], references: [id])
+  owner  OwnerUser @relation(fields: [ownerId], references: [id], onDelete: Cascade)
+
+  @@index([tenantId])
+  @@index([ownerId])
+  @@map("owner_password_resets")
 }
 
 // CAP-2 go-live checklist: one row per tenant, a completion timestamp per
@@ -717,17 +739,17 @@ model ChecklistProgress {
 // owner_users.password_hash); pinRevokedAt marks a PIN inactive without
 // erasing the issuance history.
 model StaffUser {
-  id           String    @id @default(uuid(7)) @db.Uuid
-  tenantId     String    @map("tenant_id") @db.Uuid
-  roleId       String    @map("role_id") @db.Uuid
-  name         String
-  email        String?
-  pinHash      String?   @map("pin_hash")
-  pinIssuedAt  DateTime? @map("pin_issued_at") @db.Timestamptz(6)
-  pinRevokedAt DateTime? @map("pin_revoked_at") @db.Timestamptz(6)
-  sessionVersion Int      @default(0) @map("session_version")
-  createdAt    DateTime  @default(now()) @map("created_at") @db.Timestamptz(6)
-  updatedAt    DateTime  @updatedAt @map("updated_at") @db.Timestamptz(6)
+  id             String    @id @default(uuid(7)) @db.Uuid
+  tenantId       String    @map("tenant_id") @db.Uuid
+  roleId         String    @map("role_id") @db.Uuid
+  name           String
+  email          String?
+  pinHash        String?   @map("pin_hash")
+  pinIssuedAt    DateTime? @map("pin_issued_at") @db.Timestamptz(6)
+  pinRevokedAt   DateTime? @map("pin_revoked_at") @db.Timestamptz(6)
+  sessionVersion Int       @default(0) @map("session_version")
+  createdAt      DateTime  @default(now()) @map("created_at") @db.Timestamptz(6)
+  updatedAt      DateTime  @updatedAt @map("updated_at") @db.Timestamptz(6)
 
   tenant                Tenant          @relation(fields: [tenantId], references: [id])
   role                  Role            @relation(fields: [roleId], references: [id])
@@ -854,13 +876,13 @@ enum TableSessionStatus {
 }
 
 model TableSession {
-  id       String              @id @default(uuid(7)) @db.Uuid
-  tenantId String              @map("tenant_id") @db.Uuid
-  outletId String              @map("outlet_id") @db.Uuid
+  id                  String             @id @default(uuid(7)) @db.Uuid
+  tenantId            String             @map("tenant_id") @db.Uuid
+  outletId            String             @map("outlet_id") @db.Uuid
   // Nullable since issue #138: a kiosk session has no table - the order it
   // places gets a token number instead (see Order.tokenNumber).
-  tableId  String?             @map("table_id") @db.Uuid
-  status   TableSessionStatus  @default(open)
+  tableId             String?            @map("table_id") @db.Uuid
+  status              TableSessionStatus @default(open)
   // 4-digit PIN gating who can join this table's shared cart - deliberately
   // NOT credential-grade (SPEC qr-self-order Constraints; AD-17). It protects
   // against a stranger joining the wrong table's order, not money or an
@@ -879,8 +901,8 @@ model TableSession {
   // silently renewed.
   expiresAt           DateTime           @map("expires_at") @db.Timestamptz(6)
 
-  tenant    Tenant      @relation(fields: [tenantId], references: [id])
-  outlet    Outlet      @relation(fields: [outletId], references: [id])
+  tenant    Tenant       @relation(fields: [tenantId], references: [id])
+  outlet    Outlet       @relation(fields: [outletId], references: [id])
   table     DiningTable? @relation(fields: [tableId], references: [id])
   guests    Guest[]
   cartLines CartLine[]

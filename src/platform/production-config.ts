@@ -25,6 +25,14 @@ export function productionConfigProblems(env: NodeJS.ProcessEnv): string[] {
   if (env.PAYMENTS_SIMULATOR === 'on') problems.push('PAYMENTS_SIMULATOR must not be on in production - it approves card payments with no money moving')
   if (!env.WEB_ORIGIN?.startsWith('https://')) problems.push('WEB_ORIGIN must be the https:// origin of the web app')
 
+  if (env.MAIL_PROVIDER !== 'mailjet') {
+    problems.push('MAIL_PROVIDER must be mailjet - owners reset their password by email, and the log provider sends nothing')
+  } else {
+    for (const name of ['MAILJET_API_KEY', 'MAILJET_API_SECRET', 'MAIL_FROM_EMAIL'] as const) {
+      if (!env[name]) problems.push(`${name} must be set when MAIL_PROVIDER is mailjet`)
+    }
+  }
+
   return problems
 }
 

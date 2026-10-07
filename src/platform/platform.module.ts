@@ -6,6 +6,7 @@ import { AttemptLimiter } from './attempt-limiter'
 import { ApiErrorFilter } from './api-error.filter'
 import { ControlPlaneAuditService } from './audit.service'
 import { GuestAuthGuard } from './guest-auth.guard'
+import { MailService } from './mail.service'
 import { ManagerAuthService } from './manager-auth.service'
 import { OpsAuthGuard } from './ops-auth.guard'
 import { PosAuthGuard } from './pos-auth.guard'
@@ -19,6 +20,7 @@ import { RegionRegistryService } from './region-registry.service'
     RegionRegistryService,
     ManagerAuthService,
     AttemptLimiter,
+    MailService,
     { provide: APP_GUARD, useClass: OpsAuthGuard },
     // AD-10: a second, disjoint global guard for /admin/* - each early-returns
     // true outside its own prefix, so both combine without interfering.
@@ -32,6 +34,6 @@ import { RegionRegistryService } from './region-registry.service'
     { provide: APP_FILTER, useClass: ApiErrorFilter },
     { provide: APP_PIPE, useValue: new ValidationPipe({ whitelist: true }) },
   ],
-  exports: [PrismaService, ControlPlaneAuditService, RegionRegistryService, ManagerAuthService, AttemptLimiter],
+  exports: [PrismaService, ControlPlaneAuditService, RegionRegistryService, ManagerAuthService, AttemptLimiter, MailService],
 })
 export class PlatformModule {}
