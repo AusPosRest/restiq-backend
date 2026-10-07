@@ -45,6 +45,17 @@ export class AdminAuthGuard implements CanActivate {
     if (await isTenantBlocked(this.registry, principal.tenantId)) {
       throw new ForbiddenException({ code: 'tenant_inactive', message: 'This tenant is no longer active' })
     }
+    // A token that carries a session version must still match the owner's: a password reset ends every older session.
+    if (principal.sessionVersion !== undefined) {
+      const plane = this.registry.planeFor(this.registry.homeRegion())
+      const owner = await plane.$transaction(async (tx) => {
+        await tx.$executeRaw`SELECT set_config('app.tenant_id', ${principal.tenantId}, true)`
+        return tx.ownerUser.findUnique({ where: { id: principal.id }, select: { tenantId: true, sessionVersion: true } })
+      })
+      if (!owner || owner.tenantId !== principal.tenantId || owner.sessionVersion !== principal.sessionVersion) {
+        throw new UnauthorizedException({ code: 'session_revoked', message: 'This session has ended - sign in again' })
+      }
+    }
     request.owner = principal
     return true
   }

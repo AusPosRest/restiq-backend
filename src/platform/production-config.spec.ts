@@ -12,6 +12,10 @@ const GOOD = {
   PROXY_SHARED_SECRET: s('e'),
   PAYMENTS_SIMULATOR: 'off',
   WEB_ORIGIN: 'https://restiq-web.vercel.app',
+  MAIL_PROVIDER: 'mailjet',
+  MAILJET_API_KEY: 'key',
+  MAILJET_API_SECRET: 'secret',
+  MAIL_FROM_EMAIL: 'no-reply@idelta.com.au',
 }
 
 describe('production config (#175)', () => {
@@ -32,6 +36,11 @@ describe('production config (#175)', () => {
     })
     expect(problems).toHaveLength(6)
     expect(problems.join(' ')).toMatch(/HOME_REGION.*POS_JWT_SECRET.*different.*PROXY_SHARED_SECRET.*PAYMENTS_SIMULATOR.*WEB_ORIGIN/)
+  })
+
+  it('requires Mailjet, fully configured: owners reset their password by email (#181)', () => {
+    expect(productionConfigProblems({ ...GOOD, MAIL_PROVIDER: 'log' }).join(' ')).toMatch(/MAIL_PROVIDER must be mailjet/)
+    expect(productionConfigProblems({ ...GOOD, MAILJET_API_SECRET: undefined, MAIL_FROM_EMAIL: undefined }).join(' ')).toMatch(/MAILJET_API_SECRET.*MAIL_FROM_EMAIL/)
   })
 
   it('only enforces in production', () => {
