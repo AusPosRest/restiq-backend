@@ -1,5 +1,9 @@
 # Completed
 
+- **2026-10-08** - Live status after the first sales (issue #189):
+  - `commitFinalize` flips a `provisioning` tenant to `active` on its first finalised bill, audited as `tenant.went_live` with reason "First sale".
+  - Ops KPI `devices_online` counts active devices heard from within the 1 h lagging threshold. `open_dlq` counts unresolved dead letters.
+  - Owner dashboard `sales` is today's tenders per outlet, on the outlet's local day.
 - **2026-10-08** - Device enrolment returns the restaurant and outlet names (issue #187).
   - `DevicesService.enrollWithActor` reads `tenantName` and `outletName` in the enrolment transaction and returns them next to `device` (`EnrollResult`).
   - This lets a till show "Binflow Indiranagar" instead of a UUID, and lets the PIN pad sign it into its own outlet.

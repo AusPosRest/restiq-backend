@@ -457,6 +457,21 @@ describe('/pos/v1 bill and settle (e2e)', () => {
       expect((second.body as ErrorBody).error.code).toBe('already_finalized')
     })
 
+    it('takes a provisioning tenant live on its first finalised bill, audited once (issue #189)', async () => {
+      const tenantId = await createTenant(prisma)
+      await prisma.tenant.update({ where: { id: tenantId }, data: { status: 'provisioning' } })
+      const outletId = await createOutlet(prisma, tenantId)
+      const { orderId, ownerToken } = await setUpSentOrder(tenantId, outletId, 10000)
+      const billId = ((await authed(request(httpServer).post(`/pos/v1/orders/${orderId}/bill`), ownerToken).send()).body as BillBody).id
+
+      const res = await authed(request(httpServer).post(`/pos/v1/bills/${billId}/finalize`), ownerToken).send({ tenders: [{ method: 'cash', amountMinor: 21000 }] })
+      expect(res.status).toBe(200)
+      expect((await prisma.tenant.findUnique({ where: { id: tenantId } }))?.status).toBe('active')
+      const audits = await prisma.auditEvent.findMany({ where: { tenantId, action: 'tenant.went_live' } })
+      expect(audits).toHaveLength(1)
+      expect(audits[0].reason).toBe('First sale')
+    })
+
     it('succeeds with a split multi-tender settlement summing to the total', async () => {
       const tenantId = await createTenant(prisma)
       const outletId = await createOutlet(prisma, tenantId)

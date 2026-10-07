@@ -14,6 +14,7 @@ import {
   UpdateBrandingDto,
   UpdateTenantDto,
 } from './directory.dtos'
+import { LAGGING_THRESHOLD_SECONDS } from '../sync-health/severity'
 import { OWNER_INVITE_TTL_HOURS } from './tenants.service'
 
 const STATUSES = ['provisioning', 'active', 'inactive'] as const
@@ -286,15 +287,20 @@ export class TenantDirectoryService {
   async kpi(key: string): Promise<{ key: KpiKey; value: number }> {
     if (!(KPI_KEYS as readonly string[]).includes(key)) badRequest(`key must be one of: ${KPI_KEYS.join(', ')}`)
     const kpiKey = key as KpiKey
-    // Device and DLQ counts read 0 until their fleet stories add the data.
-    if (kpiKey === 'devices_online' || kpiKey === 'open_dlq') return { key: kpiKey, value: 0 }
-
     const plane = this.registry.planeFor(this.registry.homeRegion())
     const value = await plane.$transaction(async (tx) => {
       await setOperatorContext(tx)
-      return kpiKey === 'active_tenants'
-        ? tx.tenant.count({ where: { status: 'active', deletedAt: null } })
-        : tx.outlet.count({ where: { deletedAt: null, tenant: { deletedAt: null } } })
+      switch (kpiKey) {
+        case 'active_tenants':
+          return tx.tenant.count({ where: { status: 'active', deletedAt: null } })
+        case 'outlets':
+          return tx.outlet.count({ where: { deletedAt: null, tenant: { deletedAt: null } } })
+        // issue #189: online = heard from within sync health's lagging threshold.
+        case 'devices_online':
+          return tx.device.count({ where: { status: 'active', lastContactAt: { gte: new Date(Date.now() - LAGGING_THRESHOLD_SECONDS * 1000) } } })
+        case 'open_dlq':
+          return tx.syncDeadLetter.count({ where: { resolvedAt: null } })
+      }
     })
     return { key: kpiKey, value }
   }

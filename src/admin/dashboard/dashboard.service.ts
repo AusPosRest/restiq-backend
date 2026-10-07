@@ -21,12 +21,13 @@
 // rollup.
 import { Injectable, NotFoundException } from '@nestjs/common'
 import { AdminPrincipal, RegionRegistryService } from '../../platform'
+import { localDateKey } from '../../pos/clock/clock.util'
 import { setTenantContext } from '../menu/tenant-context'
 
 export interface DashboardMetric {
   amountMinor: number
   currency: string
-  hasData: false
+  hasData: boolean
   message: string
 }
 
@@ -55,7 +56,7 @@ export interface DashboardView {
   outlets: OutletDashboardView[]
 }
 
-const NO_DATA_MESSAGE = 'No sales data yet - connect POS to see live figures'
+const NO_DATA_MESSAGE = 'No sales yet today'
 const GO_LIVE_ACTION = 'tenant.went_live'
 
 function currencyForCountry(country: string): string {
@@ -95,6 +96,23 @@ export class DashboardService {
         tx.auditEvent.findFirst({ where: { tenantId: owner.tenantId, action: GO_LIVE_ACTION }, orderBy: { occurredAt: 'asc' } }),
       ])
 
+      // issue #189: today's takings per outlet - tenders on finalised bills,
+      // "today" being each outlet's own calendar day. 48h back covers any
+      // timezone's today without scanning the whole table (same window as
+      // bills.service's listPaymentsToday).
+      const now = new Date()
+      const recentTenders = await tx.tender.findMany({
+        where: { tenantId: owner.tenantId, createdAt: { gte: new Date(now.getTime() - 48 * 60 * 60 * 1000) }, bill: { status: 'finalized' } },
+        select: { amountMinor: true, createdAt: true, bill: { select: { outletId: true } } },
+      })
+      const timezoneByOutlet = new Map(outlets.map((outlet) => [outlet.id, outlet.timezone]))
+      const salesByOutlet = new Map<string, number>()
+      for (const tender of recentTenders) {
+        const timezone = timezoneByOutlet.get(tender.bill.outletId)
+        if (!timezone || localDateKey(tender.createdAt, timezone) !== localDateKey(now, timezone)) continue
+        salesByOutlet.set(tender.bill.outletId, (salesByOutlet.get(tender.bill.outletId) ?? 0) + Number(tender.amountMinor))
+      }
+
       const deviceCountByOutlet = new Map(devicesByOutlet.map((row) => [row.outletId as string, row._count._all]))
       const totalDeviceCount = devicesByOutlet.reduce((sum, row) => sum + row._count._all, 0)
 
@@ -102,7 +120,9 @@ export class DashboardService {
         outletId: outlet.id,
         outletName: outlet.name,
         deviceCount: deviceCountByOutlet.get(outlet.id) ?? 0,
-        sales: noDataMetric(currency),
+        sales: salesByOutlet.has(outlet.id)
+          ? { amountMinor: salesByOutlet.get(outlet.id) ?? 0, currency, hasData: true, message: 'Today so far' }
+          : noDataMetric(currency),
         margin: noDataMetric(currency),
         labourCost: noDataMetric(currency),
         waste: noDataMetric(currency),
