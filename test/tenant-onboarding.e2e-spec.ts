@@ -252,6 +252,20 @@ describe('/ops/v1/tenants onboarding (e2e)', () => {
       expect(audit[0]?.reason).toBeTruthy()
     })
 
+    it('gives every new outlet its type\'s starter setup (D2): a dine-in hall with tables, a QSR counter with stations only', async () => {
+      const res = await authed(request(httpServer).post('/ops/v1/tenants')).send(submitPayload({ registrationNumber: '06AABCU9603R1ZV', companyName: 'Starter Setup Co' }))
+      expect(res.status).toBe(201)
+      const tenantId = (res.body as { tenant: { id: string } }).tenant.id
+      const dineIn = await prisma.outlet.findFirstOrThrow({ where: { tenantId, type: 'dine_in' } })
+      const qsr = await prisma.outlet.findFirstOrThrow({ where: { tenantId, type: 'qsr' } })
+
+      expect(await prisma.station.count({ where: { outletId: dineIn.id } })).toBe(5)
+      expect(await prisma.diningTable.count({ where: { floor: { outletId: dineIn.id } } })).toBe(8)
+      expect(await prisma.station.count({ where: { outletId: qsr.id } })).toBe(4)
+      expect(await prisma.floor.count({ where: { outletId: qsr.id } })).toBe(0)
+      expect((await prisma.outletCapability.findFirstOrThrow({ where: { outletId: qsr.id, key: 'token_queue' } })).enabled).toBe(true)
+    })
+
     it('deletes the operator draft on successful submit', async () => {
       await authed(request(httpServer).put('/ops/v1/tenants/draft/steps/1')).send({ companyName: 'Another Co' })
       const res = await authed(request(httpServer).post('/ops/v1/tenants')).send(

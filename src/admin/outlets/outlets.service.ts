@@ -6,6 +6,7 @@ import { BadRequestException, Injectable, NotFoundException } from '@nestjs/comm
 import { AdminPrincipal, RegionRegistryService } from '../../platform'
 import { setTenantContext } from '../menu/tenant-context'
 import { CapabilityView, OutletView } from './outlets.dtos'
+import { applyStarterSetup, StarterSetupResult } from './starter-setup'
 
 @Injectable()
 export class OutletsService {
@@ -53,6 +54,19 @@ export class OutletsService {
         update: { enabled },
       })
       return { key: row.key, enabled: row.enabled }
+    })
+  }
+
+  /** Builds the outlet type's starting stations, tables and switches; safe to run again - it only adds what is missing. */
+  async applyStarterSetup(owner: AdminPrincipal, outletId: string): Promise<StarterSetupResult> {
+    const plane = this.registry.planeFor(this.registry.homeRegion())
+    return plane.$transaction(async (tx) => {
+      await setTenantContext(tx, owner.tenantId)
+      const outlet = await tx.outlet.findUnique({ where: { id: outletId } })
+      if (!outlet || outlet.tenantId !== owner.tenantId || outlet.deletedAt) {
+        throw new NotFoundException({ code: 'not_found', message: 'No such outlet' })
+      }
+      return applyStarterSetup(tx, owner.tenantId, outletId, outlet.type)
     })
   }
 }

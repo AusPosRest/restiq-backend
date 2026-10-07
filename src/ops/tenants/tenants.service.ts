@@ -2,6 +2,7 @@ import { BadRequestException, ConflictException, Injectable, NotFoundException }
 import { createHash, randomBytes } from 'node:crypto'
 import type { Prisma } from '../../generated/prisma/client'
 import { OpsPrincipal, PrismaService, RegionRegistryService, uuidv7 } from '../../platform'
+import { applyStarterSetup } from '../../admin/outlets/starter-setup'
 import { SubmitTenantDto } from './submit.dto'
 
 export const WIZARD_STEP_COUNT = 5
@@ -173,6 +174,10 @@ export class OpsTenantsService {
             timezone: outlet.timezone,
           })),
         })
+        // D2: every new outlet starts with its type's stations, tables and switches; the owner edits from there.
+        for (const outlet of await tx.outlet.findMany({ where: { tenantId }, select: { id: true, type: true } })) {
+          await applyStarterSetup(tx, tenantId, outlet.id, outlet.type)
+        }
 
         await tx.role.createMany({
           data: SYSTEM_ROLES.map(({ name, isManager }) => ({ tenantId, name, isSystem: true, isManager })),
