@@ -1,5 +1,6 @@
 # Completed
 
+- **2026-10-08** - Sync guard names a wrong clock (issue #195). A well-formed `X-Device-Timestamp` more than 5 minutes off now gets 401 `clock_skew` with `serverTime`. It is checked before any DB read; every other failure stays the generic `invalid_signature`.
 - **2026-09-22** - Production readiness prep (issue #175, audit PROD-06..11):
   - `fly.toml` is always on (min 1 machine, auto-stop off) with 1 GB.
   - `enableShutdownHooks()`.

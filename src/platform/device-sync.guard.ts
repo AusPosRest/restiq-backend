@@ -43,7 +43,17 @@ export class DeviceSyncGuard implements CanActivate {
     const timestamp = request.header('x-device-timestamp')
     const signature = request.header('x-device-signature')
     if (!deviceId || !UUID.test(deviceId) || !timestamp || !/^\d{1,15}$/.test(timestamp) || !signature) refuse()
-    if (Math.abs(Date.now() - Number(timestamp)) > SIGNATURE_SKEW_MS) refuse()
+    // issue #195: a till with the wrong time is the commonest failure, and staff
+    // can fix it - so this one case says what is wrong. It is checked before any
+    // database read, so it reveals nothing about devices; everything else keeps
+    // the single generic answer.
+    if (Math.abs(Date.now() - Number(timestamp)) > SIGNATURE_SKEW_MS) {
+      throw new UnauthorizedException({
+        code: 'clock_skew',
+        message: "This device's clock is too far from RESTIQ's time. Set the correct time and try again.",
+        serverTime: new Date().toISOString(),
+      })
+    }
 
     const plane = this.registry.planeFor(this.registry.homeRegion())
     // The tenant is not known until the device row is read, so the read uses
