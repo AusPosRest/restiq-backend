@@ -7,7 +7,7 @@ import { randomInt } from 'node:crypto'
 import type { DiningTable, Guest, Outlet, Prisma, TableSession } from '../../generated/prisma/client'
 import { AttemptLimiter, AttemptRule, GuestPrincipal, RegionRegistryService, signGuestToken } from '../../platform'
 import { isUniqueViolation, setGuestEntryContext, setTenantContext } from '../tenant-context'
-import { GuestSummary, JoinSessionDto, OutletAvailability, SessionJoinResult, SessionStartResult, StartSessionDto, TableSessionView } from './sessions.dtos'
+import { GuestSummary, JoinSessionDto, KioskSessionStartResult, OutletAvailability, SessionJoinResult, SessionStartResult, StartKioskSessionDto, StartSessionDto, TableSessionView } from './sessions.dtos'
 
 type Tx = Prisma.TransactionClient
 
@@ -16,6 +16,8 @@ type Tx = Prisma.TransactionClient
 const SESSION_IDLE_TTL_MS = 4 * 60 * 60 * 1000
 
 const CAPABILITY_KEY = 'qr_ordering'
+const KIOSK_CAPABILITY_KEY = 'kiosk'
+const KIOSK_STARTER = 'Kiosk'
 const UNAVAILABLE_MESSAGE = 'QR ordering is not available for this table right now - please ask a staff member for help'
 
 /**
@@ -60,11 +62,11 @@ function toGuestSummary(guest: Guest): GuestSummary {
   return { id: guest.id, name: guest.name, joinedAt: guest.joinedAt.toISOString() }
 }
 
-function toSessionView(session: TableSession, table: Pick<DiningTable, 'id' | 'label'>, guests: Guest[]): TableSessionView {
+function toSessionView(session: TableSession, table: Pick<DiningTable, 'id' | 'label'> | null, guests: Guest[]): TableSessionView {
   return {
     sessionId: session.id,
     status: session.status,
-    table: { id: table.id, label: table.label },
+    table: table && { id: table.id, label: table.label },
     outletId: session.outletId,
     guests: guests.map(toGuestSummary),
     createdAt: session.createdAt.toISOString(),
@@ -177,6 +179,65 @@ export class GuestSessionsService {
     }
   }
 
+  /**
+   * Issue #138: a self-service kiosk's session. Bound to an enrolled, active
+   * kiosk device at the outlet (looked up under the tenant context the outlet
+   * resolves to - devices has no guest-entry policy and needs none), gated by
+   * the outlet's `kiosk` capability, and table-less: the order it places gets
+   * a token number instead (orders.service.ts). No PIN, no name, no phone -
+   * nobody joins a kiosk session. An unknown, revoked, non-kiosk or
+   * other-outlet device is a plain 404, never a hint at what exists.
+   */
+  async startKioskSession(dto: StartKioskSessionDto): Promise<KioskSessionStartResult> {
+    const plane = this.plane()
+    return plane.$transaction(async (tx) => {
+      await setGuestEntryContext(tx)
+      const outlet = await tx.outlet.findUnique({ where: { id: dto.outletId } })
+      if (!outlet || outlet.deletedAt) {
+        throw new NotFoundException({ code: 'not_found', message: 'No such outlet or kiosk' })
+      }
+      await setTenantContext(tx, outlet.tenantId)
+      const tenant = await tx.tenant.findUnique({ where: { id: outlet.tenantId }, select: { status: true, deletedAt: true } })
+      if (!tenant || tenant.status === 'inactive' || tenant.deletedAt) {
+        throw new NotFoundException({ code: 'not_found', message: 'No such outlet or kiosk' })
+      }
+      const device = await tx.device.findFirst({
+        where: { id: dto.deviceId, tenantId: outlet.tenantId, outletId: dto.outletId, type: 'kiosk', status: 'active' },
+        select: { id: true, label: true },
+      })
+      if (!device) {
+        throw new NotFoundException({ code: 'not_found', message: 'No such outlet or kiosk' })
+      }
+      const capability = await tx.outletCapability.findUnique({ where: { outletId_key: { outletId: dto.outletId, key: KIOSK_CAPABILITY_KEY } } })
+      if (!capability?.enabled) {
+        throw new ForbiddenException({ code: 'kiosk_disabled', message: 'Kiosk ordering is not available at this outlet right now - please order at the counter' })
+      }
+
+      const session = await tx.tableSession.create({
+        data: {
+          tenantId: outlet.tenantId,
+          outletId: dto.outletId,
+          tableId: null,
+          sessionPin: generatePin(),
+          startedByGuestName: KIOSK_STARTER,
+          startedByGuestPhone: '',
+          expiresAt: new Date(Date.now() + SESSION_IDLE_TTL_MS),
+        },
+      })
+      const guest = await tx.guest.create({ data: { tenantId: outlet.tenantId, sessionId: session.id, name: device.label } })
+
+      const principal: GuestPrincipal = {
+        id: guest.id,
+        sessionId: session.id,
+        tenantId: outlet.tenantId,
+        outletId: dto.outletId,
+        tableId: null,
+        name: guest.name,
+      }
+      return { token: signGuestToken(principal), session: toSessionView(session, null, [guest]) }
+    })
+  }
+
   async joinSession(dto: JoinSessionDto): Promise<SessionJoinResult> {
     // restiq-backend#171: wrong table-PIN guesses per table, shared across instances (was an in-memory Map).
     const rules: AttemptRule[] = [{ key: `guest-join:table:${dto.outletId}:${dto.tableId}`, max: 10, windowSeconds: 15 * 60 }]
@@ -223,8 +284,8 @@ export class GuestSessionsService {
       if (isSessionInactive(session)) {
         throw new GoneException({ code: 'session_closed', message: 'This table session has ended' })
       }
-      const table = await tx.diningTable.findUnique({ where: { id: session.tableId } })
-      if (!table) {
+      const table = session.tableId ? await tx.diningTable.findUnique({ where: { id: session.tableId } }) : null
+      if (session.tableId && !table) {
         throw new NotFoundException({ code: 'not_found', message: 'No such table' })
       }
       const guests = await tx.guest.findMany({ where: { sessionId: session.id }, orderBy: { joinedAt: 'asc' } })

@@ -34,6 +34,16 @@ export class JoinSessionDto {
   name!: string
 }
 
+// Issue #138: a kiosk tab starts a table-less session bound to its enrolled
+// device - no name, phone or PIN; the device row is the identity.
+export class StartKioskSessionDto {
+  @IsUUID()
+  outletId!: string
+
+  @IsUUID()
+  deviceId!: string
+}
+
 export interface GuestSummary {
   id: string
   name: string
@@ -48,7 +58,8 @@ export interface TableSummary {
 export interface TableSessionView {
   sessionId: string
   status: TableSessionStatus
-  table: TableSummary
+  // null for a kiosk session (issue #138).
+  table: TableSummary | null
   outletId: string
   guests: GuestSummary[]
   createdAt: string
@@ -59,6 +70,11 @@ export interface TableSessionView {
 export interface SessionStartResult {
   token: string
   pin: string
+  session: TableSessionView
+}
+
+export interface KioskSessionStartResult {
+  token: string
   session: TableSessionView
 }
 

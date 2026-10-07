@@ -579,3 +579,35 @@
     that same session (never merely the same tenant) - a guest can watch
     their own table's orders, never another table's, even within the same
     tenant/outlet.
+
+## Kiosk ordering - table-less guest session bound to a kiosk device (issue #138)
+
+- **Intent:** a tab enrolled as a `kiosk` device orders through the guest realm
+  with no table: the device is the identity, the outlet's `kiosk` capability
+  is the gate, and the order it places is a token-numbered counter order the
+  kitchen and POS see like any other.
+- **Data:** `table_sessions.table_id` is nullable (migration
+  `20260912150000_kiosk_sessions`); `OrderSource` gains `kiosk`. The
+  one-open-session-per-table partial unique index is unaffected (NULLs are
+  distinct), so any number of kiosk sessions can be open. `GuestPrincipal.tableId`
+  is `string | null` and the guest JWT carries `tableId: null` for a kiosk.
+- **Route:** `POST /guest/v1/kiosk/sessions` `{ outletId, deviceId }` (public,
+  `sessions.service.ts#startKioskSession`) → 201 `{ token, session }` with
+  `session.table: null` and one guest named after the device label. Outlet
+  resolves under the guest-entry context, then the device is looked up under
+  the tenant context (`type: 'kiosk'`, `status: 'active'`, same outlet) - a
+  revoked, non-kiosk, other-outlet or unknown device, an unknown outlet, or an
+  inactive tenant are all a plain 404 `not_found`; the `kiosk` outlet
+  capability off (or absent) is 403 `kiosk_disabled`. No PIN, name or phone;
+  nothing joins a kiosk session. `GET /guest/v1/session` returns `table: null`.
+- **Placement:** `orders.service.ts#placeOrder` on a table-less session
+  reserves a `tokenNumber` from `token_number_counters` (the same upsert as
+  POS `createCounterOrder`, in the same transaction) and writes `source:
+  'kiosk'`, `tableId: null`. `PlacedOrderView` and `GuestOrderStatusView`
+  carry `tokenNumber` (null for a table order); `PlacedOrderView.source` is
+  `'qr' | 'kiosk'`. Everything else - cart, menu, kitchen fire, POS
+  open-orders list, guest checkout - is unchanged and works on the same rows.
+  The payments report's `source` type widened to include `kiosk`.
+- **Tests:** `test/guest-kiosk.e2e-spec.ts` (happy path with two gap-free
+  tokens, status list, kitchen tickets, POS list; the 404/403/400 refusals).
+- **Not built:** kiosk-side payment (pay at the counter), CDS.

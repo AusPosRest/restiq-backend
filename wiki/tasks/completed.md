@@ -65,6 +65,13 @@
   `tenders.reference` (migration `20260915120000_external_tender`; CHECKs: external needs no
   intent and must carry a reference). `TenderDto.reference` required for external (1-64 chars,
   trimmed); `TenderView.reference` on bills and invoices. e2e in `pos-bills.e2e-spec.ts`.
+- **2026-09-12** - Kiosk ordering, issue #138 (backend half of restiq-web#214):
+  `table_sessions.table_id` nullable, `OrderSource.kiosk`, nullable guest-principal
+  `tableId`; `POST /guest/v1/kiosk/sessions { outletId, deviceId }` starts a table-less
+  session bound to an active kiosk device behind the outlet's `kiosk` capability (404 /
+  403 `kiosk_disabled`); a kiosk order reserves a gap-free token number and lands as
+  `source: 'kiosk'` for the kitchen and POS. `test/guest-kiosk.e2e-spec.ts`; guest, RLS
+  and payments-report suites green; typecheck/lint clean.
 
 - **2026-09-12** - Device topology, issue #134. `devices.paired_pos_id`,
   `print_jobs.target_device_id`, `payment_intents.target_device_id`
