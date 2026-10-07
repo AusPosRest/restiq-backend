@@ -1,5 +1,9 @@
 # Completed
 
+- **2026-10-08** - Device enrolment returns the restaurant and outlet names (issue #187).
+  - `DevicesService.enrollWithActor` reads `tenantName` and `outletName` in the enrolment transaction and returns them next to `device` (`EnrollResult`).
+  - This lets a till show "Binflow Indiranagar" instead of a UUID, and lets the PIN pad sign it into its own outlet.
+  - `DeviceView` is unchanged.
 - **2026-09-22** - Production readiness prep (issue #175, audit PROD-06..11):
   - `fly.toml` is always on (min 1 machine, auto-stop off) with 1 GB.
   - `enableShutdownHooks()`.

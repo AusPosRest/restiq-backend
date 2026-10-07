@@ -4,7 +4,7 @@
 // one-time-use + expiry semantics, same Device row shape) rather than a
 // second implementation - only the audit actor differs.
 import { Injectable } from '@nestjs/common'
-import { DevicesService, DeviceView } from '../../ops'
+import { DevicesService, EnrollResult } from '../../ops'
 import { DeviceEnrollDto } from './device-enroll.dto'
 
 const DEVICE_ACTOR_FINGERPRINT_CHARS = 12
@@ -13,7 +13,7 @@ const DEVICE_ACTOR_FINGERPRINT_CHARS = 12
 export class DeviceEnrollService {
   constructor(private readonly devices: DevicesService) {}
 
-  enroll(dto: DeviceEnrollDto): Promise<{ device: DeviceView }> {
+  enroll(dto: DeviceEnrollDto): Promise<EnrollResult> {
     // audit_events.actorEmail is required (NOT NULL) - there is no operator
     // email to put there, so a device actor gets a synthetic, non-PII label
     // instead. actorId stays null: no operator_users row backs this actor.
