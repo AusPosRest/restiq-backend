@@ -1,14 +1,14 @@
-// Agreement payloads (issue #132). Publishing carries a required reason
-// (AD-6); signing carries the typed name that IS the signature plus an
-// explicit accepted:true so a bare POST can never sign.
+// Agreement payloads (issue #132, PDF rework #179). An agreement is an uploaded PDF the owner
+// reads in a viewer. Publishing carries a required reason (AD-6) and the file (multipart);
+// signing carries the typed name that IS the signature, an explicit accepted:true so a bare
+// POST can never sign, and the hash of the file the owner was shown.
+export const MAX_AGREEMENT_PDF_BYTES = 5 * 1024 * 1024
+
 import { Equals, IsBoolean, IsNotEmpty, IsString, Matches, MaxLength } from 'class-validator'
 
 export class PublishAgreementDto {
   @IsString() @IsNotEmpty() @MaxLength(200)
   title!: string
-
-  @IsString() @IsNotEmpty() @MaxLength(200_000)
-  body!: string
 
   @IsString() @IsNotEmpty() @MaxLength(500)
   reason!: string
@@ -21,21 +21,27 @@ export class SignAgreementDto {
 
   @IsBoolean() @Equals(true)
   accepted!: boolean
+
+  // The file the owner was shown. A different current file means they must read it again.
+  @IsString() @Matches(/^[0-9a-f]{64}$/, { message: 'fileSha256 must be the 64-character hash of the agreement file' })
+  fileSha256!: string
 }
 
 export interface AgreementVersionSummary {
   id: string
   version: number
   title: string
+  /** False for a version published as text before the PDF rework: it cannot be read as a file or signed. */
+  hasFile: boolean
+  fileName: string | null
+  sizeBytes: number | null
+  fileSha256: string
   publishedBy: string
   publishedAt: string
   signatureCount: number
 }
 
-export interface AgreementVersionView extends AgreementVersionSummary {
-  body: string
-  bodySha256: string
-}
+export type AgreementVersionView = AgreementVersionSummary
 
 export interface AgreementSignatureView {
   agreementVersionId: string
@@ -56,9 +62,9 @@ export interface TenantAgreementsView {
   signatures: AgreementSignatureView[]
 }
 
-/** Admin: what the owner sees - the full current text, their signature on it (if any), and everything they signed before. */
+/** Admin: what the owner sees - the current agreement (read the file at .../agreement/:id/file), their signature on it (if any), and everything they signed before. */
 export interface OwnerAgreementView {
-  current: { id: string; version: number; title: string; body: string; publishedAt: string } | null
+  current: Omit<AgreementVersionSummary, 'signatureCount' | 'publishedBy'> | null
   signature: AgreementSignatureView | null
   history: AgreementSignatureView[]
 }

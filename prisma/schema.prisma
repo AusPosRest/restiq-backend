@@ -2006,8 +2006,13 @@ model AgreementVersion {
   id          String   @id @default(uuid(7)) @db.Uuid
   version     Int      @unique
   title       String
-  body        String
-  bodySha256  String   @map("body_sha256")
+  // Legacy text of versions published before the PDF rework (#179); null from then on and never returned by the API.
+  body        String?
+  // SHA-256 of the PDF bytes (of the legacy text for a version with no file).
+  fileSha256  String   @map("file_sha256")
+  pdf         Bytes?
+  fileName    String?  @map("file_name")
+  sizeBytes   Int?     @map("size_bytes")
   publishedBy String   @map("published_by")
   publishedAt DateTime @default(now()) @map("published_at") @db.Timestamptz(6)
 
@@ -2023,7 +2028,7 @@ model AgreementSignature {
   signerOwnerId      String   @map("signer_owner_id") @db.Uuid
   signerName         String   @map("signer_name")
   signerEmail        String   @map("signer_email")
-  // sha256 over body hash + tenant + signer + signedAt: tamper-evident
+  // sha256 over file hash + tenant + signer + signedAt: tamper-evident
   // record of exactly what was accepted, by whom, when.
   evidenceSha256     String   @map("evidence_sha256")
   signedAt           DateTime @map("signed_at") @db.Timestamptz(6)
