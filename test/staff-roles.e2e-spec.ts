@@ -28,6 +28,7 @@ interface StaffView {
   email: string | null
   roleId: string
   roleName: string
+  outletIds: string[]
   pinStatus: 'none' | 'active' | 'revoked'
   createdAt: string
   updatedAt: string
@@ -128,6 +129,12 @@ async function createOwner(prisma: PrismaClient, name = 'Spice Route Hospitality
   })
   const token = signAdminToken({ id: uuidv7(), tenantId, email: `owner-${tenantId}@spiceroute.example` })
   return { tenantId, token }
+}
+
+async function createOutlet(prisma: PrismaClient, tenantId: string, name: string): Promise<string> {
+  const brand = await prisma.brand.create({ data: { tenantId, name: `${name} Brand` } })
+  const outlet = await prisma.outlet.create({ data: { tenantId, brandId: brand.id, name, address: 'A1', type: 'dine_in', timezone: 'Asia/Kolkata' } })
+  return outlet.id
 }
 
 // Same seed the Platform Console onboarding wizard writes per tenant
@@ -318,6 +325,28 @@ describe('/admin/v1/staff and /admin/v1/roles (e2e)', () => {
 
       const res = await authed(request(httpServer).patch(`/admin/v1/staff/${staffId}`), token).send({ roleId: uuidv7(), reason: 'x' })
       expect(res.status).toBe(400)
+    })
+
+    // #197: assigning outlets narrows where a PIN works, and ends open sessions.
+    it('assigns outlets, ending the staff member\'s open sessions; another tenant\'s outlet is refused', async () => {
+      const { tenantId, token } = await createOwner(prisma)
+      const roles = await seedRoles(prisma, tenantId)
+      const outletId = await createOutlet(prisma, tenantId, 'Indiranagar')
+      const other = await createOwner(prisma, 'Tenant B')
+      const foreignOutletId = await createOutlet(prisma, other.tenantId, 'Elsewhere')
+      const created = await authed(request(httpServer).post('/admin/v1/staff'), token).send({ name: 'Priya Nair', roleId: roles.Waiter })
+      const staff = created.body as StaffView
+      expect(staff.outletIds).toEqual([])
+
+      const res = await authed(request(httpServer).patch(`/admin/v1/staff/${staff.id}`), token).send({ outletIds: [outletId, outletId] })
+      expect(res.status).toBe(200)
+      expect((res.body as StaffView).outletIds).toEqual([outletId])
+      expect((await prisma.staffUser.findUniqueOrThrow({ where: { id: staff.id } })).sessionVersion).toBe(1)
+
+      const foreign = await authed(request(httpServer).patch(`/admin/v1/staff/${staff.id}`), token).send({ outletIds: [foreignOutletId] })
+      expect(foreign.status).toBe(400)
+      const createdForeign = await authed(request(httpServer).post('/admin/v1/staff'), token).send({ name: 'X', roleId: roles.Waiter, outletIds: [foreignOutletId] })
+      expect(createdForeign.status).toBe(400)
     })
 
     it('404s for a staff member belonging to another tenant (cross-tenant isolation)', async () => {

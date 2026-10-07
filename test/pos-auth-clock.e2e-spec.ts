@@ -272,6 +272,38 @@ describe('/pos/v1/auth and /pos/v1/clock (e2e)', () => {
       expect(res.status).toBe(400)
     })
 
+    // #197: a staff member assigned to outlets only sees and may only pick those.
+    it('signs straight in to the only assigned outlet', async () => {
+      const tenantId = await createTenant(prisma)
+      await createOutlet(prisma, tenantId, 'Indiranagar')
+      const outletB = await createOutlet(prisma, tenantId, 'Koramangala')
+      const staffId = await createStaffWithPin(prisma, tenantId, 'Rahul Iyer', '5678')
+      await prisma.staffUser.update({ where: { id: staffId }, data: { outletIds: [outletB] } })
+
+      const res = await request(httpServer).post('/pos/v1/auth/login').send({ tenantId, pin: '5678' })
+      expect(res.status).toBe(200)
+      const body = res.body as AuthenticatedBody
+      expect(body.status).toBe('authenticated')
+      expect(body.outlet).toEqual({ id: outletB, name: 'Koramangala' })
+    })
+
+    it('offers only the assigned outlets and refuses any other', async () => {
+      const tenantId = await createTenant(prisma)
+      const outletA = await createOutlet(prisma, tenantId, 'A1')
+      const outletB = await createOutlet(prisma, tenantId, 'A2')
+      const outletC = await createOutlet(prisma, tenantId, 'A3')
+      const staffId = await createStaffWithPin(prisma, tenantId, 'Rahul Iyer', '5678')
+      await prisma.staffUser.update({ where: { id: staffId }, data: { outletIds: [outletA, outletB] } })
+
+      const loginRes = await request(httpServer).post('/pos/v1/auth/login').send({ tenantId, pin: '5678' })
+      const loginBody = loginRes.body as SelectOutletBody
+      expect(loginBody.outlets.map((o) => o.id).sort()).toEqual([outletA, outletB].sort())
+
+      const res = await request(httpServer).post('/pos/v1/auth/select-outlet').send({ pendingToken: loginBody.pendingToken, outletId: outletC })
+      expect(res.status).toBe(403)
+      expect((res.body as ErrorBody).error.code).toBe('outlet_not_assigned')
+    })
+
     it('rejects a garbage pendingToken', async () => {
       const res = await request(httpServer)
         .post('/pos/v1/auth/select-outlet')

@@ -38,6 +38,8 @@ export interface StaffView {
   email: string | null
   roleId: string
   roleName: string
+  /** #197: outlets this person may sign in at; empty = every outlet. */
+  outletIds: string[]
   pinStatus: PinStatus
   createdAt: string
   updatedAt: string
@@ -53,6 +55,7 @@ interface StaffWithRole {
   name: string
   email: string | null
   roleId: string
+  outletIds: string[]
   pinHash: string | null
   pinRevokedAt: Date | null
   createdAt: Date
@@ -75,6 +78,7 @@ function toStaffView(row: StaffWithRole): StaffView {
     email: row.email,
     roleId: row.roleId,
     roleName: row.role.name,
+    outletIds: row.outletIds,
     pinStatus: pinStatus(row),
     createdAt: row.createdAt.toISOString(),
     updatedAt: row.updatedAt.toISOString(),
@@ -124,6 +128,16 @@ export class StaffService {
     }
   }
 
+  /** #197: de-duplicated ids, each one of this tenant's live outlets (400 otherwise). */
+  private async assertOwnOutlets(tx: Prisma.TransactionClient, tenantId: string, outletIds: string[]): Promise<string[]> {
+    const ids = [...new Set(outletIds)]
+    const found = await tx.outlet.count({ where: { id: { in: ids }, tenantId, deletedAt: null } })
+    if (found !== ids.length) {
+      throw new BadRequestException({ code: 'validation_failed', message: "outletIds must be this tenant's outlets" })
+    }
+    return ids
+  }
+
   private async findOwnedStaff(tx: Prisma.TransactionClient, tenantId: string, staffId: string): Promise<StaffWithRole> {
     const staff = await tx.staffUser.findUnique({ where: { id: staffId }, include: STAFF_INCLUDE })
     if (!staff || staff.tenantId !== tenantId) {
@@ -137,11 +151,12 @@ export class StaffService {
     return plane.$transaction(async (tx) => {
       await setTenantContext(tx, owner.tenantId)
       await this.assertSeededRole(tx, owner.tenantId, dto.roleId)
+      const outletIds = await this.assertOwnOutlets(tx, owner.tenantId, dto.outletIds ?? [])
 
       const isFirstStaffForTenant = (await tx.staffUser.count({ where: { tenantId: owner.tenantId } })) === 0
 
       const created = await tx.staffUser.create({
-        data: { id: uuidv7(), tenantId: owner.tenantId, roleId: dto.roleId, name: dto.name.trim(), email: dto.email },
+        data: { id: uuidv7(), tenantId: owner.tenantId, roleId: dto.roleId, name: dto.name.trim(), email: dto.email, outletIds },
         include: STAFF_INCLUDE,
       })
 
@@ -174,11 +189,14 @@ export class StaffService {
         }
       }
 
+      const outletIds = dto.outletIds === undefined ? undefined : await this.assertOwnOutlets(tx, owner.tenantId, dto.outletIds)
+      const outletsChanging = outletIds !== undefined && [...outletIds].sort().join() !== [...existing.outletIds].sort().join()
+
       const now = new Date()
       const updated = await tx.staffUser.update({
         where: { id: staffId },
-        // #169: a role change ends the staff member's open POS/KDS sessions.
-        data: { name: dto.name?.trim(), roleId: dto.roleId, ...(roleChanging ? { sessionVersion: { increment: 1 } } : {}) },
+        // #169: a role change ends the staff member's open POS/KDS sessions; #197: so does an outlet change.
+        data: { name: dto.name?.trim(), roleId: dto.roleId, outletIds, ...(roleChanging || outletsChanging ? { sessionVersion: { increment: 1 } } : {}) },
         include: STAFF_INCLUDE,
       })
 
