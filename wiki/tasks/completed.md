@@ -895,3 +895,16 @@
   second revoke, 400 without a reason. 3 new e2e tests in
   `test/admin-devices.e2e-spec.ts`. See
   [wiki/features/tenant-admin.md](../features/tenant-admin.md) CAP-6.
+- **2026-10-07 - Starter setup per outlet type (D2) and two 500 fixes.**
+  `src/admin/outlets/starter-setup.ts` holds the starting stations, tables and
+  switches for `dine_in`, `qsr`, `cloud_kitchen` and `food_court`. It is applied
+  to every outlet when a tenant is provisioned and on demand through
+  `POST /admin/v1/outlets/:outletId/starter-setup`; running it again adds only
+  what is missing and never overrides the owner. New
+  `DELETE /admin/v1/outlets/:outletId/floor-plan/stations/:stationId` removes a
+  station (its menu items go back to no station). F-1: counter and kiosk token
+  numbers now move past tokens already in use (`reserveTokenNumber`). F-2: a guest
+  order on a table that already has a live order answers 409
+  `table_has_active_order`. Tests: `test/floor-plan.e2e-spec.ts`,
+  `test/tenant-onboarding.e2e-spec.ts`, `test/pos-counter-orders.e2e-spec.ts`,
+  `test/guest-order-placement.e2e-spec.ts`.
