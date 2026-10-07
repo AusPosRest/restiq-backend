@@ -8,6 +8,7 @@ import { BadRequestException, ConflictException, ForbiddenException, Injectable,
 import type { Order, Prisma } from '../../generated/prisma/client'
 import { KitchenTicketsService } from '../../kitchen'
 import { PosPrincipal, RegionRegistryService, reserveTokenNumber, uuidv7 } from '../../platform'
+import type { Replay } from '../sync/replay'
 import { OrderLineView, OrderView, TableMapEntry, TransferOrderDto, UpdateOrderStatusDto } from './orders.dtos'
 
 export type Tx = Prisma.TransactionClient
@@ -184,13 +185,18 @@ export class OrdersService {
    * or returns the table's existing order unchanged if one is already
    * open/sent - viewing an occupied table's order is not a takeover.
    */
-  async openOrClaimTable(staff: PosPrincipal, outletId: string, tableId: string): Promise<OrderView> {
+  async openOrClaimTable(staff: PosPrincipal, outletId: string, tableId: string, replay?: Replay): Promise<OrderView> {
     const plane = this.plane()
     return plane.$transaction(async (tx) => {
       await setTenantContext(tx, staff.tenantId)
       await loadTableInOutlet(tx, staff.tenantId, outletId, tableId)
 
       const existing = await tx.order.findFirst({ where: { tenantId: staff.tenantId, tableId, status: { not: 'closed' } } })
+      // A replayed open (restiq-backend#185) names its own order: the same id
+      // is a re-send, any other open order means the table was taken elsewhere.
+      if (existing && replay && existing.id !== replay.id) {
+        throw new ConflictException({ code: 'table_busy', message: 'This table already has another open order' })
+      }
       if (existing) return buildOrderView(tx, existing)
 
       const savepoint = `sp_order_${uuidv7().replace(/-/g, '')}`
@@ -198,7 +204,7 @@ export class OrdersService {
 
       try {
         const created = await tx.order.create({
-          data: { tenantId: staff.tenantId, outletId, tableId, ownerId: staff.id, status: 'open' },
+          data: { tenantId: staff.tenantId, outletId, tableId, ownerId: staff.id, status: 'open', ...(replay && { id: replay.id, createdAt: replay.at }) },
         })
         return buildOrderView(tx, created)
       } catch (error) {
@@ -233,7 +239,7 @@ export class OrdersService {
    * story 4 and story 8's real endpoints unchanged against the returned
    * order id - this endpoint only composes the create step.
    */
-  async createCounterOrder(staff: PosPrincipal, outletId: string): Promise<OrderView> {
+  async createCounterOrder(staff: PosPrincipal, outletId: string, replay?: Replay & { tokenNumber: number }): Promise<OrderView> {
     const plane = this.plane()
     return plane.$transaction(async (tx) => {
       await setTenantContext(tx, staff.tenantId)
@@ -244,10 +250,13 @@ export class OrdersService {
       // failure never touches the counter, and if anything below still
       // fails, the whole transaction (counter increment included) rolls
       // back with it. Either way, no gap.
-      const tokenNumber = await reserveTokenNumber(tx, staff.tenantId, outletId)
+      // A replayed counter order (restiq-backend#185) keeps the token the hub
+      // already called out; the hub is the outlet's only writer, so it owns
+      // the token counter while it is the hub.
+      const tokenNumber = replay ? replay.tokenNumber : await reserveTokenNumber(tx, staff.tenantId, outletId)
 
       const created = await tx.order.create({
-        data: { tenantId: staff.tenantId, outletId, tableId: null, ownerId: staff.id, status: 'open', tokenNumber },
+        data: { tenantId: staff.tenantId, outletId, tableId: null, ownerId: staff.id, status: 'open', tokenNumber, ...(replay && { id: replay.id, createdAt: replay.at }) },
       })
       return buildOrderView(tx, created)
     })

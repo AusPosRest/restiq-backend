@@ -5,6 +5,7 @@ import { AdminAuthGuard } from './admin-auth.guard'
 import { AttemptLimiter } from './attempt-limiter'
 import { ApiErrorFilter } from './api-error.filter'
 import { ControlPlaneAuditService } from './audit.service'
+import { DeviceSyncGuard } from './device-sync.guard'
 import { GuestAuthGuard } from './guest-auth.guard'
 import { MailService } from './mail.service'
 import { ManagerAuthService } from './manager-auth.service'
@@ -33,6 +34,9 @@ import { TenantAddressService } from './tenant-address.service'
     // AD-17: a fourth, disjoint global guard for /guest/* - same early-return
     // shape, so all four combine without interfering.
     { provide: APP_GUARD, useClass: GuestAuthGuard },
+    // restiq-backend#185: /sync/* is the device realm - signed by the hub
+    // till's key, no token. Same early-return shape as the four above.
+    { provide: APP_GUARD, useClass: DeviceSyncGuard },
     { provide: APP_FILTER, useClass: ApiErrorFilter },
     { provide: APP_PIPE, useValue: new ValidationPipe({ whitelist: true }) },
   ],

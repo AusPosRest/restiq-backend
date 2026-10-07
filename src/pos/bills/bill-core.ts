@@ -19,6 +19,7 @@ import { BadRequestException, ConflictException, NotFoundException } from '@nest
 import type { Prisma } from '../../generated/prisma/client'
 import { paymentsSimulatorEnabled, uuidv7 } from '../../platform'
 import { BillView, InvoiceCreditNoteView, InvoiceLineView, InvoiceView, TaxBreakdownLineView, TenderView } from './bills.dtos'
+import type { Replay } from '../sync/replay'
 import { computeTax, TaxBreakdownLine, TaxCountry, TaxResult } from './tax'
 
 type Tx = Prisma.TransactionClient
@@ -199,6 +200,8 @@ export interface CreateBillParams {
   // an order closed that way, with no Bill ever created, must still be
   // rejected.
   orderClosed: boolean
+  // Offline sync (restiq-backend#185): the hub's bill id and time.
+  replay?: Replay
 }
 
 export interface CreateOrGetBillResult {
@@ -277,7 +280,8 @@ export async function createOrGetBillRecord(tx: Tx, params: CreateBillParams): P
   try {
     const bill = await tx.bill.create({
       data: {
-        id: uuidv7(),
+        id: params.replay?.id ?? uuidv7(),
+        ...(params.replay && { createdAt: params.replay.at }),
         tenantId: params.tenantId,
         outletId: params.outletId,
         orderId: params.orderId,
@@ -317,11 +321,14 @@ export async function createTenderRecord(
     riskAcknowledged?: boolean
     // External tenders only (issue #146) - the CHECK rejects it on any other method.
     reference?: string
+    // Offline sync (restiq-backend#185): the hub's tender id and time.
+    replay?: Replay
   },
 ): Promise<BillWithTenders['tenders'][number]> {
   return tx.tender.create({
     data: {
-      id: uuidv7(),
+      id: params.replay?.id ?? uuidv7(),
+      ...(params.replay && { createdAt: params.replay.at }),
       tenantId: params.tenantId,
       billId: params.billId,
       method: params.method,
@@ -341,6 +348,8 @@ export interface CommitFinalizeParams {
   // null for a guest-checkout completion (src/guest/bills) - a guest bill
   // finalizes itself once every share is paid, no staff involved.
   finalizedByStaffId: string | null
+  // Offline sync (restiq-backend#185): when the hub settled the bill.
+  finalizedAt?: Date
 }
 
 /**
@@ -416,7 +425,7 @@ export async function commitFinalize(tx: Tx, params: CommitFinalizeParams): Prom
       discountReason: params.discountReason,
       status: 'finalized',
       finalizedByStaffId: params.finalizedByStaffId,
-      finalizedAt: new Date(),
+      finalizedAt: params.finalizedAt ?? new Date(),
     },
   })
   if (updated.count === 0) {

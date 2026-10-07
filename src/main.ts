@@ -16,7 +16,8 @@ async function bootstrap(): Promise<void> {
     throw new Error('WEB_ORIGIN is not set - it must name the site allowed to call this API')
   }
 
-  const app = await NestFactory.create<NestExpressApplication>(AppModule)
+  // rawBody: the /sync/v1 device signature covers the exact bytes sent (restiq-backend#185).
+  const app = await NestFactory.create<NestExpressApplication>(AppModule, { rawBody: true })
   // restiq-backend#171: sign-in throttling keys on the client IP (req.ip).
   // Behind a proxy that address is in X-Forwarded-For, which a client can
   // also write itself - so trust exactly the proxy hops we run behind (Fly's
