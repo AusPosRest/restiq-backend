@@ -10,6 +10,8 @@ import { OpsDashboardController } from './dashboard.controller'
 import { OpsDevicesController } from './devices/devices.controller'
 import { DevicesService } from './devices/devices.service'
 import { OpsDlqController } from './dlq/dlq.controller'
+import { OpsPlanPricesController } from './plan-prices/plan-prices.controller'
+import { PlanPricesService } from './plan-prices/plan-prices.service'
 import { DlqService } from './dlq/dlq.service'
 import { OpsSubscriptionsController } from './subscriptions/subscriptions.controller'
 import { SubscriptionsService } from './subscriptions/subscriptions.service'
@@ -33,6 +35,7 @@ import { OpsTenantsService } from './tenants/tenants.service'
     OpsDlqController,
     OpsAgreementsController,
     OpsCatalogController,
+    OpsPlanPricesController,
   ],
   providers: [
     OpsAuthService,
@@ -44,6 +47,7 @@ import { OpsTenantsService } from './tenants/tenants.service'
     DlqService,
     AgreementsService,
     CatalogService,
+    PlanPricesService,
     { provide: ALERT_CHANNEL, useClass: WebhookAlertChannel },
   ],
   // DevicesService is exported for tenant-admin/CAP-6 (AD-12: one enrolment
