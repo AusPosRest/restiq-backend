@@ -2111,3 +2111,16 @@ model SimulatedMessage {
   @@index([createdAt])
   @@map("simulated_messages")
 }
+
+// #201: plan list prices per country, edited by operators in the Platform Console (Plans).
+// monthlyPriceMinor null = "on quote". Read by the onboarding wizard.
+model PlanPrice {
+  country               Country
+  plan                  SubscriptionPlan
+  monthlyPriceMinor     BigInt?          @map("monthly_price_minor")
+  annualDiscountPercent Int              @default(20) @map("annual_discount_percent")
+  updatedAt             DateTime         @default(now()) @updatedAt @map("updated_at") @db.Timestamptz(6)
+
+  @@id([country, plan])
+  @@map("plan_prices")
+}
