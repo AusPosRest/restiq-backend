@@ -1,8 +1,9 @@
 # Completed
 
+- **2026-10-08** - Platform admin login and mail audit fixes (issue #203): the dev inbox moved to `GET /ops/v1/dev-inbox` and needs an operator session (it was public and showed live reset links); operator logout bumps `operator_users.session_version`, so the logged-out token (and every other session of that operator) answers 401 `session_revoked`; the login email is trimmed before validation.
 - **2026-10-08** - Configurable plan prices (issue #201): `plan_prices` (country x plan, monthly price in minor units or null for "on quote", annual discount percent), seeded A$49/129 and ₹499/999 at 20% off annual. `GET /ops/v1/plan-prices`; `PUT /ops/v1/plan-prices/:country/:plan` with a reason, audited as `plan_price.updated`.
 - **2026-10-08** - Mail simulator and owner invite emails (issue #198):
-  - `MAIL_PROVIDER=simulator` stores every outgoing email in `simulated_messages` instead of sending it. `GET /dev/v1/inbox?to=` lists the newest 100 and answers 404 for any other provider. Production still refuses anything but `mailjet`.
+  - `MAIL_PROVIDER=simulator` stores every outgoing email in `simulated_messages` instead of sending it. `GET /ops/v1/dev-inbox?to=` lists the newest 100 and answers 404 for any other provider. Production still refuses anything but `mailjet`.
   - Onboarding a tenant and regenerating its owner invite email the invite link to the owner (in the background, after the commit). The ops console still shows the copyable link.
 - **2026-10-08** - Staff assigned to outlets (issue #197):
   - `staff_users.outlet_ids` (uuid[]). Empty means every outlet, so existing staff keep working.

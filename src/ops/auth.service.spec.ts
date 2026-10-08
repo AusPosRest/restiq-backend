@@ -19,6 +19,7 @@ const PASSWORD = 'correct-horse-battery'
 describe('OpsAuthService', () => {
   let operator: StoredOperator
   let findUnique: ReturnType<typeof vi.fn>
+  let update: ReturnType<typeof vi.fn>
   let auditEntries: ControlPlaneAuditEntry[]
   let service: OpsAuthService
 
@@ -37,8 +38,9 @@ describe('OpsAuthService', () => {
     findUnique = vi.fn(({ where }: { where: { email: string } }): Promise<StoredOperator | null> => {
       return Promise.resolve(where.email === EMAIL ? operator : null)
     })
+    update = vi.fn(() => Promise.resolve())
     auditEntries = []
-    const prisma = { client: { operatorUser: { findUnique } } } as unknown as PrismaService
+    const prisma = { client: { operatorUser: { findUnique, update } } } as unknown as PrismaService
     const audit = {
       record: (entry: ControlPlaneAuditEntry): Promise<void> => {
         auditEntries.push(entry)
@@ -80,8 +82,9 @@ describe('OpsAuthService', () => {
     expect((a as UnauthorizedException).getResponse()).toEqual((b as UnauthorizedException).getResponse())
   })
 
-  it('audits logout with the acting operator', async () => {
+  it('bumps the session version and audits logout with the acting operator', async () => {
     await service.logout({ id: OPERATOR_ID, email: EMAIL })
+    expect(update).toHaveBeenCalledWith({ where: { id: OPERATOR_ID }, data: { sessionVersion: { increment: 1 } } })
     expect(auditEntries).toHaveLength(1)
     expect(auditEntries[0]).toMatchObject({ action: 'operator.logout', actorId: OPERATOR_ID, actorEmail: EMAIL })
   })

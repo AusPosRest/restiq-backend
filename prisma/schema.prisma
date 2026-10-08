@@ -14,11 +14,13 @@ datasource db {
 // with the stories that need them.
 
 model OperatorUser {
-  id           String   @id @default(uuid(7)) @db.Uuid
-  email        String   @unique
-  passwordHash String   @map("password_hash")
-  createdAt    DateTime @default(now()) @map("created_at") @db.Timestamptz(6)
-  updatedAt    DateTime @updatedAt @map("updated_at") @db.Timestamptz(6)
+  id             String   @id @default(uuid(7)) @db.Uuid
+  email          String   @unique
+  passwordHash   String   @map("password_hash")
+  // Bumped by logout; ops tokens carry it and are refused once it moves on (#203).
+  sessionVersion Int      @default(0) @map("session_version")
+  createdAt      DateTime @default(now()) @map("created_at") @db.Timestamptz(6)
+  updatedAt      DateTime @updatedAt @map("updated_at") @db.Timestamptz(6)
 
   @@map("operator_users")
 }
@@ -2098,7 +2100,7 @@ model CatalogProduct {
   @@map("catalog_products")
 }
 
-// #198: MAIL_PROVIDER=simulator keeps every outgoing email here for the dev inbox (GET /dev/v1/inbox)
+// #198: MAIL_PROVIDER=simulator keeps every outgoing email here for the dev inbox (GET /ops/v1/dev-inbox)
 // instead of sending it. Production refuses any provider but mailjet (production-config.ts).
 model SimulatedMessage {
   id        String   @id @default(uuid(7)) @db.Uuid
