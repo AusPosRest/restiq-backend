@@ -6,6 +6,7 @@ import { CanActivate, ExecutionContext, Injectable, SetMetadata, UnauthorizedExc
 import { Reflector } from '@nestjs/core'
 import type { Request } from 'express'
 import { OpsPrincipal, verifyOpsToken } from './ops-jwt'
+import { PrismaService } from './prisma.service'
 
 // Exported so the admin guard (AD-10) can share the same @Public() marker -
 // one realm-agnostic "no session required" flag, not two.
@@ -28,9 +29,12 @@ export const CurrentOperator = createParamDecorator((_data: unknown, context: Ex
 
 @Injectable()
 export class OpsAuthGuard implements CanActivate {
-  constructor(private readonly reflector: Reflector) {}
+  constructor(
+    private readonly reflector: Reflector,
+    private readonly prisma: PrismaService,
+  ) {}
 
-  canActivate(context: ExecutionContext): boolean {
+  async canActivate(context: ExecutionContext): Promise<boolean> {
     const request = context.switchToHttp().getRequest<OpsRequest>()
     if (!/^\/ops(\/|$)/.test(request.path)) return true
 
@@ -42,6 +46,13 @@ export class OpsAuthGuard implements CanActivate {
     const principal = token ? verifyOpsToken(token) : null
     if (!principal) {
       throw new UnauthorizedException({ code: 'unauthorized', message: 'A valid operator session is required' })
+    }
+    // A token that carries a session version must still match the operator's: a logout ends every older session.
+    if (principal.sessionVersion !== undefined) {
+      const operator = await this.prisma.client.operatorUser.findUnique({ where: { id: principal.id }, select: { sessionVersion: true } })
+      if (!operator || operator.sessionVersion !== principal.sessionVersion) {
+        throw new UnauthorizedException({ code: 'session_revoked', message: 'This session has ended - sign in again' })
+      }
     }
     request.operator = principal
     return true
