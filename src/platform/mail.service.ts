@@ -1,6 +1,6 @@
 // Sends the platform's own emails (owner password reset and owner invites). Three providers, picked by
 // MAIL_PROVIDER: `mailjet` (the real one, API key and secret in the environment), `simulator` (#198: the
-// message is stored in simulated_messages and shown by the dev inbox, GET /dev/v1/inbox) and `log`
+// message is stored in simulated_messages and shown by the dev inbox, GET /ops/v1/dev-inbox) and `log`
 // (the default: the message goes to the server log and nowhere else, for tests).
 // Production refuses to start unless Mailjet is configured (production-config.ts).
 import { Injectable, Logger, NotFoundException } from '@nestjs/common'

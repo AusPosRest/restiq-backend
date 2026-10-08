@@ -8,6 +8,8 @@ export const OPS_SESSION_TTL_SECONDS = 12 * 60 * 60
 export interface OpsPrincipal {
   id: string
   email: string
+  /** Matches OperatorUser.sessionVersion; a logout moves it on and ends every older token. Tokens issued before #203 carry none. */
+  sessionVersion?: number
 }
 
 function opsJwtSecret(): string {
@@ -19,7 +21,7 @@ function opsJwtSecret(): string {
 }
 
 export function signOpsToken(principal: OpsPrincipal): string {
-  return jwt.sign({ email: principal.email }, opsJwtSecret(), {
+  return jwt.sign({ email: principal.email, ...(principal.sessionVersion === undefined ? {} : { sv: principal.sessionVersion }) }, opsJwtSecret(), {
     subject: principal.id,
     audience: OPS_JWT_AUDIENCE,
     expiresIn: OPS_SESSION_TTL_SECONDS,
@@ -33,7 +35,8 @@ export function verifyOpsToken(token: string): OpsPrincipal | null {
     if (typeof payload === 'string' || typeof payload.sub !== 'string') return null
     const email: unknown = payload.email
     if (typeof email !== 'string') return null
-    return { id: payload.sub, email }
+    const sv: unknown = payload.sv
+    return { id: payload.sub, email, ...(typeof sv === 'number' ? { sessionVersion: sv } : {}) }
   } catch {
     return null
   }
