@@ -1,6 +1,6 @@
 import { Body, Controller, Get, HttpCode, Param, Patch, Post } from '@nestjs/common'
 import { AdminPrincipal, CurrentOwner } from '../../platform'
-import { CapabilityView, OutletView, SetCapabilityDto } from './outlets.dtos'
+import { CapabilityView, OutletView, SetCapabilityDto, UpdateOutletDto } from './outlets.dtos'
 import { OutletsService } from './outlets.service'
 import type { StarterSetupResult } from './starter-setup'
 
@@ -11,6 +11,11 @@ export class AdminOutletsController {
   @Get()
   list(@CurrentOwner() owner: AdminPrincipal): Promise<OutletView[]> {
     return this.outlets.list(owner)
+  }
+
+  @Patch(':outletId')
+  update(@CurrentOwner() owner: AdminPrincipal, @Param('outletId') outletId: string, @Body() dto: UpdateOutletDto): Promise<OutletView> {
+    return this.outlets.update(owner, outletId, dto)
   }
 
   @Get(':outletId/capabilities')

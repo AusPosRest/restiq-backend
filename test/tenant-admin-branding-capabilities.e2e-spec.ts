@@ -190,6 +190,49 @@ describe('/admin/v1/outlets, /admin/v1/branding (e2e)', () => {
       const res = await request(httpServer).get('/admin/v1/outlets')
       expect(res.status).toBe(401)
     })
+
+    it('updates name, address and timezone, and the list reflects the change', async () => {
+      const { tenantId, token } = await createOwner(prisma)
+      const outletId = await createOutlet(prisma, tenantId, 'Indiranagar')
+
+      const patchRes = await authed(request(httpServer).patch(`/admin/v1/outlets/${outletId}`), token).send({
+        name: 'Indiranagar Main',
+        address: 'A2',
+        timezone: 'Asia/Kolkata',
+      })
+      expect(patchRes.status).toBe(200)
+      expect(patchRes.body).toEqual({ id: outletId, name: 'Indiranagar Main', address: 'A2', type: 'dine_in', timezone: 'Asia/Kolkata' })
+
+      const getRes = await authed(request(httpServer).get('/admin/v1/outlets'), token)
+      const body = getRes.body as OutletBody[]
+      expect(body).toEqual([{ id: outletId, name: 'Indiranagar Main', address: 'A2', type: 'dine_in', timezone: 'Asia/Kolkata' }])
+    })
+
+    it('rejects an invalid IANA timezone (400)', async () => {
+      const { tenantId, token } = await createOwner(prisma)
+      const outletId = await createOutlet(prisma, tenantId)
+
+      const res = await authed(request(httpServer).patch(`/admin/v1/outlets/${outletId}`), token).send({ timezone: 'Not/AZone' })
+      expect(res.status).toBe(400)
+      expect((res.body as ErrorBody).error.code).toBe('validation_failed')
+    })
+
+    it('rejects updating another tenant’s outlet (404, not leaked as 403)', async () => {
+      const owner = await createOwner(prisma, 'Spice Route Hospitality')
+      const other = await createOwner(prisma, 'Curry Leaf Kitchens')
+      const otherOutletId = await createOutlet(prisma, other.tenantId, 'Koramangala')
+
+      const res = await authed(request(httpServer).patch(`/admin/v1/outlets/${otherOutletId}`), owner.token).send({ name: 'Hijacked' })
+      expect(res.status).toBe(404)
+    })
+
+    it('rejects an update with no admin session', async () => {
+      const { tenantId } = await createOwner(prisma)
+      const outletId = await createOutlet(prisma, tenantId)
+
+      const res = await request(httpServer).patch(`/admin/v1/outlets/${outletId}`).send({ name: 'Hijacked' })
+      expect(res.status).toBe(401)
+    })
   })
 
   describe('branding', () => {

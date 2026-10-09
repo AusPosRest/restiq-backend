@@ -5,7 +5,7 @@
 import { BadRequestException, Injectable, NotFoundException } from '@nestjs/common'
 import { AdminPrincipal, RegionRegistryService } from '../../platform'
 import { setTenantContext } from '../menu/tenant-context'
-import { CapabilityView, OutletView } from './outlets.dtos'
+import { CapabilityView, OutletView, UpdateOutletDto } from './outlets.dtos'
 import { applyStarterSetup, StarterSetupResult } from './starter-setup'
 
 @Injectable()
@@ -54,6 +54,26 @@ export class OutletsService {
         update: { enabled },
       })
       return { key: row.key, enabled: row.enabled }
+    })
+  }
+
+  // Routine content edit (SPEC constraint, same as capability toggling) - no audit reason required.
+  async update(owner: AdminPrincipal, outletId: string, dto: UpdateOutletDto): Promise<OutletView> {
+    if (dto.name === undefined && dto.address === undefined && dto.timezone === undefined) {
+      throw new BadRequestException({ code: 'validation_failed', message: 'nothing to change' })
+    }
+    const plane = this.registry.planeFor(this.registry.homeRegion())
+    return plane.$transaction(async (tx) => {
+      await setTenantContext(tx, owner.tenantId)
+      const outlet = await tx.outlet.findUnique({ where: { id: outletId } })
+      if (!outlet || outlet.tenantId !== owner.tenantId || outlet.deletedAt) {
+        throw new NotFoundException({ code: 'not_found', message: 'No such outlet' })
+      }
+      const updated = await tx.outlet.update({
+        where: { id: outletId },
+        data: { name: dto.name, address: dto.address, timezone: dto.timezone },
+      })
+      return { id: updated.id, name: updated.name, address: updated.address, type: updated.type, timezone: updated.timezone }
     })
   }
 
