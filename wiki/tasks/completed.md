@@ -1,5 +1,12 @@
 # Completed
 
+- **2026-10-11** - Per-tenant Test / Live mode and QA polish (issue #213):
+  - `tenants.live_since` (migration `20261011100000_tenant_test_mode`; null = Test mode, existing tenants Live from creation). `platform/tenant-mode.ts`; `paymentsSimulatorFor(tx, tenantId)` (env on OR tenant in Test mode) replaces the env-only check in intent creation, the simulate webhook, `confirmIntent` and finalisation. `paymentsSimulatorEnabled()` stays exported for callers without a tenant.
+  - `POST /ops/v1/tenants/:id/mode` `{ mode, reason }`, audited `tenant.switched_to_test` / `tenant.switched_to_live`; 409 `tenant_has_live_sales` once a bill was finalised since going Live. `POST /ops/v1/tenants` takes `testMode`. List and detail carry `testMode` (detail also `liveSince`); dashboard KPIs count Live tenants only.
+  - Mail for a Test-mode tenant always goes to `simulated_messages`; the operator inbox no longer 404s with a real provider (it then holds only Test tenants' mail).
+  - `GET /admin/v1/tenant` and `GET /pos/v1/tenant` (`name`, `country`, `testMode`) for console badges; invoices carry `testMode` (bill finalised before `live_since`).
+  - Tenant list health is the worst device severity, filterable (PE-2); `GET /ops/v1/tenants/draft` answers `{ draft: null }` instead of 404 (PE-6); auto device labels use the random tail of the id (PE-25).
+  - Tests: `test/tenant-directory`, `tenant-onboarding`, `pos-payment-intents`, `dev-inbox`, `tenant-admin-branding-capabilities` e2e; `src/ops/devices/default-label.spec.ts`.
 - **2026-10-08** - Platform admin login and mail audit fixes (issue #203): the dev inbox moved to `GET /ops/v1/dev-inbox` and needs an operator session (it was public and showed live reset links); operator logout bumps `operator_users.session_version`, so the logged-out token (and every other session of that operator) answers 401 `session_revoked`; the login email is trimmed before validation.
 - **2026-10-08** - Configurable plan prices (issue #201): `plan_prices` (country x plan, monthly price in minor units or null for "on quote", annual discount percent), seeded A$49/129 and ₹499/999 at 20% off annual. `GET /ops/v1/plan-prices`; `PUT /ops/v1/plan-prices/:country/:plan` with a reason, audited as `plan_price.updated`.
 - **2026-10-08** - Mail simulator and owner invite emails (issue #198):
