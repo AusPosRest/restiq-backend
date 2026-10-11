@@ -86,7 +86,22 @@ export class PaymentIntentsService {
       // partial unique index is free for the new one.
       const active = await tx.paymentIntent.findFirst({ where: { billId, shareId: null, status: { in: [...ACTIVE_INTENT_STATUSES] } }, include: INTENT_INCLUDE })
       if (active && isIntentActive(await expireIfDue(tx, active))) {
-        throw new ConflictException({ code: 'intent_active', message: `A payment is already waiting on the terminal (${active.id})` })
+        // restiq-backend#210 (PE-22): staff-facing copy, no ids.
+        throw new ConflictException({ code: 'intent_active', message: 'A card payment for this bill is already waiting on the terminal - cancel it there or wait for it to finish' })
+      }
+
+      // restiq-backend#210 (PE-22): never queue a payment no terminal will
+      // pick up. It goes to this till's linked terminal, else the outlet-wide
+      // queue - which only an active terminal not linked to another till drains.
+      const targetDeviceId = await linkedPeripheral(tx, staff.tenantId, dto.deviceId, 'terminal')
+      if (!targetDeviceId) {
+        const outletTerminals = await tx.device.count({ where: { tenantId: staff.tenantId, outletId: bill.outletId, type: 'terminal', status: 'active', pairedPosId: null } })
+        if (outletTerminals === 0) {
+          throw new ConflictException({
+            code: 'no_terminal',
+            message: 'No card terminal is set up for this till. Take the card on your own machine and record it as External, or choose Cash or UPI.',
+          })
+        }
       }
 
       const tenant = await tx.tenant.findUniqueOrThrow({ where: { id: staff.tenantId }, select: { country: true } })
@@ -107,14 +122,14 @@ export class PaymentIntentsService {
             expiresAt: new Date(Date.now() + INTENT_TTL_MS),
             createdByStaffId: staff.id,
             // Issue #134: a POS with a linked terminal charges only there.
-            targetDeviceId: await linkedPeripheral(tx, staff.tenantId, dto.deviceId, 'terminal'),
+            targetDeviceId,
           },
           include: INTENT_INCLUDE,
         })
         return { view: toPaymentIntentView(intent), created: true }
       } catch (error) {
         if (isUniqueViolation(error)) {
-          throw new ConflictException({ code: 'intent_active', message: 'A payment is already waiting on the terminal' })
+          throw new ConflictException({ code: 'intent_active', message: 'A card payment for this bill is already waiting on the terminal - cancel it there or wait for it to finish' })
         }
         throw error
       }

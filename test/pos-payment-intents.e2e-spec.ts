@@ -211,6 +211,10 @@ describe('/pos/v1 payment intents - simulated card terminal (e2e)', () => {
     await authed(request(httpServer).patch(`/pos/v1/orders/${orderId}/status`), owner.token).send({ status: 'sent' })
     const created = await authed(request(httpServer).post(`/pos/v1/orders/${orderId}/bill`), owner.token).send()
     expect(created.status).toBe(201)
+    // restiq-backend#210: an intent needs a terminal to go to - one outlet-wide terminal.
+    await prisma.device.create({
+      data: { id: uuidv7(), tenantId, outletId, label: 'Counter terminal', type: 'terminal', hardwareKeyFingerprint: `fp-${uuidv7()}`, enrolledAt: new Date() },
+    })
     return { tenantId, outletId, billId: (created.body as BillBody).id, token: owner.token }
   }
 
@@ -252,6 +256,34 @@ describe('/pos/v1 payment intents - simulated card terminal (e2e)', () => {
       expect((second.body as ErrorBody).error.code).toBe('intent_active')
 
       expect(await prisma.paymentIntent.count({ where: { billId } })).toBe(1)
+    })
+
+    it('refuses with no_terminal, in plain words, when no terminal would ever pick it up (PE-22)', async () => {
+      const { tenantId, outletId, billId, token } = await setUpOpenBill()
+      await prisma.device.deleteMany({ where: { tenantId, type: 'terminal' } })
+
+      const none = await sendToTerminal(billId, token, 100)
+      expect(none.status).toBe(409)
+      expect((none.body as ErrorBody).error.code).toBe('no_terminal')
+      expect((none.body as ErrorBody).error.message).toContain('No card terminal is set up')
+
+      // A terminal linked to a different till does not serve this one either.
+      const otherPos = await prisma.device.create({
+        data: { id: uuidv7(), tenantId, outletId, label: 'Till 2', type: 'pos', hardwareKeyFingerprint: `fp-${uuidv7()}`, enrolledAt: new Date() },
+      })
+      await prisma.device.create({
+        data: { id: uuidv7(), tenantId, outletId, label: 'Till 2 terminal', type: 'terminal', hardwareKeyFingerprint: `fp-${uuidv7()}`, enrolledAt: new Date(), pairedPosId: otherPos.id },
+      })
+      expect((await sendToTerminal(billId, token, 100)).status).toBe(409)
+      expect(await prisma.paymentIntent.count({ where: { billId } })).toBe(0)
+    })
+
+    it('says a payment is already waiting without leaking its id (PE-22)', async () => {
+      const { billId, token } = await setUpOpenBill()
+      const first = await sendToTerminal(billId, token, 100)
+      const second = await sendToTerminal(billId, token, 100)
+      expect(second.status).toBe(409)
+      expect((second.body as ErrorBody).error.message).not.toContain((first.body as IntentBody).id)
     })
 
     it('never asks the terminal for more than what is still due', async () => {
