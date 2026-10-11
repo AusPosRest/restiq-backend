@@ -41,6 +41,20 @@ describe('outlet-restricted staff on every POS/kitchen request (e2e)', () => {
   })
 
   afterAll(async () => {
+    const where = { tenantId }
+    await prisma.ticket.deleteMany({ where })
+    await prisma.bill.deleteMany({ where })
+    await prisma.billNumberCounter.deleteMany({ where })
+    await prisma.tokenNumberCounter.deleteMany({ where })
+    await prisma.order.deleteMany({ where })
+    await prisma.clockEvent.deleteMany({ where })
+    await prisma.staffUser.deleteMany({ where })
+    await prisma.role.deleteMany({ where })
+    await prisma.outlet.deleteMany({ where })
+    await prisma.brand.deleteMany({ where })
+    await prisma.auditEvent.deleteMany({ where })
+    await prisma.tenant.deleteMany({ where: { id: tenantId } })
+    await prisma.tenantRegistryEntry.deleteMany({ where })
     await app.close()
     await prisma.$disconnect()
   })
