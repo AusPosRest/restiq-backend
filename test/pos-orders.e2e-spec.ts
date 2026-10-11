@@ -187,7 +187,7 @@ describe('/pos/v1 table map and order ownership (e2e)', () => {
       expect(res.status).toBe(200)
       const map = res.body as TableMapEntryBody[]
       expect(map).toEqual([
-        { tableId, floorId: expect.any(String) as string, floorName: 'Ground Floor', label: 'T1', seatCapacity: 4, status: 'empty', orderId: null, ownerId: null, ownerName: null },
+        { tableId, floorId: expect.any(String) as string, floorName: 'Ground Floor', label: 'T1', seatCapacity: 4, status: 'empty', orderId: null, ownerId: null, ownerName: null, guestSessionOpen: false },
       ])
     })
 

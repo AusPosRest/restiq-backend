@@ -43,6 +43,7 @@ interface TableMapBody {
   tableId: string
   status: 'occupied' | 'empty'
   ownerName: string | null
+  guestSessionOpen: boolean
 }
 async function wipe(prisma: PrismaClient): Promise<void> {
   await prisma.cartLineModifier.deleteMany()
@@ -313,6 +314,18 @@ describe('/pos/v1 till order lifecycle (e2e, restiq-backend#210)', () => {
     const refused = await authed(request(httpServer).delete(`/pos/v1/orders/${busy.id}`), waiter.token).send()
     expect(refused.status).toBe(409)
     expect((refused.body as ErrorBody).error.code).toBe('order_not_empty')
+  })
+
+  it('flags a table whose QR guest session is still open, until staff reset it (CU-26)', async () => {
+    const { tenantId, outletId, tableId, waiter } = await setUp()
+    await prisma.tableSession.create({
+      data: { tenantId, outletId, tableId, sessionPin: '1234', startedByGuestName: 'Guest', startedByGuestPhone: '+91 90000 00001', expiresAt: new Date(Date.now() + 3_600_000) },
+    })
+    const mapOf = async () => (await authed(request(httpServer).get(`/pos/v1/outlets/${outletId}/table-map`), waiter.token)).body as TableMapBody[]
+    expect((await mapOf()).find((t) => t.tableId === tableId)).toMatchObject({ status: 'empty', guestSessionOpen: true })
+
+    expect((await authed(request(httpServer).post(`/pos/v1/tables/${tableId}/close-session`), waiter.token).send()).status).toBe(200)
+    expect((await mapOf()).find((t) => t.tableId === tableId)?.guestSessionOpen).toBe(false)
   })
 
   it('fires a never-sent counter order to the kitchen when its bill is finalised from Open orders (CU-17)', async () => {

@@ -178,6 +178,13 @@ export class OrdersService {
         include: { owner: { select: { name: true } } },
       })
       const byTable = new Map(activeOrders.map((o) => [o.tableId as string, o]))
+      // restiq-backend#210 (CU-26): a QR guest session still open on a table -
+      // with no order, staff may need to reset it for the next guests.
+      const openSessions = await tx.tableSession.findMany({
+        where: { tenantId: staff.tenantId, status: 'open', tableId: { in: tables.map((t) => t.id) } },
+        select: { tableId: true },
+      })
+      const sessionTables = new Set(openSessions.map((session) => session.tableId))
 
       return tables.map((t) => {
         const order = byTable.get(t.id)
@@ -191,6 +198,7 @@ export class OrdersService {
           orderId: order?.id ?? null,
           ownerId: order?.ownerId ?? null,
           ownerName: order?.owner?.name ?? null,
+          guestSessionOpen: sessionTables.has(t.id),
         } satisfies TableMapEntry
       })
     })

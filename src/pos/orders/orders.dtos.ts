@@ -197,4 +197,7 @@ export interface TableMapEntry {
   ownerId: string | null
   // restiq-backend#210 (SE-22): the owner's name, for "owned by" copy - null with ownerId.
   ownerName: string | null
+  // restiq-backend#210 (CU-26): a QR guest session is open on this table -
+  // the till offers "Reset table" (POST /pos/v1/tables/:id/close-session).
+  guestSessionOpen: boolean
 }
