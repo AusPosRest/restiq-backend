@@ -110,8 +110,19 @@ function hashCode(normalized: string): string {
   return createHash('sha256').update(normalized).digest('hex')
 }
 
-function defaultLabel(type: string, id: string): string {
-  return `${type.toUpperCase()}-${id.slice(0, 8)}`
+// restiq-backend#210 (PE-19): a device enrolled without a label gets a
+// human name - "Till 2", "Kitchen screen 1" - never an id fragment.
+const DEVICE_TYPE_NAMES: Record<string, string> = {
+  pos: 'Till',
+  kds: 'Kitchen screen',
+  kiosk: 'Kiosk',
+  cds: 'Customer display',
+  printer: 'Printer',
+  terminal: 'Card terminal',
+}
+
+function defaultLabel(type: string, sameTypeCount: number): string {
+  return `${DEVICE_TYPE_NAMES[type] ?? 'Device'} ${sameTypeCount + 1}`
 }
 
 function toDeviceView(device: {
@@ -294,7 +305,9 @@ export class DevicesService {
           id,
           tenantId: record.tenantId,
           outletId: record.outletId,
-          label: dto.label?.trim() || defaultLabel(record.deviceType, id),
+          label:
+            dto.label?.trim() ||
+            defaultLabel(record.deviceType, await tx.device.count({ where: { tenantId: record.tenantId, outletId: record.outletId, type: record.deviceType } })),
           type: record.deviceType,
           hardwareKeyFingerprint: dto.hardwareKeyFingerprint,
           secretHash: hashDeviceSecret(deviceSecret),

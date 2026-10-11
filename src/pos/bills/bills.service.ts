@@ -34,7 +34,8 @@
 // story picks 20% of the bill's subtotal, the example the spec's own memlog
 // floated ("any discount over 20%") - see DISCOUNT_THRESHOLD_FRACTION.
 import { BadRequestException, ConflictException, ForbiddenException, Injectable, NotFoundException } from '@nestjs/common'
-import { ManagerApproval, ManagerAuthService, PosPrincipal, RegionRegistryService, uuidv7 } from '../../platform'
+import { KitchenTicketsService } from '../../kitchen'
+import { ManagerApproval, ManagerAuthService, PosPrincipal, RegionRegistryService, roleHasPermission, uuidv7 } from '../../platform'
 import { setTenantContext } from '../tenant-context'
 import { linkedPeripheral, queueFor } from '../device-routing'
 import { localDateKey } from '../clock/clock.util'
@@ -82,6 +83,7 @@ export class BillsService {
   constructor(
     private readonly registry: RegionRegistryService,
     private readonly managerAuth: ManagerAuthService,
+    private readonly tickets: KitchenTicketsService,
   ) {}
 
   private plane() {
@@ -108,7 +110,10 @@ export class BillsService {
     return plane.$transaction(async (tx) => {
       await setTenantContext(tx, staff.tenantId)
       const order = await loadOrder(tx, staff.tenantId, orderId)
-      await assertOwner(tx, order, staff)
+      // restiq-backend#210 (SE-23): waiter takes, cashier settles. Anyone who
+      // may settle bills can open the bill for someone else's order (finalize
+      // is not owner-gated either); everyone else still needs to own it.
+      if (!roleHasPermission(staff.role, 'settle_bills')) await assertOwner(tx, order, staff)
 
       const { bill, created } = await createOrGetBillRecord(tx, {
         tenantId: staff.tenantId,
@@ -229,7 +234,10 @@ export class BillsService {
       const job = await tx.printJob.create({
         data: { id: uuidv7(), tenantId: staff.tenantId, outletId: bill.outletId, billId, targetDeviceId, payload: payload as unknown as Prisma.InputJsonValue },
       })
-      return toPrintJobView(job)
+      // restiq-backend#210 (CU-18): the outlet-wide queue is drained only by an active printer not linked to another till.
+      const printerAvailable =
+        targetDeviceId !== null || (await tx.device.count({ where: { tenantId: staff.tenantId, outletId: bill.outletId, type: 'printer', status: 'active', pairedPosId: null } })) > 0
+      return { ...toPrintJobView(job), printerAvailable }
     })
   }
 
@@ -316,6 +324,11 @@ export class BillsService {
         })
       }
 
+      // restiq-backend#210 (CU-17): a paid order always reaches the kitchen -
+      // anything not yet sent (a counter order settled from Open orders, an
+      // item added after the first send) fires now, in the same transaction.
+      await this.tickets.fireOnSend(tx, { id: bill.orderId, tenantId: bill.tenantId, outletId: bill.outletId })
+
       const final = await commitFinalize(tx, {
         tenantId: staff.tenantId,
         bill,
@@ -356,7 +369,7 @@ export class BillsService {
         throw new ConflictException({ code: 'bill_not_finalized', message: 'Only a finalized bill can be refunded' })
       }
 
-      const orderLines = await tx.orderLine.findMany({ where: { orderId: bill.orderId }, include: { modifiers: true } })
+      const orderLines = await tx.orderLine.findMany({ where: { orderId: bill.orderId, voidedAt: null }, include: { modifiers: true } })
       const orderLineById = new Map(orderLines.map((l) => [l.id, l]))
 
       // Sum every earlier credit note's lines for this bill so a line can

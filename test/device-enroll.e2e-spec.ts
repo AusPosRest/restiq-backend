@@ -200,6 +200,12 @@ describe('/device/v1/enroll (e2e)', () => {
     expect(audit[0]?.actorEmail).toBe('device:device-stub-')
   })
 
+  it('names an unlabelled device in plain words - Till 1, Till 2 - never an id fragment (PE-19)', async () => {
+    const first = deviceOf(await deviceEnroll(codeOf(await generateCode()), { hardwareKeyFingerprint: 'fp-a' }))
+    const second = deviceOf(await deviceEnroll(codeOf(await generateCode()), { hardwareKeyFingerprint: 'fp-b' }))
+    expect([first.label, second.label]).toEqual(['Till 1', 'Till 2'])
+  })
+
   it('rejects an unknown code with 400 code_invalid', async () => {
     const res = await deviceEnroll('ZZZ-ZZZ')
     expect(res.status).toBe(400)

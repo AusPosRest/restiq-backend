@@ -307,7 +307,7 @@ export class GuestBillsService {
    */
   private async syncShares(tx: Tx, tenantId: string, bill: BillWithTenders): Promise<void> {
     if (bill.status !== 'open') return
-    const lines = await tx.orderLine.findMany({ where: { orderId: bill.orderId }, include: { modifiers: true }, orderBy: { createdAt: 'asc' } })
+    const lines = await tx.orderLine.findMany({ where: { orderId: bill.orderId, voidedAt: null }, include: { modifiers: true }, orderBy: { createdAt: 'asc' } })
     const weights = new Map<string, { guestName: string; lineTotal: bigint }>()
     for (const line of lines) {
       // Staff-added lines carry no guestId - their cost is spread below, not dropped.

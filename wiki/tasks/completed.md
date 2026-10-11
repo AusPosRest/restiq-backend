@@ -8,6 +8,13 @@
   - Throttles: device enrolment uses `resolveClientIp` + the shared `AttemptLimiter` (SE-32); table join PIN counts per guest address (10/15 min) plus a per-table 30/15 min cap (SE-24).
   - Errors: every unexpected error answers `{ error: { code, message } }` - Prisma P2034/P2002 409 `conflict`, P2020 400 `validation_failed`, else 500 `internal_error` (SE-30).
   - Migration `20261011093000_database_timezone_utc` sets the database's default timezone to UTC so Prisma timestamps are stored correctly (SE-31).
+- **2026-10-11** - POS till flows - QA fixes (issue #210):
+  - Order lifecycle: lines added to a sent order wait for Send instead of firing on add (CU-15); a line already on a kitchen ticket is voided with `POST /pos/v1/orders/{orderId}/lines/{lineId}/void` (manager PIN + reason, audited; ticket line shows VOID); unsent lines are still deleted, sent ones answer 409 `line_sent`.
+  - `DELETE /pos/v1/orders/{orderId}` discards an order with nothing on it, with its empty bill (audited `order.discarded`; 409 `order_not_empty` / `has_payments`) (PE-16, CU-27).
+  - Line `note` (special instructions, max 200) reaches the bill, invoice and kitchen ticket; lines and orders carry staff display names, the table map carries `ownerName` and `guestSessionOpen` (CU-12, SE-22, CU-26).
+  - Staff with `settle_bills` may open any order's bill - waiter takes, cashier settles (SE-23); a paid counter order always reaches the kitchen (CU-17).
+  - Card-terminal intents answer 409 `no_terminal` when no terminal serves the outlet, with no ids in the message (PE-22, CU-13); print responses carry `printerAvailable` (CU-18); unlabelled devices get names like "Till 2".
+  - Migration `20261011150000_order_line_note_void` adds `order_lines.note`, `voided_at`, `void_reason`.
 - **2026-10-08** - Platform admin login and mail audit fixes (issue #203): the dev inbox moved to `GET /ops/v1/dev-inbox` and needs an operator session (it was public and showed live reset links); operator logout bumps `operator_users.session_version`, so the logged-out token (and every other session of that operator) answers 401 `session_revoked`; the login email is trimmed before validation.
 - **2026-10-08** - Configurable plan prices (issue #201): `plan_prices` (country x plan, monthly price in minor units or null for "on quote", annual discount percent), seeded A$49/129 and ₹499/999 at 20% off annual. `GET /ops/v1/plan-prices`; `PUT /ops/v1/plan-prices/:country/:plan` with a reason, audited as `plan_price.updated`.
 - **2026-10-08** - Mail simulator and owner invite emails (issue #198):

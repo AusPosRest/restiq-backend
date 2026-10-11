@@ -1388,6 +1388,16 @@ model OrderLine {
   // render a label.
   guestId        String?  @map("guest_id") @db.Uuid
   guestName      String?  @map("guest_name")
+  // restiq-backend#210: the till's "special instructions" ("less spicy") -
+  // shown on the order and the kitchen ticket. Null when none was typed.
+  note           String?
+  // restiq-backend#210: a line already sent to the kitchen is never deleted -
+  // a manager-approved void stamps it here instead (audited via
+  // ManagerAuthService 'void_after_fire'). Voided lines drop out of the
+  // order view, bill totals and invoice; the kitchen ticket shows them struck
+  // through (TicketLine.voided).
+  voidedAt       DateTime? @map("voided_at") @db.Timestamptz(6)
+  voidReason     String?   @map("void_reason")
   createdAt      DateTime @default(now()) @map("created_at") @db.Timestamptz(6)
 
   tenant          Tenant              @relation(fields: [tenantId], references: [id])

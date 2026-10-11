@@ -242,6 +242,10 @@ export interface PrintJobView {
   payload: InvoiceView
   createdAt: string
   printedAt: string | null
+  // restiq-backend#210 (CU-18): set only on the POST .../print response -
+  // false when no active printer would ever pick this job up, so the till
+  // can offer the bill on screen instead of claiming "Sent to printer".
+  printerAvailable?: boolean
 }
 
 // issue #158: today's payment history at an outlet - every Tender on a

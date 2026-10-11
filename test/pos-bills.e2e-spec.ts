@@ -322,14 +322,30 @@ describe('/pos/v1 bill and settle (e2e)', () => {
       expect(bill.billNumber).toBeNull()
     })
 
-    it('rejects a non-owner creating a bill, naming the current owner', async () => {
+    it('rejects a non-owner who cannot settle bills, naming the current owner', async () => {
       const tenantId = await createTenant(prisma)
       const outletId = await createOutlet(prisma, tenantId)
       const { orderId } = await setUpSentOrder(tenantId, outletId, 10000)
-      const other = await createStaff(prisma, tenantId, outletId, 'Vikram')
+      const waiterRole = await prisma.role.create({ data: { tenantId, name: 'Waiter', isSystem: true, isManager: false } })
+      const waiter = await prisma.staffUser.create({ data: { tenantId, roleId: waiterRole.id, name: 'Vikram' } })
+      const token = signPosToken({ sessionVersion: 0, id: waiter.id, tenantId, outletId, name: 'Vikram' })
 
-      const res = await authed(request(httpServer).post(`/pos/v1/orders/${orderId}/bill`), other.token).send()
+      const res = await authed(request(httpServer).post(`/pos/v1/orders/${orderId}/bill`), token).send()
       expect(res.status).toBe(403)
+      expect((res.body as { error: { message: string } }).error.message).toMatch(/^This order belongs to .+\. Take it over first/)
+    })
+
+    it('lets a cashier open and settle the bill of a waiter-owned order without a transfer (SE-23)', async () => {
+      const tenantId = await createTenant(prisma)
+      const outletId = await createOutlet(prisma, tenantId)
+      const { orderId } = await setUpSentOrder(tenantId, outletId, 10000)
+      const cashier = await createStaff(prisma, tenantId, outletId, 'Vikram')
+
+      const res = await authed(request(httpServer).post(`/pos/v1/orders/${orderId}/bill`), cashier.token).send()
+      expect(res.status).toBe(201)
+      const bill = res.body as BillBody
+      const finalized = await authed(request(httpServer).post(`/pos/v1/bills/${bill.id}/finalize`), cashier.token).send({ tenders: [{ method: 'cash', amountMinor: bill.totalMinor }] })
+      expect(finalized.status).toBe(200)
     })
 
     it('is idempotent: a second POST for the same order returns 200 with the same bill id and writes no second row (issue #98)', async () => {
@@ -859,6 +875,13 @@ describe('/pos/v1 bill and settle (e2e)', () => {
       expect(job.printedAt).toBeNull()
       expect(job.payload.title).toBe('Bill')
       expect(job.payload.totalMinor).toBe(21000)
+      // CU-18: no printer at this outlet yet - the till is told, so it can show the bill on screen.
+      expect((printed.body as { printerAvailable: boolean }).printerAvailable).toBe(false)
+      await prisma.device.create({
+        data: { id: uuidv7(), tenantId, outletId, label: 'Receipt printer', type: 'printer', hardwareKeyFingerprint: `fp-${uuidv7()}`, enrolledAt: new Date() },
+      })
+      expect(((await authed(request(httpServer).post(`/pos/v1/bills/${billId}/print`), ownerToken).send()).body as { printerAvailable: boolean }).printerAvailable).toBe(true)
+      await prisma.printJob.deleteMany({ where: { billId, id: { not: job.id } } })
 
       // The snapshot is what was sent - a line added afterwards does not change it.
       const itemId = await createItemWithPrice(prisma, tenantId, 5000)

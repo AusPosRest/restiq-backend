@@ -186,7 +186,8 @@ export async function loadBill(tx: Tx, tenantId: string, billId: string): Promis
 
 /** Sums an order's snapshotted lines (unit price + selected modifiers, times quantity) into subtotalMinor. */
 export async function computeSubtotal(tx: Tx, orderId: string): Promise<bigint> {
-  const lines = await tx.orderLine.findMany({ where: { orderId }, include: { modifiers: true } })
+  // restiq-backend#210: a voided line is no longer billed.
+  const lines = await tx.orderLine.findMany({ where: { orderId, voidedAt: null }, include: { modifiers: true } })
   let subtotal = 0n
   for (const line of lines) {
     const modifiersTotal = line.modifiers.reduce((sum, m) => sum + m.priceMinor, 0n)
@@ -516,7 +517,7 @@ export async function buildInvoiceView(tx: Tx, tenantId: string, billId: string)
 
   const [orderLines, outlet, taxContext, creditNotes] = await Promise.all([
     tx.orderLine.findMany({
-      where: { orderId: bill.orderId },
+      where: { orderId: bill.orderId, voidedAt: null },
       include: { item: true, variant: true, combo: true, modifiers: { include: { modifier: true } } },
       orderBy: { createdAt: 'asc' },
     }),
