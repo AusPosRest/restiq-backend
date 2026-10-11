@@ -38,8 +38,9 @@ export interface TaxResult {
 
 const COMPOSITION_NOTE = 'Composition taxable person, not eligible to collect tax on supplies'
 
-/** round(numerator/denominator), half rounding up - deterministic, no floats. Both inputs are >= 0 (a subtotal minor-unit amount can never be negative). */
+/** round(numerator/denominator), half away from zero - deterministic, no floats. denominator > 0; a negative numerator (e.g. a legacy negative-priced modifier, SE-7) is rounded symmetrically rather than truncated toward zero. */
 function roundHalfUp(numerator: bigint, denominator: bigint): bigint {
+  if (numerator < 0n) return -roundHalfUp(-numerator, denominator)
   return (2n * numerator + denominator) / (2n * denominator)
 }
 
@@ -70,19 +71,17 @@ export function computeTax(params: ComputeTaxParams): TaxResult {
       return { taxMinor: amountMinor, pricesIncludeTax: false, breakdown: [{ label: 'IGST', ratePercent: Number(rateBasis) / 100, amountMinor }], notes: [] }
     }
 
-    // CGST/SGST split: the total is rounded once (the authoritative figure),
-    // CGST is rounded independently at its own half-rate, and SGST absorbs
-    // whatever the two roundings leave over - so the two lines always sum
-    // exactly to taxMinor, never off by the rounding unit either way.
-    const taxMinor = roundHalfUp(subtotalMinor * rateBasis, 10_000n)
-    const cgstMinor = roundHalfUp(subtotalMinor * rateBasis, 20_000n)
-    const sgstMinor = taxMinor - cgstMinor
+    // CGST/SGST split (CU-11): each is levied at half the rate on the same
+    // taxable value, so each is rounded on its own and the two are always
+    // equal - never a one-paisa mismatch between the lines. taxMinor is
+    // their sum, so the lines still add up to it exactly.
+    const halfMinor = roundHalfUp(subtotalMinor * rateBasis, 20_000n)
     return {
-      taxMinor,
+      taxMinor: 2n * halfMinor,
       pricesIncludeTax: false,
       breakdown: [
-        { label: 'CGST', ratePercent: Number(rateBasis) / 200, amountMinor: cgstMinor },
-        { label: 'SGST', ratePercent: Number(rateBasis) / 200, amountMinor: sgstMinor },
+        { label: 'CGST', ratePercent: Number(rateBasis) / 200, amountMinor: halfMinor },
+        { label: 'SGST', ratePercent: Number(rateBasis) / 200, amountMinor: halfMinor },
       ],
       notes: [],
     }
