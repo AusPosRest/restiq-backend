@@ -1130,6 +1130,10 @@ model Device {
   role                   DeviceRole   @default(terminal)
   status                 DeviceStatus @default(active)
   hardwareKeyFingerprint String       @map("hardware_key_fingerprint")
+  // restiq-backend#209 (SE-12): sha256 of the secret handed to the device once at enrolment. A PIN sign-in
+  // presenting it gets the device's own throttle allowance; a bare device id is not proof of being that device.
+  // Null for devices enrolled before #209 - they sign in as untrusted browsers until re-enrolled.
+  secretHash             String?      @map("secret_hash")
   enrolledAt             DateTime     @map("enrolled_at") @db.Timestamptz(6)
   revokedAt              DateTime?    @map("revoked_at") @db.Timestamptz(6)
   // Device topology (issue #134): a printer/terminal linked to one POS

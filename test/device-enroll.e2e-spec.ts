@@ -11,7 +11,7 @@ import { afterAll, beforeAll, beforeEach, describe, expect, it } from 'vitest'
 import { AppModule } from '../src/app.module'
 import { createPrismaClient, PrismaClient } from '../src/db/client'
 import { ENROLL_RATE_LIMIT_ATTEMPTS } from '../src/device/enroll/enroll-rate-limit.guard'
-import { signOpsToken, uuidv7 } from '../src/platform'
+import { hashDeviceSecret, signOpsToken, uuidv7 } from '../src/platform'
 
 const EMAIL = 'device-enroll-operator@restiq.example'
 
@@ -187,6 +187,10 @@ describe('/device/v1/enroll (e2e)', () => {
     const deviceRow = await prisma.device.findUnique({ where: { id: body.id } })
     expect(deviceRow?.status).toBe('active')
     expect(deviceRow?.hardwareKeyFingerprint).toBe('device-stub-fingerprint-1')
+    // #209 (SE-12): the device gets its secret once; only a hash of it is kept.
+    const { deviceSecret } = res.body as { deviceSecret: string }
+    expect(deviceSecret).toMatch(/^dvs_[0-9a-f]{64}$/)
+    expect(deviceRow?.secretHash).toBe(hashDeviceSecret(deviceSecret))
 
     expect((await prisma.enrolmentCode.findFirst({ where: { tenantId } }))?.usedAt).not.toBeNull()
 

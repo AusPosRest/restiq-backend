@@ -1,4 +1,4 @@
-import { IsNotEmpty, IsOptional, IsString, IsUUID, Matches } from 'class-validator'
+import { IsNotEmpty, IsOptional, IsString, IsUUID, Matches, MaxLength } from 'class-validator'
 import type { ClockEventType } from '../../generated/prisma/client'
 
 // 4-digit PIN per SPEC CAP-1 and staff.service.ts's PIN_LENGTH convention.
@@ -16,6 +16,10 @@ export class PosLoginDto {
   // otherwise the attempt is throttled by IP like any unbound browser.
   @IsOptional() @IsUUID()
   deviceId?: string
+
+  // restiq-backend#209 (SE-12): the secret this device got at enrolment - only with it does deviceId earn the till's own throttle allowance.
+  @IsOptional() @IsString() @MaxLength(200)
+  deviceSecret?: string
 }
 
 export class SelectOutletDto {

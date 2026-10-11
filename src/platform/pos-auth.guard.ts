@@ -65,15 +65,21 @@ export class PosAuthGuard implements CanActivate {
     await this.address.assertTokenMatchesAddress(request, claims.tenantId)
 
     const plane = this.registry.planeFor(this.registry.homeRegion())
-    const staff = await plane.$transaction(async (tx) => {
+    const { staff, deviceActive } = await plane.$transaction(async (tx) => {
       await tx.$executeRaw`SELECT set_config('app.tenant_id', ${claims.tenantId}, true)`
-      return tx.staffUser.findUnique({
+      const staffRow = await tx.staffUser.findUnique({
         where: { id: claims.id },
         select: { tenantId: true, name: true, pinRevokedAt: true, sessionVersion: true, role: { select: { name: true } } },
       })
+      // restiq-backend#209 (SE-11): a session signed in on an enrolled till ends when that till is revoked.
+      const active = claims.deviceId === undefined || (await tx.device.count({ where: { id: claims.deviceId, tenantId: claims.tenantId, status: 'active', revokedAt: null } })) > 0
+      return { staff: staffRow, deviceActive: active }
     })
     if (!staff || staff.tenantId !== claims.tenantId || staff.pinRevokedAt || staff.sessionVersion !== claims.sessionVersion) {
       throw new UnauthorizedException({ code: 'session_revoked', message: 'This session has ended - log in again' })
+    }
+    if (!deviceActive) {
+      throw new UnauthorizedException({ code: 'device_revoked', message: 'This device was removed by the owner - set it up again with a new code' })
     }
 
     const policy = this.reflector.getAllAndOverride<RoutePolicy | undefined>(ROUTE_PERMISSION, [context.getHandler(), context.getClass()])
