@@ -1,5 +1,6 @@
 # Completed
 
+- **2026-10-12** - Import resume and early tax-number check (issue #222): `GET /admin/v1/menu-import/latest` answers the tenant's most recently edited uncommitted draft (with duplicate flags) or `{ draft: null }` (PE-11). `GET /ops/v1/tenants/tax-number-available?country=&number=` answers `{ available, reason: taken | invalid | null }` with the same format rule and unique registration number as submit, never naming the other tenant (PE-6). Tests: `test/menu-import`, `test/tenant-onboarding` e2e.
 - **2026-10-11** - Per-tenant Test / Live mode and QA polish (issue #213):
   - `tenants.live_since` (migration `20261011100000_tenant_test_mode`; null = Test mode, existing tenants Live from creation). `platform/tenant-mode.ts`; `paymentsSimulatorFor(tx, tenantId)` (env on OR tenant in Test mode) replaces the env-only check in intent creation, the simulate webhook, `confirmIntent` and finalisation. `paymentsSimulatorEnabled()` stays exported for callers without a tenant.
   - `POST /ops/v1/tenants/:id/mode` `{ mode, reason }`, audited `tenant.switched_to_test` / `tenant.switched_to_live`; 409 `tenant_has_live_sales` once a bill was finalised since going Live. `POST /ops/v1/tenants` takes `testMode`. List and detail carry `testMode` (detail also `liveSince`); dashboard KPIs count Live tenants only.
