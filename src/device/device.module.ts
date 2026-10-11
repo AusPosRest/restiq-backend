@@ -1,5 +1,6 @@
 import { Module } from '@nestjs/common'
 import { OpsModule } from '../ops'
+import { PlatformModule } from '../platform'
 import { DeviceEnrollController } from './enroll/device-enroll.controller'
 import { DeviceEnrollService } from './enroll/device-enroll.service'
 import { EnrollRateLimitGuard } from './enroll/enroll-rate-limit.guard'
@@ -9,7 +10,7 @@ import { EnrollRateLimitGuard } from './enroll/enroll-rate-limit.guard'
 // DevicesService (AD-12: one enrolment implementation, now three callers) -
 // this module adds no device/enrolment-code logic of its own.
 @Module({
-  imports: [OpsModule],
+  imports: [OpsModule, PlatformModule],
   controllers: [DeviceEnrollController],
   providers: [DeviceEnrollService, EnrollRateLimitGuard],
 })
