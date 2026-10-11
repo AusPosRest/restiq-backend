@@ -1,6 +1,7 @@
 import { Type } from 'class-transformer'
 import { ArrayUnique, IsArray, IsBoolean, IsDateString, IsEnum, IsInt, IsOptional, IsString, IsUUID, Length, Matches, MaxLength, Min, MinLength, ValidateNested } from 'class-validator'
 import type { PriceChannel, VegMarker } from '../../generated/prisma/client'
+import { NotBlank } from '../../platform'
 import { AllergenView } from './allergens.dtos'
 import { ModifierGroupView } from './modifier-groups.dtos'
 
@@ -17,7 +18,7 @@ const PHOTO_URL_MAX = 280_000
 const PHOTO_URL_MESSAGE = 'photoUrl must be an https URL or a data:image (jpeg, png or webp) photo under 200 KB'
 
 export class CreateVariantDto {
-  @IsString() @MinLength(1)
+  @IsString() @NotBlank() @MaxLength(60)
   name!: string
 
   @IsOptional() @IsInt() @Min(0)
@@ -28,16 +29,16 @@ export class CreateItemDto {
   @IsUUID()
   categoryId!: string
 
-  @IsString() @MinLength(1)
+  @IsString() @NotBlank() @MaxLength(120)
   name!: string
 
-  @IsString() @MinLength(1)
+  @IsString() @NotBlank() @MaxLength(60)
   shortName!: string
 
   @IsOptional() @IsString() @MaxLength(PHOTO_URL_MAX) @Matches(PHOTO_URL, { message: PHOTO_URL_MESSAGE })
   photoUrl?: string | null
 
-  @IsOptional() @IsString() @MinLength(1)
+  @IsOptional() @IsString() @NotBlank() @MaxLength(120)
   nameHindi?: string
 
   @IsOptional() @IsEnum(VEG_MARKERS)
@@ -60,10 +61,10 @@ export class CreateItemDto {
 }
 
 export class UpdateItemDto {
-  @IsOptional() @IsString() @MinLength(1)
+  @IsOptional() @IsString() @NotBlank() @MaxLength(120)
   name?: string
 
-  @IsOptional() @IsString() @MinLength(1)
+  @IsOptional() @IsString() @NotBlank() @MaxLength(60)
   shortName?: string
 
   @IsOptional() @IsUUID()
@@ -72,7 +73,7 @@ export class UpdateItemDto {
   @IsOptional() @IsString() @MaxLength(PHOTO_URL_MAX) @Matches(PHOTO_URL, { message: PHOTO_URL_MESSAGE })
   photoUrl?: string | null
 
-  @IsOptional() @IsString() @MinLength(1)
+  @IsOptional() @IsString() @NotBlank() @MaxLength(120)
   nameHindi?: string
 
   @IsOptional() @IsEnum(VEG_MARKERS)

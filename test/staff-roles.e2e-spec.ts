@@ -224,6 +224,14 @@ describe('/admin/v1/staff and /admin/v1/roles (e2e)', () => {
       expect(row?.tenantId).toBe(tenantId)
     })
 
+    it('rejects a blank name (SE-19)', async () => {
+      const { tenantId, token } = await createOwner(prisma)
+      const roles = await seedRoles(prisma, tenantId)
+
+      const res = await authed(request(httpServer).post('/admin/v1/staff'), token).send({ name: '   ', roleId: roles.Waiter })
+      expect(res.status).toBe(400)
+    })
+
     it('rejects a roleId that is not one of this tenant\'s seeded roles (400)', async () => {
       const { tenantId, token } = await createOwner(prisma)
       await seedRoles(prisma, tenantId)
