@@ -17,6 +17,7 @@ interface VariantBody {
   id: string
   name: string
   sortOrder: number
+  priceMinor: number | null
 }
 interface ModifierBody {
   id: string
@@ -44,6 +45,8 @@ interface ItemBody {
   vegMarker: string | null
   available: boolean
   stationId: string | null
+  priceMinor: number | null
+  currency: string | null
   variants: VariantBody[]
   modifierGroups: ModifierGroupBody[]
   allergens: AllergenBody[]
@@ -768,6 +771,82 @@ describe('/admin/v1/menu (e2e)', () => {
         reason: 'Attempted cross-tenant write',
       })
       expect(res.status).toBe(404)
+    })
+  })
+
+  describe('variants keep the item sellable (PE-15, CU-23, SE-20)', () => {
+    async function pricedItem(token: string, priceMinor: number): Promise<ItemBody> {
+      const category = await createCategory(token)
+      const item = await createItem(token, category.id, { name: 'Paneer Butter Masala', shortName: 'PBM' })
+      await authed(request(httpServer).post(`/admin/v1/menu/items/${item.id}/prices`), token).send({ priceMinor, currency: 'INR', reason: 'Initial price' })
+      return item
+    }
+
+    it("adding the first variant keeps the base portion on sale as its own variant, at the old price", async () => {
+      const { token } = await createOwner(prisma)
+      const item = await pricedItem(token, 28950)
+
+      const res = await authed(request(httpServer).post(`/admin/v1/menu/items/${item.id}/variants`), token).send({ name: 'Half', priceMinor: 16900, currency: 'INR', basePortionName: 'Full' })
+      expect(res.status).toBe(201)
+      const body = res.body as ItemBody
+      expect(body.variants.map((v) => [v.name, v.priceMinor])).toEqual([
+        ['Full', 28950],
+        ['Half', 16900],
+      ])
+      const full = body.variants[0]
+      const current = await authed(request(httpServer).get(`/admin/v1/menu/items/${item.id}/price?channel=qr&variantId=${full.id}`), token)
+      expect((current.body as CurrentPriceBody).priceMinor).toBe(28950)
+    })
+
+    it('names the kept portion "Regular" by default and only on the first variant', async () => {
+      const { token } = await createOwner(prisma)
+      const item = await pricedItem(token, 30000)
+      await authed(request(httpServer).post(`/admin/v1/menu/items/${item.id}/variants`), token).send({ name: 'Half', priceMinor: 18000, currency: 'INR' })
+      const res = await authed(request(httpServer).post(`/admin/v1/menu/items/${item.id}/variants`), token).send({ name: 'Family', priceMinor: 55000, currency: 'INR' })
+      expect((res.body as ItemBody).variants.map((v) => v.name)).toEqual(['Regular', 'Half', 'Family'])
+    })
+
+    it('rejects a variant price without a currency', async () => {
+      const { token } = await createOwner(prisma)
+      const item = await pricedItem(token, 30000)
+      const res = await authed(request(httpServer).post(`/admin/v1/menu/items/${item.id}/variants`), token).send({ name: 'Half', priceMinor: 18000 })
+      expect(res.status).toBe(400)
+      expect(await prisma.itemVariant.count()).toBe(0)
+    })
+
+    it('the item list carries current prices inline, null where an item or variant has none', async () => {
+      const { token } = await createOwner(prisma)
+      const priced = await pricedItem(token, 28950)
+      const category = await createCategory(token, 'Salads')
+      const unpriced = await createItem(token, category.id, { name: 'Garden Salad', shortName: 'Salad', variants: [{ name: 'Half' }] })
+
+      const res = await authed(request(httpServer).get('/admin/v1/menu/items'), token)
+      const items = res.body as ItemBody[]
+      const p = items.find((i) => i.id === priced.id)
+      expect([p?.priceMinor, p?.currency]).toEqual([28950, 'INR'])
+      const u = items.find((i) => i.id === unpriced.id)
+      expect(u?.priceMinor).toBeNull()
+      expect(u?.variants[0]?.priceMinor).toBeNull()
+    })
+  })
+
+  describe('kitchen stations for routing (PE-21)', () => {
+    it("lists the tenant's live stations with their outlet, and routes an item to one", async () => {
+      const { tenantId, token } = await createOwner(prisma)
+      const outletId = await createOutlet(prisma, tenantId)
+      const bar = await prisma.station.create({ data: { tenantId, outletId, name: 'Bar', ageingThresholdMinutes: 10 } })
+      await prisma.station.create({ data: { tenantId, outletId, name: 'Old', ageingThresholdMinutes: 10, deletedAt: new Date() } })
+      const other = await createOwner(prisma)
+      await prisma.station.create({ data: { tenantId: other.tenantId, outletId: await createOutlet(prisma, other.tenantId), name: 'Theirs', ageingThresholdMinutes: 10 } })
+
+      const res = await authed(request(httpServer).get('/admin/v1/menu/stations'), token)
+      expect(res.status).toBe(200)
+      expect(res.body).toEqual([{ id: bar.id, name: 'Bar', outletId, outletName: 'Indiranagar' }])
+
+      const category = await createCategory(token)
+      const item = await createItem(token, category.id)
+      const routed = await authed(request(httpServer).patch(`/admin/v1/menu/items/${item.id}/station`), token).send({ stationId: bar.id })
+      expect((routed.body as ItemBody).stationId).toBe(bar.id)
     })
   })
 
