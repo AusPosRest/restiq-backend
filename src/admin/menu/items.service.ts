@@ -118,29 +118,9 @@ async function assertOwnedByTenant(tx: Prisma.TransactionClient, tenantId: strin
   }
 }
 
-export interface MenuStationView {
-  id: string
-  name: string
-  outletId: string
-  outletName: string
-}
-
 @Injectable()
 export class ItemsService {
   constructor(private readonly registry: RegionRegistryService) {}
-
-  async listStations(owner: AdminPrincipal): Promise<MenuStationView[]> {
-    const plane = this.registry.planeFor(this.registry.homeRegion())
-    return plane.$transaction(async (tx) => {
-      await setTenantContext(tx, owner.tenantId)
-      const stations = await tx.station.findMany({
-        where: { tenantId: owner.tenantId, deletedAt: null, outlet: { deletedAt: null } },
-        include: { outlet: { select: { name: true } } },
-        orderBy: { createdAt: 'asc' },
-      })
-      return stations.map((s) => ({ id: s.id, name: s.name, outletId: s.outletId, outletName: s.outlet.name }))
-    })
-  }
 
   async list(owner: AdminPrincipal, categoryId?: string): Promise<ItemView[]> {
     const plane = this.registry.planeFor(this.registry.homeRegion())

@@ -17,7 +17,6 @@ import { AdminDevicesService } from './devices/devices.service'
 import { AdminFloorPlanController } from './floor-plan/floor-plan.controller'
 import { FloorPlanService } from './floor-plan/floor-plan.service'
 import { AdminMenuAllergensController } from './menu/allergens.controller'
-import { AdminMenuStationsController } from './menu/stations.controller'
 import { AllergensService } from './menu/allergens.service'
 import { AdminMenuCategoriesController } from './menu/categories.controller'
 import { CategoriesService } from './menu/categories.service'
@@ -50,7 +49,6 @@ import { StaffService } from './staff/staff.service'
     AdminMenuItemsController,
     AdminMenuModifierGroupsController,
     AdminMenuAllergensController,
-    AdminMenuStationsController,
     AdminMenuCombosController,
     AdminMenuDirectoryController,
     AdminOutletsController,

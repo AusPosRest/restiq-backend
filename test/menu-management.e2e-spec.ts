@@ -830,26 +830,6 @@ describe('/admin/v1/menu (e2e)', () => {
     })
   })
 
-  describe('kitchen stations for routing (PE-21)', () => {
-    it("lists the tenant's live stations with their outlet, and routes an item to one", async () => {
-      const { tenantId, token } = await createOwner(prisma)
-      const outletId = await createOutlet(prisma, tenantId)
-      const bar = await prisma.station.create({ data: { tenantId, outletId, name: 'Bar', ageingThresholdMinutes: 10 } })
-      await prisma.station.create({ data: { tenantId, outletId, name: 'Old', ageingThresholdMinutes: 10, deletedAt: new Date() } })
-      const other = await createOwner(prisma)
-      await prisma.station.create({ data: { tenantId: other.tenantId, outletId: await createOutlet(prisma, other.tenantId), name: 'Theirs', ageingThresholdMinutes: 10 } })
-
-      const res = await authed(request(httpServer).get('/admin/v1/menu/stations'), token)
-      expect(res.status).toBe(200)
-      expect(res.body).toEqual([{ id: bar.id, name: 'Bar', outletId, outletName: 'Indiranagar' }])
-
-      const category = await createCategory(token)
-      const item = await createItem(token, category.id)
-      const routed = await authed(request(httpServer).patch(`/admin/v1/menu/items/${item.id}/station`), token).send({ stationId: bar.id })
-      expect((routed.body as ItemBody).stationId).toBe(bar.id)
-    })
-  })
-
   describe('combos', () => {
     it('creates a combo bundling existing items at a flat price', async () => {
       const { token } = await createOwner(prisma)
