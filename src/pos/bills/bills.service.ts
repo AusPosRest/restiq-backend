@@ -234,7 +234,10 @@ export class BillsService {
       const job = await tx.printJob.create({
         data: { id: uuidv7(), tenantId: staff.tenantId, outletId: bill.outletId, billId, targetDeviceId, payload: payload as unknown as Prisma.InputJsonValue },
       })
-      return toPrintJobView(job)
+      // restiq-backend#210 (CU-18): the outlet-wide queue is drained only by an active printer not linked to another till.
+      const printerAvailable =
+        targetDeviceId !== null || (await tx.device.count({ where: { tenantId: staff.tenantId, outletId: bill.outletId, type: 'printer', status: 'active', pairedPosId: null } })) > 0
+      return { ...toPrintJobView(job), printerAvailable }
     })
   }
 

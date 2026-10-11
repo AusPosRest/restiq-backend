@@ -776,6 +776,13 @@ describe('/pos/v1 bill and settle (e2e)', () => {
       expect(job.printedAt).toBeNull()
       expect(job.payload.title).toBe('Bill')
       expect(job.payload.totalMinor).toBe(21000)
+      // CU-18: no printer at this outlet yet - the till is told, so it can show the bill on screen.
+      expect((printed.body as { printerAvailable: boolean }).printerAvailable).toBe(false)
+      await prisma.device.create({
+        data: { id: uuidv7(), tenantId, outletId, label: 'Receipt printer', type: 'printer', hardwareKeyFingerprint: `fp-${uuidv7()}`, enrolledAt: new Date() },
+      })
+      expect(((await authed(request(httpServer).post(`/pos/v1/bills/${billId}/print`), ownerToken).send()).body as { printerAvailable: boolean }).printerAvailable).toBe(true)
+      await prisma.printJob.deleteMany({ where: { billId, id: { not: job.id } } })
 
       // The snapshot is what was sent - a line added afterwards does not change it.
       const itemId = await createItemWithPrice(prisma, tenantId, 5000)
