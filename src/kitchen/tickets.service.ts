@@ -48,6 +48,19 @@ async function resolveDefaultStationId(tx: Tx, tenantId: string, outletId: strin
   return station?.id ?? null
 }
 
+// PE-21: an item routes to one station, but stations belong to an outlet. At
+// another outlet (or once that station is deleted) the item goes to the
+// station there with the same name, else the outlet's default - never to a
+// screen in a different outlet.
+async function routeStationId(tx: Tx, order: Pick<Order, 'outletId'>, itemStationId: string | null, defaultStationId: string | null): Promise<string | null> {
+  if (!itemStationId) return defaultStationId
+  const station = await tx.station.findUnique({ where: { id: itemStationId } })
+  if (!station) return defaultStationId
+  if (station.outletId === order.outletId && !station.deletedAt) return station.id
+  const sameName = await tx.station.findFirst({ where: { tenantId: station.tenantId, outletId: order.outletId, name: station.name, deletedAt: null } })
+  return sameName?.id ?? defaultStationId
+}
+
 // The public "station id" path segment for the unrouted synthetic grouping -
 // there is no real Station row to address it by, since Ticket.stationId is
 // nullable precisely for this case.
@@ -60,6 +73,11 @@ export const UNROUTED_STATION_PARAM = 'unrouted'
  * yesterday has no business going back on a live station board.
  */
 const BUMPED_WINDOW_MS = 12 * 60 * 60 * 1000
+// CU-20: the same window bounds what is still live. A ticket fired more than
+// 12 hours ago and never bumped is a leftover (yesterday's unclosed order),
+// not food anyone is cooking - it stays in the data but leaves the boards.
+const LIVE_WINDOW_MS = BUMPED_WINDOW_MS
+const liveSince = (): Date => new Date(Date.now() - LIVE_WINDOW_MS)
 const BUMPED_MAX = 200
 
 /** Resolves a `:stationId` path param (a real station id, or the literal "unrouted") to the DB value, validating outlet ownership. */
@@ -153,7 +171,7 @@ export class KitchenTicketsService {
     const defaultStationId = await resolveDefaultStationId(tx, order.tenantId, order.outletId)
     const groups = new Map<string | null, typeof lines>()
     for (const line of lines) {
-      const stationId = line.item.stationId ?? defaultStationId
+      const stationId = await routeStationId(tx, order, line.item.stationId, defaultStationId)
       const group = groups.get(stationId)
       if (group) group.push(line)
       else groups.set(stationId, [line])
@@ -178,7 +196,7 @@ export class KitchenTicketsService {
    */
   async fireAddedLine(tx: Tx, order: Pick<Order, 'id' | 'tenantId' | 'outletId'>, line: Pick<OrderLine, 'id' | 'quantity'> & { item: { stationId: string | null } }): Promise<void> {
     const defaultStationId = await resolveDefaultStationId(tx, order.tenantId, order.outletId)
-    const stationId = line.item.stationId ?? defaultStationId
+    const stationId = await routeStationId(tx, order, line.item.stationId, defaultStationId)
 
     const existing = await tx.ticket.findFirst({ where: { orderId: order.id, stationId }, orderBy: { firedAt: 'desc' } })
     if (existing && existing.status === 'queued') {
@@ -268,7 +286,7 @@ export class KitchenTicketsService {
       await setTenantContext(tx, staff.tenantId)
       await loadOutlet(tx, staff.tenantId, outletId)
       const stationId = await resolveStationParam(tx, staff.tenantId, outletId, stationIdParam)
-      const tickets = await tx.ticket.findMany({ where: { tenantId: staff.tenantId, outletId, stationId, status: 'queued' }, orderBy: { firedAt: 'asc' } })
+      const tickets = await tx.ticket.findMany({ where: { tenantId: staff.tenantId, outletId, stationId, status: 'queued', firedAt: { gte: liveSince() } }, orderBy: { firedAt: 'asc' } })
       return Promise.all(tickets.map((t) => buildTicketView(tx, t)))
     })
   }
@@ -280,11 +298,22 @@ export class KitchenTicketsService {
       await setTenantContext(tx, staff.tenantId)
       await loadOutlet(tx, staff.tenantId, outletId)
 
-      // Expo cares about every order still in flight to the kitchen - "sent"
-      // covers it exactly (an order leaves expo only once closed, matching
-      // the SPEC's "plates leave together" framing rather than vanishing the
-      // moment the last station bumps).
-      const orders = await tx.order.findMany({ where: { tenantId: staff.tenantId, outletId, status: 'sent' }, include: { table: true }, orderBy: { createdAt: 'asc' } })
+      // Expo cares about every order still in flight to the kitchen: a "sent"
+      // order stays until closed (the SPEC's "plates leave together"), and
+      // SE-17: an order already paid and closed (pay-first counter/QSR, or a
+      // QR table that settled early) stays while any ticket is still queued.
+      // CU-20: only orders with a ticket fired inside the live window.
+      const since = liveSince()
+      const orders = await tx.order.findMany({
+        where: {
+          tenantId: staff.tenantId,
+          outletId,
+          tickets: { some: { firedAt: { gte: since } } },
+          OR: [{ status: 'sent' }, { tickets: { some: { status: 'queued' } } }],
+        },
+        include: { table: true },
+        orderBy: { createdAt: 'asc' },
+      })
 
       const result: ExpoOrderView[] = []
       for (const order of orders) {
@@ -344,7 +373,7 @@ export class KitchenTicketsService {
       await setTenantContext(tx, staff.tenantId)
       await loadOutlet(tx, staff.tenantId, outletId)
       const lines = await tx.ticketLine.findMany({
-        where: { tenantId: staff.tenantId, voided: false, ticket: { outletId, status: 'queued' } },
+        where: { tenantId: staff.tenantId, voided: false, ticket: { outletId, status: 'queued', firedAt: { gte: liveSince() } } },
         include: { orderLine: { include: { item: true } } },
       })
       const totals = new Map<string, AllDaySummaryEntryView>()

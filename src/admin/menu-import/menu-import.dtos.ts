@@ -41,6 +41,8 @@ export interface DraftItemView {
   priceMinor: number
   currency: string
   confidence: DraftFieldConfidence
+  /** PE-11: on_menu = already on the menu in that category; repeated = earlier in this import. Commit refuses either. */
+  duplicate: 'on_menu' | 'repeated' | null
 }
 
 export interface MenuImportDraftView {
