@@ -15,7 +15,7 @@
 // "open" - once sent, the kitchen may already be acting on that specific
 // line, so it is frozen except for outright new additions.
 import { BadRequestException, ConflictException, Injectable, NotFoundException } from '@nestjs/common'
-import { resolveComboSelection, resolveCurrentPrice } from '../../admin'
+import { assertItemAvailable, resolveComboSelection, resolveCurrentPrice } from '../../admin'
 import type { Order, OrderLine, PriceChannel, Prisma } from '../../generated/prisma/client'
 import { KitchenTicketsService } from '../../kitchen'
 import { PosPrincipal, RegionRegistryService } from '../../platform'
@@ -23,12 +23,14 @@ import { setTenantContext } from '../tenant-context'
 import { AddComboLineDto, AddOrderLineDto, OrderView, UpdateOrderLineDto } from './orders.dtos'
 import { assertOwner, buildOrderView, loadOrder, Tx } from './orders.service'
 
-// Fixed for this story: pos/CAP-3 only builds dine-in table orders (Order
-// always has a tableId - opened via pos/CAP-2's table map). QSR/counter mode
-// (pos/CAP-6, a later story) composes over these same endpoints and picks
-// its own channel when it exists; there is no channel column on Order today
-// to read instead.
-const ORDER_PRICE_CHANNEL: PriceChannel = 'dine_in'
+// A table order is dine-in; a counter (token) order has no table and is
+// priced on the takeaway channel first (restiq-backend#208, SE-8) - Order
+// has no channel column, so the table is what tells them apart. Each channel
+// falls back to the item's channel-less price; a counter order whose item is
+// priced for dine-in only still rings up at that dine-in price.
+function orderPriceChannels(order: Order): PriceChannel[] {
+  return order.tableId === null ? ['takeaway', 'dine_in'] : ['dine_in']
+}
 
 type ItemForOrderLine = Prisma.MenuItemGetPayload<{
   include: {
@@ -145,17 +147,15 @@ export class OrderLinesService {
       assertOrderNotClosed(order)
 
       const item = await loadItemForOrderLine(tx, staff.tenantId, dto.itemId)
+      await assertItemAvailable(tx, order.outletId, item)
       assertVariantBelongsToItem(item, dto.variantId)
       const modifierIds = dto.modifierIds ?? []
       assertModifierSelectionValid(item, modifierIds)
 
-      const price = await resolveCurrentPrice(tx, {
-        tenantId: staff.tenantId,
-        itemId: dto.itemId,
-        variantId: dto.variantId ?? null,
-        channel: ORDER_PRICE_CHANNEL,
-        outletId: order.outletId,
-      })
+      let price: Awaited<ReturnType<typeof resolveCurrentPrice>> = null
+      for (const channel of orderPriceChannels(order)) {
+        price ??= await resolveCurrentPrice(tx, { tenantId: staff.tenantId, itemId: dto.itemId, variantId: dto.variantId ?? null, channel, outletId: order.outletId })
+      }
       if (!price) {
         throw new BadRequestException({ code: 'no_price', message: 'No current price is configured for this item' })
       }
