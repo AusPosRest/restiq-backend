@@ -189,6 +189,20 @@ describe('/guest/v1 table sessions (e2e)', () => {
     expect((res.body as ErrorBody).error.code).toBe('qr_ordering_disabled')
   })
 
+  it('rejects a blank name and a phone that is not a phone number (SE-19)', async () => {
+    const tenantId = await createTenant(prisma)
+    const outletId = await createOutlet(prisma, tenantId)
+    const tableId = await createTable(prisma, tenantId, outletId)
+    await enableQrOrdering(prisma, tenantId, outletId)
+
+    for (const body of [{ name: '   ', phone: '9876543210' }, { name: 'Asha', phone: 'not-a-phone' }, { name: 'x'.repeat(81), phone: '9876543210' }]) {
+      const res = await request(httpServer).post('/guest/v1/sessions').send({ outletId, tableId, ...body })
+      expect(res.status).toBe(400)
+    }
+    const ok = await request(httpServer).post('/guest/v1/sessions').send({ outletId, tableId, name: 'Asha', phone: '9876543210' })
+    expect(ok.status).toBe(201)
+  })
+
   it('starts a session, binds it to exactly one table, and a second start on the same table 409s', async () => {
     const tenantId = await createTenant(prisma)
     const outletId = await createOutlet(prisma, tenantId)

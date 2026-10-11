@@ -399,6 +399,20 @@ describe('/admin/v1/menu (e2e)', () => {
       expect((fetched.body as ItemBody).vegMarker).toBe('veg')
     })
 
+    it('rejects a blank or over-long item/category name (SE-19)', async () => {
+      const { token } = await createOwner(prisma)
+      const category = await createCategory(token)
+      const blank = await authed(request(httpServer).post('/admin/v1/menu/items'), token).send({ categoryId: category.id, name: '   ', shortName: ' ' })
+      expect(blank.status).toBe(400)
+      const long = await authed(request(httpServer).post('/admin/v1/menu/items'), token).send({ categoryId: category.id, name: 'x'.repeat(121), shortName: 'X' })
+      expect(long.status).toBe(400)
+      const blankCategory = await authed(request(httpServer).post('/admin/v1/menu/categories'), token).send({ name: '  ' })
+      expect(blankCategory.status).toBe(400)
+      const longCategory = await authed(request(httpServer).post('/admin/v1/menu/categories'), token).send({ name: 'x'.repeat(81) })
+      expect(longCategory.status).toBe(400)
+      expect((longCategory.body as ErrorBody).error.code).toBe('validation_failed')
+    })
+
     it('rejects an invalid vegMarker on create', async () => {
       const { token } = await createOwner(prisma)
       const category = await createCategory(token)
@@ -564,6 +578,18 @@ describe('/admin/v1/menu (e2e)', () => {
       const { token } = await createOwner(prisma)
       const res = await authed(request(httpServer).post('/admin/v1/menu/modifier-groups'), token).send({ name: 'Negative', minSelections: -1, maxSelections: 1 })
       expect(res.status).toBe(400)
+    })
+
+    it('rejects a negative modifier price (SE-7)', async () => {
+      const { token } = await createOwner(prisma)
+      const res = await authed(request(httpServer).post('/admin/v1/menu/modifier-groups'), token).send({
+        name: 'Add-ons',
+        minSelections: 0,
+        maxSelections: 3,
+        modifiers: [{ name: 'Sneaky discount', priceMinor: -50000 }],
+      })
+      expect(res.status).toBe(400)
+      expect(await prisma.modifier.count()).toBe(0)
     })
 
     it('adds a modifier to an existing group', async () => {

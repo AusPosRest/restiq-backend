@@ -86,8 +86,9 @@ export interface BillView {
   billNumber: number | null
   subtotalMinor: number
   taxMinor: number
-  // Snapshotted once at bill-creation time (bill-core.ts's
-  // createOrGetBillRecord) - never recomputed, including across finalize.
+  // Snapshotted from the order's lines while the bill is open, and
+  // recomputed once at finalize on the discounted value when a discount is
+  // given (SE-2) - immutable after that.
   taxBreakdown: TaxBreakdownLineView[]
   // True only for a tax-inclusive country (AU GST) - see tax.ts.
   pricesIncludeTax: boolean

@@ -39,7 +39,7 @@ import { setTenantContext } from '../tenant-context'
 import { linkedPeripheral, queueFor } from '../device-routing'
 import { localDateKey } from '../clock/clock.util'
 import { assertOwner, loadOrder } from '../orders/orders.service'
-import { buildInvoiceView, commitFinalize, createOrGetBillRecord, createTenderRecord, currencyForCountry, loadBill, loadTenantTaxProfile, refreshOpenBillTotals, toBillView } from './bill-core'
+import { buildInvoiceView, commitFinalize, createOrGetBillRecord, createTenderRecord, currencyForCountry, loadBill, loadTenantTaxProfile, lockBill, refreshOpenBillTotals, toBillView } from './bill-core'
 import { BillView, CreditNoteLineView, CreditNoteView, FinalizeBillDto, InvoiceView, PaymentHistoryEntry, PaymentHistoryView, PaymentMethodTotal, PrintJobView, RefundBillDto } from './bills.dtos'
 import type { Prisma } from '../../generated/prisma/client'
 
@@ -274,6 +274,9 @@ export class BillsService {
     const plane = this.plane()
     return plane.$transaction(async (tx) => {
       await setTenantContext(tx, staff.tenantId)
+      // SE-6: a double-tapped Finalize waits here and then gets 409
+      // already_finalized, instead of deadlocking on the tender/counter writes.
+      await lockBill(tx, billId)
       const bill = await refreshOpenBillTotals(tx, await loadBill(tx, staff.tenantId, billId))
       if (bill.status === 'finalized') {
         throw new ConflictException({ code: 'already_finalized', message: 'This bill has already been finalised' })
@@ -344,6 +347,10 @@ export class BillsService {
     const plane = this.plane()
     return plane.$transaction(async (tx) => {
       await setTenantContext(tx, staff.tenantId)
+      // SE-4: concurrent refunds of one bill are serialised on its row lock,
+      // so each one sees every earlier credit note before checking what is
+      // still refundable.
+      await lockBill(tx, billId)
       const bill = await refreshOpenBillTotals(tx, await loadBill(tx, staff.tenantId, billId))
       if (bill.status !== 'finalized') {
         throw new ConflictException({ code: 'bill_not_finalized', message: 'Only a finalized bill can be refunded' })
@@ -358,7 +365,11 @@ export class BillsService {
       // the same units.
       const priorLines = await tx.creditNoteLine.findMany({ where: { creditNote: { originalBillId: billId } } })
       const refundedSoFar = new Map<string, number>()
-      for (const l of priorLines) refundedSoFar.set(l.orderLineId, (refundedSoFar.get(l.orderLineId) ?? 0) + l.quantity)
+      let priorGrossMinor = 0n
+      for (const l of priorLines) {
+        refundedSoFar.set(l.orderLineId, (refundedSoFar.get(l.orderLineId) ?? 0) + l.quantity)
+        priorGrossMinor += l.amountMinor
+      }
 
       const targets =
         dto.lines ??
@@ -386,7 +397,7 @@ export class BillsService {
         }
       }
 
-      let subtotalMinor = 0n
+      let grossMinor = 0n
       const lineData: { orderLineId: string; quantity: number; unitPriceMinor: bigint; amountMinor: bigint }[] = []
       for (const target of targets) {
         const line = orderLineById.get(target.orderLineId)
@@ -406,21 +417,29 @@ export class BillsService {
         const modifiersTotal = line.modifiers.reduce((sum, m) => sum + m.priceMinor, 0n)
         const unitPriceMinor = line.unitPriceMinor + modifiersTotal
         const amountMinor = unitPriceMinor * BigInt(target.quantity)
-        subtotalMinor += amountMinor
+        grossMinor += amountMinor
+        // SE-3: count this target against the line before the next one is
+        // checked, so naming the same line twice can't refund it twice.
+        refundedSoFar.set(target.orderLineId, (refundedSoFar.get(target.orderLineId) ?? 0) + target.quantity)
         lineData.push({ orderLineId: target.orderLineId, quantity: target.quantity, unitPriceMinor, amountMinor })
       }
 
-      // Correct tax reversal (CAP-9, updated for issue #103's real tax
-      // engine): proportional to the bill's own actual tax rate - taken from
-      // the bill's own subtotalMinor/taxMinor ratio rather than
-      // re-deriving a rate from the tenant's (possibly-since-changed) tax
-      // registration, the same allocation guest/bills' BillShare split
-      // already uses for the identical reason (bills.service.ts here has no
-      // sibling to that file's own comment, so it's restated: this is the
-      // correct inverse of whatever rate actually produced bill.taxMinor,
-      // composition scheme's 0% and AU's inclusive GST included, without
-      // this module needing to know which one applied).
-      const taxMinor = bill.subtotalMinor === 0n ? 0n : (subtotalMinor * bill.taxMinor) / bill.subtotalMinor
+      // SE-1: refund what was actually paid. The lines above are priced
+      // gross (before the bill discount); the credit note's subtotal is that
+      // gross pro-rated by the bill's discount, and its tax pro-rated by the
+      // bill's own stored tax (already on the discounted value - SE-2), so
+      // composition's 0% and AU's inclusive GST need no special case here.
+      // Both are allocated cumulatively - everything refunded so far,
+      // including this note, minus what earlier notes already took, each
+      // rounded down - so partial refunds never add up to more than was
+      // paid, and refunding the whole bill returns exactly what was paid.
+      const billNetMinor = bill.subtotalMinor - (bill.discountMinor ?? 0n)
+      const prorate = (cumGross: bigint, of: bigint) => (bill.subtotalMinor === 0n ? 0n : (cumGross * of) / bill.subtotalMinor)
+      const prior = await tx.creditNote.aggregate({ where: { originalBillId: billId }, _sum: { subtotalMinor: true, taxMinor: true } })
+      const cumGrossMinor = priorGrossMinor + grossMinor
+      const maxZero = (n: bigint) => (n > 0n ? n : 0n)
+      const subtotalMinor = maxZero(prorate(cumGrossMinor, billNetMinor) - (prior._sum.subtotalMinor ?? 0n))
+      const taxMinor = maxZero(prorate(cumGrossMinor, bill.taxMinor) - (prior._sum.taxMinor ?? 0n))
 
       // Refund is unconditionally gated (unlike finalize()'s above-threshold
       // discount) - validate the refund request itself first (cheap), then
