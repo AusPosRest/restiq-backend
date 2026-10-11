@@ -1,7 +1,7 @@
 import { BadRequestException, ConflictException, Injectable, Logger, NotFoundException } from '@nestjs/common'
 import { createHash, randomBytes } from 'node:crypto'
 import type { Prisma } from '../../generated/prisma/client'
-import { MailMessage, MailService, OpsPrincipal, PrismaService, RegionRegistryService, slugify, slugProblem, uuidv7, webLink } from '../../platform'
+import { assertTimezonesFitCountry, MailMessage, MailService, OpsPrincipal, PrismaService, RegionRegistryService, slugify, slugProblem, uuidv7, webLink } from '../../platform'
 import { applyStarterSetup } from '../../admin/outlets/starter-setup'
 import { SubmitTenantDto } from './submit.dto'
 
@@ -39,32 +39,60 @@ const SYSTEM_ROLES: ReadonlyArray<{ name: string; isManager: boolean }> = [
   { name: 'Kitchen', isManager: false },
   { name: 'Accountant', isManager: false },
 ]
-const SAMPLE_MENU: ReadonlyArray<{
+type SampleMenu = ReadonlyArray<{
   category: string
   items: ReadonlyArray<{ name: string; shortName: string; priceMinor: bigint }>
-}> = [
-  {
-    category: 'Starters',
-    items: [
-      { name: 'Garden Salad', shortName: 'Garden Salad', priceMinor: 19900n },
-      { name: 'Soup of the Day', shortName: 'Soup', priceMinor: 14900n },
-    ],
-  },
-  {
-    category: 'Mains',
-    items: [
-      { name: 'House Curry', shortName: 'House Curry', priceMinor: 32900n },
-      { name: 'Grilled Sandwich', shortName: 'Grilled Sndwch', priceMinor: 24900n },
-    ],
-  },
-  {
-    category: 'Beverages',
-    items: [
-      { name: 'Fresh Lime Soda', shortName: 'Lime Soda', priceMinor: 9900n },
-      { name: 'Filter Coffee', shortName: 'Filter Coffee', priceMinor: 7900n },
-    ],
-  },
-]
+}>
+// PE-10: one sample menu per market, priced in that market's own currency -
+// the same minor amounts in INR and AUD would offer a A$199 salad.
+const SAMPLE_MENU: Record<'IN' | 'AU', SampleMenu> = {
+  IN: [
+    {
+      category: 'Starters',
+      items: [
+        { name: 'Garden Salad', shortName: 'Garden Salad', priceMinor: 19900n },
+        { name: 'Soup of the Day', shortName: 'Soup', priceMinor: 14900n },
+      ],
+    },
+    {
+      category: 'Mains',
+      items: [
+        { name: 'House Curry', shortName: 'House Curry', priceMinor: 32900n },
+        { name: 'Grilled Sandwich', shortName: 'Grilled Sndwch', priceMinor: 24900n },
+      ],
+    },
+    {
+      category: 'Beverages',
+      items: [
+        { name: 'Fresh Lime Soda', shortName: 'Lime Soda', priceMinor: 9900n },
+        { name: 'Filter Coffee', shortName: 'Filter Coffee', priceMinor: 7900n },
+      ],
+    },
+  ],
+  AU: [
+    {
+      category: 'Starters',
+      items: [
+        { name: 'Garden Salad', shortName: 'Garden Salad', priceMinor: 1600n },
+        { name: 'Soup of the Day', shortName: 'Soup', priceMinor: 1200n },
+      ],
+    },
+    {
+      category: 'Mains',
+      items: [
+        { name: 'Chicken Parmigiana', shortName: 'Chicken Parma', priceMinor: 2800n },
+        { name: 'Fish and Chips', shortName: 'Fish & Chips', priceMinor: 2600n },
+      ],
+    },
+    {
+      category: 'Beverages',
+      items: [
+        { name: 'Lemon Lime Bitters', shortName: 'LLB', priceMinor: 600n },
+        { name: 'Flat White', shortName: 'Flat White', priceMinor: 500n },
+      ],
+    },
+  ],
+}
 
 const GSTIN_PATTERN = /^[0-9]{2}[A-Z]{5}[0-9]{4}[A-Z][1-9A-Z]Z[0-9A-Z]$/
 const ABN_PATTERN = /^\d{11}$/
@@ -134,6 +162,10 @@ export class OpsTenantsService {
   async provision(operator: OpsPrincipal, dto: SubmitTenantDto): Promise<ProvisionResult> {
     this.validateTaxNumber(dto)
     this.validateGstRate(dto)
+    assertTimezonesFitCountry(
+      dto.brandsOutlets.outlets.map((outlet) => outlet.timezone),
+      dto.tax.country,
+    )
     const slug = await this.chooseSlug(dto)
 
     const region = this.registry.homeRegion()
@@ -204,7 +236,7 @@ export class OpsTenantsService {
           data: SYSTEM_ROLES.map(({ name, isManager }) => ({ tenantId, name, isSystem: true, isManager })),
         })
 
-        for (const [index, { category, items }] of SAMPLE_MENU.entries()) {
+        for (const [index, { category, items }] of SAMPLE_MENU[dto.tax.country].entries()) {
           const createdCategory = await tx.menuCategory.create({ data: { tenantId, name: category, sortOrder: index + 1 } })
           for (const item of items) {
             const createdItem = await tx.menuItem.create({

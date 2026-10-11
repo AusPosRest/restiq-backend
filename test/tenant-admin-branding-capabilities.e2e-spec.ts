@@ -169,7 +169,7 @@ describe('/admin/v1/outlets, /admin/v1/branding (e2e)', () => {
       expect(res.status).toBe(200)
       const body = res.body as OutletBody[]
       expect(body).toHaveLength(1)
-      expect(body[0]).toEqual({ id: outletId, name: 'Indiranagar', address: 'A1', type: 'dine_in', timezone: 'Asia/Kolkata' })
+      expect(body[0]).toEqual({ id: outletId, name: 'Indiranagar', address: 'A1', type: 'dine_in', timezone: 'Asia/Kolkata', currency: 'INR' })
     })
 
     it('never returns another tenant’s outlets (cross-tenant isolation, NFR-8)', async () => {
@@ -201,11 +201,11 @@ describe('/admin/v1/outlets, /admin/v1/branding (e2e)', () => {
         timezone: 'Asia/Kolkata',
       })
       expect(patchRes.status).toBe(200)
-      expect(patchRes.body).toEqual({ id: outletId, name: 'Indiranagar Main', address: 'A2', type: 'dine_in', timezone: 'Asia/Kolkata' })
+      expect(patchRes.body).toEqual({ id: outletId, name: 'Indiranagar Main', address: 'A2', type: 'dine_in', timezone: 'Asia/Kolkata', currency: 'INR' })
 
       const getRes = await authed(request(httpServer).get('/admin/v1/outlets'), token)
       const body = getRes.body as OutletBody[]
-      expect(body).toEqual([{ id: outletId, name: 'Indiranagar Main', address: 'A2', type: 'dine_in', timezone: 'Asia/Kolkata' }])
+      expect(body).toEqual([{ id: outletId, name: 'Indiranagar Main', address: 'A2', type: 'dine_in', timezone: 'Asia/Kolkata', currency: 'INR' }])
     })
 
     it('rejects an invalid IANA timezone (400)', async () => {
@@ -213,6 +213,15 @@ describe('/admin/v1/outlets, /admin/v1/branding (e2e)', () => {
       const outletId = await createOutlet(prisma, tenantId)
 
       const res = await authed(request(httpServer).patch(`/admin/v1/outlets/${outletId}`), token).send({ timezone: 'Not/AZone' })
+      expect(res.status).toBe(400)
+      expect((res.body as ErrorBody).error.code).toBe('validation_failed')
+    })
+
+    it('PE-9: rejects a timezone outside the tenant\'s country (400)', async () => {
+      const { tenantId, token } = await createOwner(prisma)
+      const outletId = await createOutlet(prisma, tenantId)
+
+      const res = await authed(request(httpServer).patch(`/admin/v1/outlets/${outletId}`), token).send({ timezone: 'Australia/Sydney' })
       expect(res.status).toBe(400)
       expect((res.body as ErrorBody).error.code).toBe('validation_failed')
     })

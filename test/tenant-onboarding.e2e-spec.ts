@@ -41,8 +41,8 @@ function submitPayload(overrides?: {
     brandsOutlets: {
       brandName: 'Spice Route',
       outlets: [
-        { name: 'Indiranagar', address: '100 Feet Road, Indiranagar', type: 'dine_in', timezone: 'Asia/Kolkata' },
-        { name: 'Koramangala', address: '5th Block, Koramangala', type: 'qsr', timezone: 'Asia/Kolkata' },
+        { name: 'Indiranagar', address: '100 Feet Road, Indiranagar', type: 'dine_in', timezone: country === 'IN' ? 'Asia/Kolkata' : 'Australia/Sydney' },
+        { name: 'Koramangala', address: '5th Block, Koramangala', type: 'qsr', timezone: country === 'IN' ? 'Asia/Kolkata' : 'Australia/Perth' },
       ],
     },
     subscription: { plan: 'enterprise', billingPeriod: 'monthly' },
@@ -342,6 +342,31 @@ describe('/ops/v1/tenants onboarding (e2e)', () => {
       const registration = await prisma.tenantTaxRegistration.findFirst({ where: { tenantId } })
       expect(registration?.gstRegistered).toBe(true)
       expect(Number(registration?.gstRatePercent)).toBe(12)
+    })
+
+    it('PE-9: rejects an outlet timezone that is not in the tenant\'s country, or not a real timezone', async () => {
+      for (const timezone of ['Asia/Kolkata', 'Mars/Olympus']) {
+        const payload = submitPayload({ country: 'AU', registrationNumber: '12345678901', companyName: `Wrong Zone ${timezone}` })
+        payload.brandsOutlets.outlets[0].timezone = timezone
+        const res = await authed(request(httpServer).post('/ops/v1/tenants')).send(payload)
+        expect(res.status).toBe(400)
+        expect((res.body as { error: { code: string; message: string } }).error).toMatchObject({ code: 'validation_failed' })
+      }
+    })
+
+    it('PE-9/PE-10: an Australian tenant keeps the chosen Australian timezones and gets an AUD sample menu at Australian prices', async () => {
+      const res = await authed(request(httpServer).post('/ops/v1/tenants')).send(
+        submitPayload({ country: 'AU', registrationNumber: '12345678902', companyName: 'Surry Hills Bistro' }),
+      )
+      expect(res.status).toBe(201)
+      const tenantId = (res.body as { tenant: { id: string } }).tenant.id
+      const outlets = await prisma.outlet.findMany({ where: { tenantId }, orderBy: { name: 'asc' } })
+      expect(outlets.map((o) => o.timezone)).toEqual(['Australia/Sydney', 'Australia/Perth'])
+      const prices = await prisma.itemPrice.findMany({ where: { tenantId }, include: { item: true } })
+      expect(prices.length).toBeGreaterThan(0)
+      expect(new Set(prices.map((p) => p.currency))).toEqual(new Set(['AUD']))
+      expect(prices.every((p) => p.priceMinor <= 4000n)).toBe(true)
+      expect(prices.map((p) => p.item.name)).not.toContain('Filter Coffee')
     })
 
     it('rejects gstRatePercent when gstRegistered is false', async () => {

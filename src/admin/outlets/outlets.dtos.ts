@@ -8,6 +8,8 @@ export interface OutletView {
   address: string
   type: OutletType
   timezone: string
+  // PE-10: the tenant's currency (INR/AUD), so owner screens never assume rupees.
+  currency: string
 }
 
 export interface CapabilityView {
