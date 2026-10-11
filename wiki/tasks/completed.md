@@ -1,5 +1,10 @@
 # Completed
 
+- **2026-10-11** - GST invoice, Australia, reporting and guest QR - QA fixes (issue #212):
+  - Bill/invoice views carry what a GST tax invoice needs: "Tax Invoice" title, SAC 996331, place of supply, variant name on each line and the token number (PE-18, CU-10). Tax maths unchanged.
+  - Owner dashboard: each outlet's `today` (bills, gross, refunded, net, average bill, open orders, by tender method) in the outlet's own calendar day; "Sales today" is net of refunds and matches Reports > Payments (PE-23, PE-33, CU-5, CU-7). Payments report carries net, currency and local CSV times.
+  - Australian tenants keep the chosen timezone, get an AUD sample menu, and outlets carry the tenant currency (PE-9, PE-10, PE-28).
+  - Public `GET /guest/v1/outlets/{outletId}/tables/{tableId}/welcome` names the restaurant, outlet and table for the QR welcome screen (CU-22, PE-24).
 - **2026-10-08** - Platform admin login and mail audit fixes (issue #203): the dev inbox moved to `GET /ops/v1/dev-inbox` and needs an operator session (it was public and showed live reset links); operator logout bumps `operator_users.session_version`, so the logged-out token (and every other session of that operator) answers 401 `session_revoked`; the login email is trimmed before validation.
 - **2026-10-08** - Configurable plan prices (issue #201): `plan_prices` (country x plan, monthly price in minor units or null for "on quote", annual discount percent), seeded A$49/129 and ₹499/999 at 20% off annual. `GET /ops/v1/plan-prices`; `PUT /ops/v1/plan-prices/:country/:plan` with a reason, audited as `plan_price.updated`.
 - **2026-10-08** - Mail simulator and owner invite emails (issue #198):
