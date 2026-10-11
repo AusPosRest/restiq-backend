@@ -62,6 +62,7 @@ interface CreditNoteBody {
   subtotalMinor: number
   taxMinor: number
   totalMinor: number
+  method: string | null
   createdAt: string
   lines: CreditNoteLineBody[]
 }
@@ -231,7 +232,7 @@ describe('/pos/v1 refunds and adjustments (e2e)', () => {
     tenantId: string,
     outletId: string,
     priceMinor: number,
-    opts: { quantity?: number; discountMinor?: number } = {},
+    opts: { quantity?: number; discountMinor?: number; secondItemPriceMinor?: number; tenders?: (totalMinor: number) => { method: string; amountMinor: number }[] } = {},
   ): Promise<{ billId: string; orderId: string; orderLineId: string; cashierToken: string; managerPin: string; bill: BillBody }> {
     const tableId = await createTable(prisma, tenantId, outletId)
     const owner = await createStaff(prisma, tenantId, outletId, 'Asha', { isManager: true }) // #209: refunding needs the Refunds permission
@@ -242,6 +243,10 @@ describe('/pos/v1 refunds and adjustments (e2e)', () => {
     const opened = await authed(request(httpServer).post(`/pos/v1/outlets/${outletId}/tables/${tableId}/order`), owner.token).send()
     const orderId = (opened.body as { id: string }).id
     await authed(request(httpServer).post(`/pos/v1/orders/${orderId}/lines`), owner.token).send({ itemId, quantity: opts.quantity ?? 2 })
+    if (opts.secondItemPriceMinor) {
+      const secondItemId = await createItemWithPrice(prisma, tenantId, opts.secondItemPriceMinor)
+      await authed(request(httpServer).post(`/pos/v1/orders/${orderId}/lines`), owner.token).send({ itemId: secondItemId, quantity: 1 })
+    }
     await authed(request(httpServer).patch(`/pos/v1/orders/${orderId}/status`), owner.token).send({ status: 'sent' })
 
     const orderRes = await authed(request(httpServer).get(`/pos/v1/orders/${orderId}`), owner.token)
@@ -256,7 +261,7 @@ describe('/pos/v1 refunds and adjustments (e2e)', () => {
 
     const finalized = await authed(request(httpServer).post(`/pos/v1/bills/${billId}/finalize`), owner.token).send({
       ...(opts.discountMinor && { discountMinor: opts.discountMinor, discountReason: 'Regular customer' }),
-      tenders: [{ method: 'cash', amountMinor: totalMinor }],
+      tenders: opts.tenders ? opts.tenders(totalMinor) : [{ method: 'cash', amountMinor: totalMinor }],
     })
     expect(finalized.status).toBe(200)
 
@@ -374,6 +379,58 @@ describe('/pos/v1 refunds and adjustments (e2e)', () => {
       }
       expect(totals).toEqual([3149, 3150, 3150])
       expect(totals.reduce((a, b) => a + b, 0)).toBe(9449)
+    })
+
+    it('credit-note lines on a discounted bill are net of the discount and add up to the subtotal (restiq-backend#221)', async () => {
+      const tenantId = await createTenant(prisma)
+      const outletId = await createOutlet(prisma, tenantId)
+      // 1 x 10000 + 1 x 3333 = 13333, discount 1000 -> net 12333.
+      const { billId, cashierToken, managerPin } = await setUpFinalizedBill(tenantId, outletId, 10000, { quantity: 1, discountMinor: 1000, secondItemPriceMinor: 3333 })
+
+      const res = await authed(request(httpServer).post(`/pos/v1/bills/${billId}/refund`), cashierToken).send({ managerPin, reason: 'Full refund' })
+      expect(res.status).toBe(201)
+      const note = res.body as CreditNoteBody
+      expect(note.subtotalMinor).toBe(12333)
+      expect(note.lines.reduce((sum, l) => sum + l.amountMinor, 0)).toBe(12333)
+      // Each line carries its own share: 10000 -> 9249 (rounded down), 3333 -> the 3084 remainder.
+      expect(note.lines.map((l) => [l.unitPriceMinor, l.amountMinor]).sort((a, b) => b[0] - a[0])).toEqual([
+        [10000, 9249],
+        [3333, 3084],
+      ])
+    })
+
+    it('records how the money went back, defaulting to the bill\'s largest tender (restiq-backend#221)', async () => {
+      const tenantId = await createTenant(prisma)
+      const outletId = await createOutlet(prisma, tenantId)
+      const { billId, orderLineId, cashierToken, managerPin } = await setUpFinalizedBill(tenantId, outletId, 10000, {
+        tenders: (total) => [
+          { method: 'cash', amountMinor: 5000 },
+          { method: 'upi_manual', amountMinor: total - 5000 },
+        ],
+      })
+
+      const defaulted = await authed(request(httpServer).post(`/pos/v1/bills/${billId}/refund`), cashierToken).send({ managerPin, reason: 'Wrong dish', lines: [{ orderLineId, quantity: 1 }] })
+      expect(defaulted.status).toBe(201)
+      expect((defaulted.body as CreditNoteBody).method).toBe('upi_manual')
+
+      const chosen = await authed(request(httpServer).post(`/pos/v1/bills/${billId}/refund`), cashierToken).send({ managerPin, reason: 'Wrong dish', lines: [{ orderLineId, quantity: 1 }], method: 'cash' })
+      expect(chosen.status).toBe(201)
+      expect((chosen.body as CreditNoteBody).method).toBe('cash')
+      expect((await prisma.creditNote.findMany({ where: { originalBillId: billId }, orderBy: { createdAt: 'asc' } })).map((n) => n.method)).toEqual(['upi_manual', 'cash'])
+
+      const invoice = await authed(request(httpServer).get(`/pos/v1/bills/${billId}/invoice`), cashierToken)
+      expect((invoice.body as { creditNotes: { method: string | null }[] }).creditNotes.map((n) => n.method)).toEqual(['upi_manual', 'cash'])
+    })
+
+    it('rejects a refund method that is not a tender method (restiq-backend#221)', async () => {
+      const tenantId = await createTenant(prisma)
+      const outletId = await createOutlet(prisma, tenantId)
+      const { billId, cashierToken, managerPin } = await setUpFinalizedBill(tenantId, outletId, 10000)
+
+      const res = await authed(request(httpServer).post(`/pos/v1/bills/${billId}/refund`), cashierToken).send({ managerPin, reason: 'Refund', method: 'cheque' })
+      expect(res.status).toBe(400)
+      expect((res.body as ErrorBody).error.code).toBe('validation_failed')
+      expect(await prisma.creditNote.count({ where: { originalBillId: billId } })).toBe(0)
     })
 
     it('rejects the same order line named more than once past its quantity (SE-3)', async () => {

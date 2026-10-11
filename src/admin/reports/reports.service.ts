@@ -173,7 +173,7 @@ function toCreditNoteRow(note: BillWithPaymentsInclude['creditNotes'][number], p
   // from the originating Bill, not CreditNote itself - same formula as
   // bill-core.ts's buildInvoiceView and bills.service.ts's toCreditNoteView.
   const amountMinor = pricesIncludeTax ? note.subtotalMinor : note.subtotalMinor + note.taxMinor
-  return { id: note.id, amountMinor: Number(amountMinor), reason: note.reason, createdAt: note.createdAt.toISOString() }
+  return { id: note.id, amountMinor: Number(amountMinor), method: note.method, reason: note.reason, createdAt: note.createdAt.toISOString() }
 }
 
 function toPaymentRow(bill: BillWithPaymentsInclude): PaymentRow {

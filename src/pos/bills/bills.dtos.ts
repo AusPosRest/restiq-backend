@@ -11,6 +11,10 @@ import type { BillStatus, TenderMethod } from '../../generated/prisma/client'
 // (issue #146) is money taken outside RESTIQ - asserted by the cashier too.
 export const TENDER_METHODS = ['cash', 'upi_manual', 'external'] as const
 
+// restiq-backend#221: a refund can go back by any tender method, including
+// the electronic ones the bill may have been paid with.
+export const REFUND_METHODS = ['cash', 'upi_manual', 'upi_intent', 'upi_qr', 'card_online', 'card_terminal', 'external'] as const satisfies readonly TenderMethod[]
+
 export class TenderDto {
   @IsIn(TENDER_METHODS)
   method!: TenderMethod
@@ -138,6 +142,12 @@ export class RefundBillDto {
   // path from a partial one.
   @IsOptional() @IsArray() @ArrayMinSize(1) @ValidateNested({ each: true }) @Type(() => RefundLineDto)
   lines?: RefundLineDto[]
+
+  // restiq-backend#221: how the money went back to the guest. Omitted: the
+  // bill's main tender (its largest; earliest on a tie) - what a refund to
+  // "the original payment" means.
+  @IsOptional() @IsIn(REFUND_METHODS)
+  method?: TenderMethod
 }
 
 export interface CreditNoteLineView {
@@ -159,6 +169,8 @@ export interface CreditNoteView {
   taxMinor: number
   // Same never-persisted-derived-total convention as BillView.totalMinor.
   totalMinor: number
+  // How the money went back; null on a note issued before this was recorded.
+  method: TenderMethod | null
   createdAt: string
   lines: CreditNoteLineView[]
 }
@@ -196,6 +208,7 @@ export interface InvoiceSellerView {
 export interface InvoiceCreditNoteView {
   id: string
   amountMinor: number
+  method: TenderMethod | null
   reason: string
   createdAt: string
 }
