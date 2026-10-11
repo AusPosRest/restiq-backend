@@ -74,6 +74,9 @@ interface InvoiceBody {
   }
   footerMessage: string | null
   lines: { name: string; quantity: number; unitPriceMinor: number; lineTotalMinor: number }[]
+  sacCode: string | null
+  placeOfSupply: string | null
+  tokenNumber: number | null
   subtotalMinor: number
   discountMinor: number | null
   discountReason: string | null
@@ -204,13 +207,14 @@ async function createTaxRegistration(
     legalEntityName?: string
     fssaiLicense?: string
     gstRegistered?: boolean
+    registrationNumber?: string
   },
 ): Promise<void> {
   await prisma.tenantTaxRegistration.create({
     data: {
       tenantId,
       registrationType: opts.registrationType,
-      registrationNumber: `REG-${uuidv7()}`,
+      registrationNumber: opts.registrationNumber ?? `REG-${uuidv7()}`,
       legalEntityName: opts.legalEntityName ?? 'Spice Route Hospitality Pvt Ltd',
       taxProfile: opts.taxProfile,
       compositionScheme: opts.compositionScheme ?? false,
@@ -972,7 +976,7 @@ describe('/pos/v1 bill and settle (e2e)', () => {
       const invoice = res.body as InvoiceBody
       expect(invoice.footerMessage).toBeNull()
       expect(invoice.invoiceNumber).toBe(String((finalized.body as BillBody).billNumber))
-      expect(invoice.title).toBe('Invoice')
+      expect(invoice.title).toBe('Tax Invoice')
       expect(invoice.currency).toBe('INR')
       expect(invoice.seller).toMatchObject({
         legalEntityName: 'Spice Route Hospitality Pvt Ltd',
@@ -1015,6 +1019,8 @@ describe('/pos/v1 bill and settle (e2e)', () => {
       expect(invoice.title).toBe('Tax Invoice')
       expect(invoice.currency).toBe('AUD')
       expect(invoice.seller.registrationLabel).toBe('ABN')
+      expect(invoice.sacCode).toBeNull()
+      expect(invoice.placeOfSupply).toBeNull()
       expect(invoice.pricesIncludeTax).toBe(true)
       expect(invoice.totalMinor).toBe(11000)
     })
@@ -1045,6 +1051,41 @@ describe('/pos/v1 bill and settle (e2e)', () => {
       expect(invoice.taxBreakdown).toEqual([])
       expect(invoice.notes).toEqual(['Not registered for GST - this is a receipt, not a tax invoice'])
       expect(invoice.totalMinor).toBe(11000)
+    })
+
+    it('IN (PE-18/CU-10): a GST "Tax Invoice" with SAC 996331, place of supply from the GSTIN, the variant on the line and the token number', async () => {
+      const tenantId = await createTenant(prisma)
+      await createTaxRegistration(prisma, tenantId, { taxProfile: 'India GST - CGST/SGST split', registrationType: 'gstin', registrationNumber: '29ABCDE1234F1Z5' })
+      const outletId = await createOutlet(prisma, tenantId)
+      const { orderId, ownerToken } = await setUpSentOrder(tenantId, outletId, 10000)
+      const plain = await prisma.orderLine.findFirstOrThrow({ where: { orderId }, include: { item: true } })
+      const variant = await prisma.itemVariant.create({ data: { tenantId, itemId: plain.itemId!, name: 'Half', sortOrder: 0 } })
+      await prisma.orderLine.update({ where: { id: plain.id }, data: { variantId: variant.id } })
+      await prisma.order.update({ where: { id: orderId }, data: { tokenNumber: 23 } })
+      const billId = ((await authed(request(httpServer).post(`/pos/v1/orders/${orderId}/bill`), ownerToken).send()).body as BillBody).id
+      await authed(request(httpServer).post(`/pos/v1/bills/${billId}/finalize`), ownerToken).send({ tenders: [{ method: 'cash', amountMinor: 21000 }] })
+
+      const invoice = (await authed(request(httpServer).get(`/pos/v1/bills/${billId}/invoice`), ownerToken)).body as InvoiceBody
+      expect(invoice.title).toBe('Tax Invoice')
+      expect(invoice.seller.registrationNumber).toBe('29ABCDE1234F1Z5')
+      expect(invoice.sacCode).toBe('996331')
+      expect(invoice.placeOfSupply).toBe('Karnataka (29)')
+      expect(invoice.tokenNumber).toBe(23)
+      expect(invoice.lines[0].name).toBe(`${plain.item!.name} (Half)`)
+      // Tax maths untouched.
+      expect(invoice.taxMinor).toBe(1000)
+    })
+
+    it('IN composition tenant: titled "Bill of Supply" - a composition dealer cannot issue a tax invoice', async () => {
+      const tenantId = await createTenant(prisma)
+      await createTaxRegistration(prisma, tenantId, { taxProfile: 'India GST', registrationType: 'gstin', compositionScheme: true })
+      const outletId = await createOutlet(prisma, tenantId)
+      const { orderId, ownerToken } = await setUpSentOrder(tenantId, outletId, 10000)
+      const billId = ((await authed(request(httpServer).post(`/pos/v1/orders/${orderId}/bill`), ownerToken).send()).body as BillBody).id
+      await authed(request(httpServer).post(`/pos/v1/bills/${billId}/finalize`), ownerToken).send({ tenders: [{ method: 'cash', amountMinor: 20000 }] })
+      const invoice = (await authed(request(httpServer).get(`/pos/v1/bills/${billId}/invoice`), ownerToken)).body as InvoiceBody
+      expect(invoice.title).toBe('Bill of Supply')
+      expect(invoice.placeOfSupply).toBeNull()
     })
 
     it('composition tenant: the statutory note carries through to the invoice', async () => {

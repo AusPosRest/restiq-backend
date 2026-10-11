@@ -7,7 +7,7 @@ import { randomInt } from 'node:crypto'
 import type { DiningTable, Guest, Outlet, Prisma, TableSession } from '../../generated/prisma/client'
 import { AttemptLimiter, AttemptRule, GuestPrincipal, RegionRegistryService, signGuestToken } from '../../platform'
 import { isUniqueViolation, setGuestEntryContext, setTenantContext } from '../tenant-context'
-import { GuestSummary, JoinSessionDto, KioskSessionStartResult, OutletAvailability, SessionJoinResult, SessionStartResult, StartKioskSessionDto, StartSessionDto, TableSessionView } from './sessions.dtos'
+import { GuestSummary, JoinSessionDto, KioskSessionStartResult, OutletAvailability, SessionJoinResult, SessionStartResult, StartKioskSessionDto, StartSessionDto, TableSessionView, TableWelcomeView } from './sessions.dtos'
 
 type Tx = Prisma.TransactionClient
 
@@ -361,6 +361,28 @@ export class GuestSessionsService {
         throw new NotFoundException({ code: 'no_open_session', message: 'This table has no open session to close' })
       }
       await tx.tableSession.update({ where: { id: session.id }, data: { status: 'closed', closedAt: new Date() } })
+    })
+  }
+
+  /**
+   * CU-22/PE-24: names the restaurant, outlet and table for the welcome
+   * screen. A missing/deleted outlet, an inactive tenant (issue #117: never
+   * reveal lifecycle state) or a table of another outlet are all the same 404.
+   */
+  async getTableWelcome(outletId: string, tableId: string): Promise<TableWelcomeView> {
+    const notFound = new NotFoundException({ code: 'not_found', message: 'No such table' })
+    return this.plane().$transaction(async (tx) => {
+      await setGuestEntryContext(tx)
+      const outlet = await tx.outlet.findUnique({ where: { id: outletId } })
+      if (!outlet || outlet.deletedAt) throw notFound
+      await setTenantContext(tx, outlet.tenantId)
+      const [tenant, brand, table] = await Promise.all([
+        tx.tenant.findUnique({ where: { id: outlet.tenantId }, select: { status: true, deletedAt: true } }),
+        tx.brand.findUnique({ where: { id: outlet.brandId }, select: { name: true } }),
+        tx.diningTable.findFirst({ where: { id: tableId, tenantId: outlet.tenantId, floor: { outletId } }, select: { label: true } }),
+      ])
+      if (!tenant || tenant.status === 'inactive' || tenant.deletedAt || !table) throw notFound
+      return { restaurantName: brand?.name ?? outlet.name, outletName: outlet.name, tableLabel: table.label }
     })
   }
 }

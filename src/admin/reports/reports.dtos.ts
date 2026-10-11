@@ -98,9 +98,14 @@ export interface PaymentsTotals {
   totalMinor: number
   tenderedMinor: number
   refundedMinor: number
+  // PE-33: totalMinor - refundedMinor, the one "sales" figure the owner
+  // dashboard shows too.
+  netMinor: number
 }
 
 export interface PaymentsListResult {
+  // The tenant's currency (INR/AUD) - every amount below is in it.
+  currency: string
   items: PaymentRow[]
   nextCursor: string | null
   totals: PaymentsTotals

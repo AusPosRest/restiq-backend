@@ -1,7 +1,7 @@
-import { Body, Controller, Get, HttpCode, Param, Post, Query } from '@nestjs/common'
+import { Body, Controller, Get, HttpCode, Param, ParseUUIDPipe, Post, Query } from '@nestjs/common'
 import { ClientIp, CurrentGuest, GuestPrincipal, Public } from '../../platform'
 import { GuestSessionsService } from './sessions.service'
-import { AvailabilityQueryDto, JoinSessionDto, KioskSessionStartResult, OutletAvailability, SessionJoinResult, SessionStartResult, StartKioskSessionDto, StartSessionDto, TableSessionView } from './sessions.dtos'
+import { AvailabilityQueryDto, JoinSessionDto, KioskSessionStartResult, OutletAvailability, SessionJoinResult, SessionStartResult, StartKioskSessionDto, StartSessionDto, TableSessionView, TableWelcomeView } from './sessions.dtos'
 
 @Controller('guest/v1')
 export class GuestSessionsController {
@@ -41,5 +41,12 @@ export class GuestSessionsController {
   @Get('session')
   getCurrentSession(@CurrentGuest() guest: GuestPrincipal): Promise<TableSessionView> {
     return this.sessions.getCurrentSession(guest)
+  }
+
+  // CU-22/PE-24: the restaurant and table a QR scan points at, for the welcome screen.
+  @Public()
+  @Get('outlets/:outletId/tables/:tableId/welcome')
+  getTableWelcome(@Param('outletId', ParseUUIDPipe) outletId: string, @Param('tableId', ParseUUIDPipe) tableId: string): Promise<TableWelcomeView> {
+    return this.sessions.getTableWelcome(outletId, tableId)
   }
 }

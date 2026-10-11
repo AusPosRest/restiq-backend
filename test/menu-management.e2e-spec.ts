@@ -672,6 +672,20 @@ describe('/admin/v1/menu (e2e)', () => {
       expect(await prisma.auditEvent.count({ where: { tenantId, action: 'menu.item.price_changed' } })).toBe(2)
     })
 
+    it('PE-10: rejects a price in a currency other than the tenant\'s own', async () => {
+      const { token } = await createOwner(prisma)
+      const { item, variantId } = await itemWithVariant(token)
+      const res = await authed(request(httpServer).post(`/admin/v1/menu/items/${item.id}/prices`), token).send({
+        variantId,
+        channel: 'dine_in',
+        priceMinor: 1900,
+        currency: 'AUD',
+        reason: 'Wrong market',
+      })
+      expect(res.status).toBe(400)
+      expect((res.body as { error: { code: string } }).error.code).toBe('validation_failed')
+    })
+
     it('requires a reason (price change is security-relevant) and audits it', async () => {
       const { tenantId, token } = await createOwner(prisma)
       const { item, variantId } = await itemWithVariant(token)

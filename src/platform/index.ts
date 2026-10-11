@@ -33,3 +33,4 @@ export { RESERVED_SLUGS, SLUG_PATTERN, slugFromHost, slugify, slugProblem } from
 export type { SlugProblem } from './tenant-slug'
 export { NotBlank } from './not-blank'
 export { deviceSecretMatches, hashDeviceSecret } from './device-secret'
+export { assertTimezonesFitCountry, timezoneFitsCountry } from './outlet-timezone'

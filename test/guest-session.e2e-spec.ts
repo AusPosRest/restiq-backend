@@ -207,6 +207,23 @@ describe('/guest/v1 table sessions (e2e)', () => {
     expect(ok.status).toBe(201)
   })
 
+  it('CU-22/PE-24: the welcome screen can name the restaurant and table; a foreign table, bad id or inactive tenant is a 404', async () => {
+    const tenantId = await createTenant(prisma)
+    const outletId = await createOutlet(prisma, tenantId)
+    const tableId = await createTable(prisma, tenantId, outletId, 'T7')
+
+    const res = await request(httpServer).get(`/guest/v1/outlets/${outletId}/tables/${tableId}/welcome`)
+    expect(res.status).toBe(200)
+    expect(res.body).toEqual({ restaurantName: 'Guest Test Brand', outletName: 'Koramangala', tableLabel: 'T7' })
+
+    const otherOutlet = await createOutlet(prisma, tenantId, 'Elsewhere')
+    const foreignTable = await createTable(prisma, tenantId, otherOutlet, 'X9')
+    expect((await request(httpServer).get(`/guest/v1/outlets/${outletId}/tables/${foreignTable}/welcome`)).status).toBe(404)
+    expect((await request(httpServer).get(`/guest/v1/outlets/${outletId}/tables/not-a-uuid/welcome`)).status).toBe(400)
+    await prisma.tenant.update({ where: { id: tenantId }, data: { status: 'inactive' } })
+    expect((await request(httpServer).get(`/guest/v1/outlets/${outletId}/tables/${tableId}/welcome`)).status).toBe(404)
+  })
+
   it('starts a session, binds it to exactly one table, and a second start on the same table 409s', async () => {
     const tenantId = await createTenant(prisma)
     const outletId = await createOutlet(prisma, tenantId)

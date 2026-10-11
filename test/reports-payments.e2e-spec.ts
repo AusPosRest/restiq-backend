@@ -68,8 +68,10 @@ interface PaymentsTotalsBody {
   totalMinor: number
   tenderedMinor: number
   refundedMinor: number
+  netMinor: number
 }
 interface PaymentsListBody {
+  currency: string
   items: PaymentRowBody[]
   nextCursor: string | null
   totals: PaymentsTotalsBody
@@ -346,7 +348,10 @@ describe('/admin/v1/reports/payments (e2e)', () => {
         totalMinor: 63000,
         tenderedMinor: 63000,
         refundedMinor: 31500,
+        // PE-33: net of refunds - the same figure the dashboard calls "Sales today".
+        netMinor: 31500,
       })
+      expect(body.currency).toBe('INR')
     })
 
     it('paginates with a keyset cursor (limit=2) covering all 3 finalized bills with no gaps or repeats', async () => {
@@ -417,6 +422,8 @@ describe('/admin/v1/reports/payments (e2e)', () => {
       expect(rows).toHaveLength(4) // header + 3 finalized bills
 
       const b3Row = rows[1] // newest first
+      // PE-23: the outlet's local time with its offset, not UTC.
+      expect(b3Row[1]).toMatch(/^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\+05:30$/)
       expect(b3Row.slice(2)).toEqual(['CSV Export Main', 'pos', 'T1', '', 'Asha', '300.00', '0.00', '', '15.00', '315.00', 'cash=315.00', 'Sent back=315.00'])
     })
   })

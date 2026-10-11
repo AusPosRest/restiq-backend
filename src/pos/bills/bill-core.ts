@@ -19,6 +19,7 @@ import { BadRequestException, ConflictException, NotFoundException } from '@nest
 import type { Prisma } from '../../generated/prisma/client'
 import { paymentsSimulatorEnabled, uuidv7 } from '../../platform'
 import { BillView, InvoiceCreditNoteView, InvoiceLineView, InvoiceView, TaxBreakdownLineView, TenderView } from './bills.dtos'
+import { placeOfSupplyFromGstin, RESTAURANT_SAC } from './gst-place-of-supply'
 import { computeTax, TaxBreakdownLine, TaxCountry, TaxResult } from './tax'
 
 type Tx = Prisma.TransactionClient
@@ -515,7 +516,7 @@ export async function buildInvoiceView(tx: Tx, tenantId: string, billId: string)
   const bill = await refreshOpenBillTotals(tx, await loadBill(tx, tenantId, billId))
   const isFinalized = bill.status === 'finalized'
 
-  const [orderLines, outlet, taxContext, creditNotes] = await Promise.all([
+  const [orderLines, outlet, taxContext, creditNotes, order] = await Promise.all([
     tx.orderLine.findMany({
       where: { orderId: bill.orderId, voidedAt: null },
       include: { item: true, variant: true, combo: true, modifiers: { include: { modifier: true } } },
@@ -524,6 +525,7 @@ export async function buildInvoiceView(tx: Tx, tenantId: string, billId: string)
     tx.outlet.findUniqueOrThrow({ where: { id: bill.outletId }, select: { name: true, address: true } }),
     loadTenantTaxProfile(tx, tenantId),
     tx.creditNote.findMany({ where: { originalBillId: bill.id }, orderBy: { createdAt: 'asc' } }),
+    tx.order.findUniqueOrThrow({ where: { id: bill.orderId }, select: { tokenNumber: true } }),
   ])
 
   const unitOf = (line: (typeof orderLines)[number]) => line.unitPriceMinor + line.modifiers.reduce((sum, m) => sum + m.priceMinor, 0n)
@@ -541,7 +543,8 @@ export async function buildInvoiceView(tx: Tx, tenantId: string, billId: string)
         return `${perCombo > 1 ? `${perCombo}× ` : ''}${c.item?.name ?? ''}${extras.length ? ` (${extras.join(', ')})` : ''}`
       })
       return {
-        name: line.combo?.name ?? line.item?.name ?? '',
+        // PE-18/CU-10: "Biryani (Half)" - two portions at two prices must not print as two identical names.
+        name: line.combo?.name ?? `${line.item?.name ?? ''}${line.variant ? ` (${line.variant.name})` : ''}`,
         quantity: line.quantity,
         unitPriceMinor: Number(lineTotal / qty),
         lineTotalMinor: Number(lineTotal),
@@ -562,11 +565,16 @@ export async function buildInvoiceView(tx: Tx, tenantId: string, billId: string)
 
   const { lines: taxBreakdown, notes } = readStoredTaxBreakdown(bill.taxBreakdown)
   const discountMinor = bill.discountMinor ?? 0n
+  const isIndia = taxContext.country === 'IN'
+  // PE-18: a GST-registered Indian restaurant issues a "Tax Invoice"; a
+  // composition dealer may not, and issues a "Bill of Supply" instead.
+  const finalTitle = isIndia ? (taxContext.compositionScheme ? 'Bill of Supply' : 'Tax Invoice') : taxContext.gstRegistered ? 'Tax Invoice' : 'Receipt'
+  const chargesGst = isIndia && !taxContext.compositionScheme
 
   return {
     status: bill.status,
     invoiceNumber: isFinalized ? String(bill.billNumber) : null,
-    title: isFinalized ? (taxContext.country === 'AU' ? (taxContext.gstRegistered ? 'Tax Invoice' : 'Receipt') : 'Invoice') : 'Bill',
+    title: isFinalized ? finalTitle : 'Bill',
     issuedAt: isFinalized ? bill.finalizedAt!.toISOString() : null,
     currency: currencyForCountry(taxContext.country),
     seller: {
@@ -581,6 +589,9 @@ export async function buildInvoiceView(tx: Tx, tenantId: string, billId: string)
     },
     footerMessage: readReceiptFooter(taxContext.brandingTokens),
     lines,
+    sacCode: chargesGst ? RESTAURANT_SAC : null,
+    placeOfSupply: chargesGst ? placeOfSupplyFromGstin(taxContext.registrationNumber) : null,
+    tokenNumber: order.tokenNumber,
     subtotalMinor: Number(bill.subtotalMinor),
     discountMinor: bill.discountMinor === null ? null : Number(bill.discountMinor),
     discountReason: bill.discountReason,

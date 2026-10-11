@@ -27,6 +27,15 @@ interface OutletDashboardView {
   margin: DashboardMetric
   labourCost: DashboardMetric
   waste: DashboardMetric
+  today: {
+    billCount: number
+    grossMinor: number
+    refundedMinor: number
+    netMinor: number
+    averageBillMinor: number
+    openOrderCount: number
+    byMethod: { method: string; amountMinor: number }[]
+  }
 }
 interface DashboardBody {
   asOf: string
@@ -272,6 +281,46 @@ describe('/admin/v1/dashboard (e2e)', () => {
     const byId = new Map(body.outlets.map((outlet) => [outlet.outletId, outlet]))
     expect(byId.get(busy)?.sales).toMatchObject({ hasData: true, amountMinor: 131775, currency: 'INR' })
     expect(byId.get(quiet)?.sales).toMatchObject({ hasData: false, amountMinor: 0 })
+  })
+
+  it('PE-33/CU-5/CU-7: "Sales today" is net of refunds, to the paisa, with bills, refunds, average bill, open orders and the tender split', async () => {
+    const { tenantId, token } = await createOwner(prisma)
+    const outletId = await createOutlet(prisma, tenantId, 'Indiranagar')
+    const role = await prisma.role.create({ data: { tenantId, name: 'Manager', isSystem: true, isManager: true } })
+    const staff = await prisma.staffUser.create({ data: { tenantId, roleId: role.id, name: 'Asha' } })
+    const sell = async (subtotalMinor: number, taxMinor: number, tenders: [string, number][]) => {
+      const order = await prisma.order.create({ data: { tenantId, outletId, status: 'closed' } })
+      const bill = await prisma.bill.create({
+        data: { tenantId, outletId, orderId: order.id, subtotalMinor: BigInt(subtotalMinor), taxMinor: BigInt(taxMinor), status: 'finalized', finalizedAt: new Date() },
+      })
+      for (const [method, amountMinor] of tenders) {
+        await prisma.tender.create({ data: { tenantId, billId: bill.id, method: method as 'cash', amountMinor: BigInt(amountMinor) } })
+      }
+      return bill.id
+    }
+    await sell(22900, 1145, [['cash', 24045]]) // 240.45
+    const card = await sell(65000, 3250, [['upi_manual', 30000], ['cash', 38250]]) // 682.50
+    await prisma.creditNote.create({
+      data: { tenantId, originalBillId: card, reason: 'Cold food', approvedByStaffId: staff.id, createdByStaffId: staff.id, subtotalMinor: 10000n, taxMinor: 500n },
+    })
+    await prisma.order.create({ data: { tenantId, outletId, status: 'sent' } })
+    await prisma.order.create({ data: { tenantId, outletId, status: 'open' } })
+
+    const body = (await authed(request(httpServer).get('/admin/v1/dashboard'), token)).body as DashboardBody
+    const outlet = body.outlets[0]
+    expect(outlet.sales).toMatchObject({ hasData: true, amountMinor: 24045 + 68250 - 10500, currency: 'INR' })
+    expect(outlet.today).toEqual({
+      billCount: 2,
+      grossMinor: 92295,
+      refundedMinor: 10500,
+      netMinor: 81795,
+      averageBillMinor: 46148,
+      openOrderCount: 2,
+      byMethod: [
+        { method: 'cash', amountMinor: 62295 },
+        { method: 'upi_manual', amountMinor: 30000 },
+      ],
+    })
   })
 
   it('returns an honest zero-state dashboard when the tenant has no outlets yet', async () => {

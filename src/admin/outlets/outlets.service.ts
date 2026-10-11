@@ -3,10 +3,16 @@
 // Capability toggling is a routine content edit (SPEC constraint) - no audit
 // reason required, unlike price changes or PIN revocation.
 import { BadRequestException, Injectable, NotFoundException } from '@nestjs/common'
-import { AdminPrincipal, RegionRegistryService } from '../../platform'
+import { AdminPrincipal, assertTimezonesFitCountry, RegionRegistryService } from '../../platform'
 import { setTenantContext } from '../menu/tenant-context'
+import type { Prisma } from '../../generated/prisma/client'
 import { CapabilityView, OutletView, UpdateOutletDto } from './outlets.dtos'
 import { applyStarterSetup, StarterSetupResult } from './starter-setup'
+
+async function tenantCurrency(tx: Prisma.TransactionClient, tenantId: string): Promise<string> {
+  const tenant = await tx.tenant.findUniqueOrThrow({ where: { id: tenantId }, select: { country: true } })
+  return tenant.country === 'IN' ? 'INR' : 'AUD'
+}
 
 @Injectable()
 export class OutletsService {
@@ -16,11 +22,11 @@ export class OutletsService {
     const plane = this.registry.planeFor(this.registry.homeRegion())
     return plane.$transaction(async (tx) => {
       await setTenantContext(tx, owner.tenantId)
-      const outlets = await tx.outlet.findMany({
-        where: { tenantId: owner.tenantId, deletedAt: null },
-        orderBy: { createdAt: 'asc' },
-      })
-      return outlets.map((o) => ({ id: o.id, name: o.name, address: o.address, type: o.type, timezone: o.timezone }))
+      const [outlets, currency] = await Promise.all([
+        tx.outlet.findMany({ where: { tenantId: owner.tenantId, deletedAt: null }, orderBy: { createdAt: 'asc' } }),
+        tenantCurrency(tx, owner.tenantId),
+      ])
+      return outlets.map((o) => ({ id: o.id, name: o.name, address: o.address, type: o.type, timezone: o.timezone, currency }))
     })
   }
 
@@ -69,11 +75,20 @@ export class OutletsService {
       if (!outlet || outlet.tenantId !== owner.tenantId || outlet.deletedAt) {
         throw new NotFoundException({ code: 'not_found', message: 'No such outlet' })
       }
+      const tenant = await tx.tenant.findUniqueOrThrow({ where: { id: owner.tenantId }, select: { country: true } })
+      if (dto.timezone !== undefined) assertTimezonesFitCountry([dto.timezone], tenant.country)
       const updated = await tx.outlet.update({
         where: { id: outletId },
         data: { name: dto.name, address: dto.address, timezone: dto.timezone },
       })
-      return { id: updated.id, name: updated.name, address: updated.address, type: updated.type, timezone: updated.timezone }
+      return {
+        id: updated.id,
+        name: updated.name,
+        address: updated.address,
+        type: updated.type,
+        timezone: updated.timezone,
+        currency: tenant.country === 'IN' ? 'INR' : 'AUD',
+      }
     })
   }
 
