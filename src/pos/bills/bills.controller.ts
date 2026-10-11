@@ -1,6 +1,6 @@
-import { Body, Controller, Get, HttpCode, Param, ParseUUIDPipe, Post, Query, Res } from '@nestjs/common'
+import { Body, Controller, ForbiddenException, Get, HttpCode, Param, ParseUUIDPipe, Post, Query, Res } from '@nestjs/common'
 import type { Response } from 'express'
-import { AnyStaff, CurrentStaff, PosPrincipal, RequirePermission } from '../../platform'
+import { AnyStaff, CurrentStaff, PosPrincipal, RequirePermission, roleHasPermission } from '../../platform'
 import { DeviceSourceDto } from '../devices/devices.dtos'
 import { BillsService } from './bills.service'
 import { BillView, CreditNoteView, FinalizeBillDto, InvoiceView, PaymentHistoryView, PrintJobView, RefundBillDto } from './bills.dtos'
@@ -45,12 +45,16 @@ export class PosBillsController {
   @RequirePermission('settle_bills')
   @HttpCode(200)
   finalize(@CurrentStaff() staff: PosPrincipal, @Param('id') id: string, @Body() dto: FinalizeBillDto): Promise<BillView> {
+    // restiq-backend#209 (SE-29): a discount also needs the Discounts permission; a manager PIN above the threshold is a second gate on top.
+    if (dto.discountMinor && !roleHasPermission(staff.role, 'discounts')) {
+      throw new ForbiddenException({ code: 'forbidden', message: 'Your role cannot give discounts' })
+    }
     return this.bills.finalize(staff, id, dto)
   }
 
-  // #169: the cashier needs settle_bills; the service then still demands a manager PIN.
+  // restiq-backend#209 (SE-29): the Refunds permission, as the owner's Staff screen says; the service then still demands a manager PIN.
   @Post('bills/:id/refund')
-  @RequirePermission('settle_bills')
+  @RequirePermission('refunds')
   @HttpCode(201)
   refund(@CurrentStaff() staff: PosPrincipal, @Param('id') id: string, @Body() dto: RefundBillDto): Promise<CreditNoteView> {
     return this.bills.refund(staff, id, dto)

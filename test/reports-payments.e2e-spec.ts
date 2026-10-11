@@ -171,8 +171,8 @@ async function createTable(prisma: PrismaClient, tenantId: string, outletId: str
   return table.id
 }
 
-async function createStaff(prisma: PrismaClient, tenantId: string, outletId: string, name: string): Promise<{ id: string; token: string }> {
-  const role = await prisma.role.upsert({ where: { tenantId_name: { tenantId, name: 'Cashier' } }, update: {}, create: { tenantId, name: 'Cashier', isSystem: true, isManager: false } })
+async function createStaff(prisma: PrismaClient, tenantId: string, outletId: string, name: string, roleName = 'Cashier'): Promise<{ id: string; token: string }> {
+  const role = await prisma.role.upsert({ where: { tenantId_name: { tenantId, name: roleName } }, update: {}, create: { tenantId, name: roleName, isSystem: true, isManager: false } })
   const staff = await prisma.staffUser.create({ data: { tenantId, roleId: role.id, name } })
   const token = signPosToken({ sessionVersion: 0, id: staff.id, tenantId, outletId, name })
   return { id: staff.id, token }
@@ -256,6 +256,7 @@ describe('/admin/v1/reports/payments (e2e)', () => {
     const cashier2 = await createStaff(prisma, tenantId, outlet2, 'Vikram')
     const managerPin = '1234'
     await createManagerPin(prisma, tenantId, managerPin)
+    const refunder = await createStaff(prisma, tenantId, outlet1, 'Meera', 'Manager') // #209: refunds need the Refunds permission
 
     const now = Date.now()
     const t1 = new Date(now - 3 * 3600_000) // oldest
@@ -269,7 +270,7 @@ describe('/admin/v1/reports/payments (e2e)', () => {
     await prisma.bill.update({ where: { id: b2.billId }, data: { finalizedAt: t2 } })
 
     const b3 = await createBill(tenantId, outlet1, table1, cashier.token, 10000, 3, { tenderMethod: 'cash' }) // subtotal 30000, tax 1500, total 31500
-    await authed(request(httpServer).post(`/pos/v1/bills/${b3.billId}/refund`), cashier.token).send({ managerPin, reason: 'Sent back' })
+    await authed(request(httpServer).post(`/pos/v1/bills/${b3.billId}/refund`), refunder.token).send({ managerPin, reason: 'Sent back' })
     await prisma.bill.update({ where: { id: b3.billId }, data: { finalizedAt: t3 } })
 
     const openBill = await createBill(tenantId, outlet1, table1, cashier.token, 10000, 1, { skipFinalize: true })
