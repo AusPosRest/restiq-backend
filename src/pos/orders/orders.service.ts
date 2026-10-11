@@ -175,6 +175,7 @@ export class OrdersService {
       // the TODO on TableMapEntry).
       const activeOrders = await tx.order.findMany({
         where: { tenantId: staff.tenantId, outletId, status: { not: 'closed' }, tableId: { not: null } },
+        include: { owner: { select: { name: true } } },
       })
       const byTable = new Map(activeOrders.map((o) => [o.tableId as string, o]))
 
@@ -189,6 +190,7 @@ export class OrdersService {
           status: order ? 'occupied' : 'empty',
           orderId: order?.id ?? null,
           ownerId: order?.ownerId ?? null,
+          ownerName: order?.owner?.name ?? null,
         } satisfies TableMapEntry
       })
     })

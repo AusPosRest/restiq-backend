@@ -42,6 +42,7 @@ interface BillBody {
 interface TableMapBody {
   tableId: string
   status: 'occupied' | 'empty'
+  ownerName: string | null
 }
 async function wipe(prisma: PrismaClient): Promise<void> {
   await prisma.cartLineModifier.deleteMany()
@@ -225,6 +226,8 @@ describe('/pos/v1 till order lifecycle (e2e, restiq-backend#210)', () => {
     expect(queue[0]?.lines[0]?.note).toBe('less spicy')
 
     expect((await addLine(order.id, waiter.token, { itemId, note: 'x'.repeat(201) })).status).toBe(400)
+    const map = (await authed(request(httpServer).get(`/pos/v1/outlets/${outletId}/table-map`), waiter.token)).body as TableMapBody[]
+    expect(map.find((t) => t.tableId === tableId)?.ownerName).toBe('Asha')
   })
 
   it('keeps an item added after the first send on the till until Send to kitchen, and lets it be removed meanwhile (CU-15)', async () => {
