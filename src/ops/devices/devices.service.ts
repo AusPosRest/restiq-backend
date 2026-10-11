@@ -108,8 +108,10 @@ function hashCode(normalized: string): string {
   return createHash('sha256').update(normalized).digest('hex')
 }
 
-function defaultLabel(type: string, id: string): string {
-  return `${type.toUpperCase()}-${id.slice(0, 8)}`
+// PE-25: a UUIDv7 starts with its timestamp, so two devices enrolled in the same minute shared a label.
+// Its tail is random - use that.
+export function defaultLabel(type: string, id: string): string {
+  return `${type.toUpperCase()}-${id.slice(-6).toUpperCase()}`
 }
 
 function toDeviceView(device: {
