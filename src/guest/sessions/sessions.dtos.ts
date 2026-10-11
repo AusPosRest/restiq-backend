@@ -87,3 +87,12 @@ export interface OutletAvailability {
   available: boolean
   reason?: string
 }
+
+// CU-22/PE-24: who and where the guest scanned, for the welcome screen -
+// public, read before any session exists. Nothing a guest couldn't read off
+// the restaurant's own signage.
+export interface TableWelcomeView {
+  restaurantName: string
+  outletName: string
+  tableLabel: string
+}
