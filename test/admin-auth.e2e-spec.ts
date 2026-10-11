@@ -188,6 +188,23 @@ describe('/admin/v1/auth/login (e2e)', () => {
     expect((branding.body as { receiptFooter: string }).receiptFooter).not.toBe('Tenant B footer')
   })
 
+  it('logout ends the session server-side: the signed-out token is refused (restiq-backend#209, SE-9)', async () => {
+    const login = await request(httpServer).post('/admin/v1/auth/login').send({ email: ownerAEmail, password: PASSWORD })
+    const token = (login.body as { token: string }).token
+    expect((await request(httpServer).get('/admin/v1/branding').set('Authorization', `Bearer ${token}`)).status).toBe(200)
+
+    const logout = await request(httpServer).post('/admin/v1/auth/logout').set('Authorization', `Bearer ${token}`)
+    expect(logout.status).toBe(204)
+
+    const reused = await request(httpServer).get('/admin/v1/branding').set('Authorization', `Bearer ${token}`)
+    expect(reused.status).toBe(401)
+    expect((reused.body as { error: { code: string } }).error.code).toBe('session_revoked')
+    // Signing in again works.
+    const again = await request(httpServer).post('/admin/v1/auth/login').send({ email: ownerAEmail, password: PASSWORD })
+    expect((await request(httpServer).get('/admin/v1/branding').set('Authorization', `Bearer ${(again.body as { token: string }).token}`)).status).toBe(200)
+    expect((await request(httpServer).post('/admin/v1/auth/logout')).status).toBe(401)
+  })
+
   it('rejects a wrong password with the same generic 401 body as an unknown email', async () => {
     const wrongPassword = await request(httpServer)
       .post('/admin/v1/auth/login')

@@ -5,7 +5,7 @@
 import { BadRequestException, ConflictException, Injectable, NotFoundException } from '@nestjs/common'
 import { createHash, randomBytes } from 'node:crypto'
 import type { Prisma } from '../../generated/prisma/client'
-import { OpsPrincipal, RegionRegistryService, uuidv7 } from '../../platform'
+import { hashDeviceSecret, OpsPrincipal, RegionRegistryService, uuidv7 } from '../../platform'
 import { DEVICE_STATUSES, DEVICE_TYPES, DeviceTypeValue, EnrollDeviceDto, GenerateCodeDto, HeartbeatDto } from './devices.dtos'
 
 export const CODE_TTL_MS = 15 * 60 * 1000
@@ -34,6 +34,8 @@ export interface EnrollResult {
   device: DeviceView
   tenantName: string | null
   outletName: string | null
+  /** restiq-backend#209: shown once - the device presents it at PIN sign-in to prove it is this device. Only its hash is stored. */
+  deviceSecret: string
 }
 
 // Who to hold accountable for the enroll() audit_events row - an ops
@@ -286,6 +288,7 @@ export class DevicesService {
 
       const id = uuidv7()
       const now = new Date()
+      const deviceSecret = `dvs_${randomBytes(32).toString('hex')}`
       const device = await tx.device.create({
         data: {
           id,
@@ -294,6 +297,7 @@ export class DevicesService {
           label: dto.label?.trim() || defaultLabel(record.deviceType, id),
           type: record.deviceType,
           hardwareKeyFingerprint: dto.hardwareKeyFingerprint,
+          secretHash: hashDeviceSecret(deviceSecret),
           enrolledAt: now,
         },
       })
@@ -330,7 +334,7 @@ export class DevicesService {
         tx.tenant.findUnique({ where: { id: record.tenantId }, select: { name: true } }),
         tx.outlet.findUnique({ where: { id: record.outletId }, select: { name: true } }),
       ])
-      return { device: toDeviceView(device), tenantName: tenant?.name ?? null, outletName: outlet?.name ?? null }
+      return { device: toDeviceView(device), tenantName: tenant?.name ?? null, outletName: outlet?.name ?? null, deviceSecret }
     })
   }
 

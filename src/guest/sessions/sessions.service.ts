@@ -238,9 +238,14 @@ export class GuestSessionsService {
     })
   }
 
-  async joinSession(dto: JoinSessionDto): Promise<SessionJoinResult> {
-    // restiq-backend#171: wrong table-PIN guesses per table, shared across instances (was an in-memory Map).
-    const rules: AttemptRule[] = [{ key: `guest-join:table:${dto.outletId}:${dto.tableId}`, max: 10, windowSeconds: 15 * 60 }]
+  async joinSession(dto: JoinSessionDto, ip: string): Promise<SessionJoinResult> {
+    // restiq-backend#171: wrong table-PIN guesses, shared across instances (was an in-memory Map).
+    // restiq-backend#209 (SE-24): counted per guest address, so one prankster with the printed QR can't lock the
+    // table's real guests out; a looser per-table cap still stops guessing spread over many addresses.
+    const rules: AttemptRule[] = [
+      { key: `guest-join:ip:${dto.outletId}:${dto.tableId}:${ip}`, max: 10, windowSeconds: 15 * 60 },
+      { key: `guest-join:table:${dto.outletId}:${dto.tableId}`, max: 30, windowSeconds: 15 * 60 },
+    ]
     const plane = this.plane()
     return plane.$transaction(async (tx) => {
       const { outlet, table } = await resolveOutletAndTable(tx, dto.outletId, dto.tableId)

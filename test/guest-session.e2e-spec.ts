@@ -46,6 +46,10 @@ async function wipe(prisma: PrismaClient): Promise<void> {
   await prisma.cartLine.deleteMany()
   await prisma.creditNote.deleteMany()
   await prisma.orderLineModifier.deleteMany()
+  // Kitchen tickets another suite left behind hold order lines/orders (RESTRICT) - cleared first.
+  await prisma.ticketLine.deleteMany()
+  await prisma.ticketEvent.deleteMany()
+  await prisma.ticket.deleteMany()
   await prisma.orderLine.deleteMany()
   await prisma.invoice.deleteMany()
   await prisma.subscription.deleteMany()
@@ -304,6 +308,32 @@ describe('/guest/v1 table sessions (e2e)', () => {
     const lockedRes = await request(httpServer).post('/guest/v1/sessions/join').send({ outletId, tableId, pin, name: 'Rohan' })
     expect(lockedRes.status).toBe(429)
     expect((lockedRes.body as ErrorBody).error.code).toBe('locked_out')
+  })
+
+  it('a prankster locking themselves out does not lock out the table\'s real guests (restiq-backend#209, SE-24)', async () => {
+    const tenantId = await createTenant(prisma)
+    const outletId = await createOutlet(prisma, tenantId)
+    const tableId = await createTable(prisma, tenantId, outletId)
+    await enableQrOrdering(prisma, tenantId, outletId)
+    const { pin } = (await request(httpServer).post('/guest/v1/sessions').send({ outletId, tableId, name: 'Asha', phone: '+91 90000 11111' })).body as StartResult
+    const wrongPin = pin === '0000' ? '1111' : '0000'
+
+    process.env.PROXY_SHARED_SECRET = 'e2e-join-secret'
+    try {
+      const join = (from: string, guess: string) =>
+        request(httpServer).post('/guest/v1/sessions/join').set('X-Restiq-Client-Ip', from).set('X-Restiq-Proxy-Secret', 'e2e-join-secret').send({ outletId, tableId, pin: guess, name: 'Rohan' })
+      for (let i = 0; i < 10; i++) expect((await join('203.0.113.9', wrongPin)).status).toBe(403)
+      expect((await join('203.0.113.9', pin)).status).toBe(429)
+      expect((await join('198.51.100.20', pin)).status).toBe(200)
+
+      // Guesses spread over many addresses still run into the table's own cap.
+      for (let host = 1; host <= 2; host++) {
+        for (let i = 0; i < 10; i++) await join(`192.0.2.${host}`, wrongPin)
+      }
+      expect((await join('198.51.100.21', pin)).status).toBe(429)
+    } finally {
+      delete process.env.PROXY_SHARED_SECRET
+    }
   })
 
   it('reports "no such outlet or table" for an unknown outlet/table pair, never leaking tenant existence', async () => {

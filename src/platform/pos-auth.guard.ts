@@ -27,6 +27,33 @@ import { TenantAddressService } from './tenant-address.service'
 import { isTenantBlocked } from './tenant-lifecycle'
 
 type PosRequest = Request & { staff?: PosPrincipal }
+type Tx = Parameters<Parameters<ReturnType<RegionRegistryService['planeFor']>['$transaction']>[0]>[0]
+
+const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i
+
+// restiq-backend#209 (SE-26): every outlet a request reaches - named in the URL/body/query, or owning the
+// order/bill/shift/ticket/... it names - so staff restricted to some outlets are held to them on every
+// call, not only at sign-in. Unknown ids are skipped; the handler answers those with its own 404.
+async function outletsReached(tx: Tx, request: Request): Promise<string[]> {
+  const params = request.params as Record<string, string | undefined>
+  const body: unknown = request.body
+  const named = [params.outletId, typeof request.query.outletId === 'string' ? request.query.outletId : undefined]
+  if (typeof body === 'object' && body !== null && typeof (body as { outletId?: unknown }).outletId === 'string') named.push((body as { outletId: string }).outletId)
+
+  const route = (request.route as { path?: string } | undefined)?.path ?? ''
+  const id = params.id && UUID.test(params.id) ? params.id : undefined
+  // One query at a time - they share the transaction's single connection.
+  const lookups: (() => Promise<{ outletId: string } | null>)[] = []
+  const select = { outletId: true } as const
+  if (params.orderId && UUID.test(params.orderId)) lookups.push(() => tx.order.findUnique({ where: { id: params.orderId }, select }))
+  if (params.ticketId && UUID.test(params.ticketId)) lookups.push(() => tx.ticket.findUnique({ where: { id: params.ticketId }, select }))
+  if (id && route.includes('/bills/:id')) lookups.push(() => tx.bill.findUnique({ where: { id }, select }))
+  if (id && route.includes('/shifts/:id')) lookups.push(() => tx.shift.findUnique({ where: { id }, select }))
+  if (id && route.includes('/payment-intents/:id')) lookups.push(() => tx.paymentIntent.findUnique({ where: { id }, select }))
+  if (id && route.includes('/print-jobs/:id')) lookups.push(() => tx.printJob.findUnique({ where: { id }, select }))
+  for (const lookup of lookups) named.push((await lookup())?.outletId)
+  return named.filter((outletId): outletId is string => typeof outletId === 'string')
+}
 
 /** Injects the guard-verified pos staff session into a handler parameter. */
 export const CurrentStaff = createParamDecorator((_data: unknown, context: ExecutionContext): PosPrincipal => {
@@ -65,15 +92,27 @@ export class PosAuthGuard implements CanActivate {
     await this.address.assertTokenMatchesAddress(request, claims.tenantId)
 
     const plane = this.registry.planeFor(this.registry.homeRegion())
-    const staff = await plane.$transaction(async (tx) => {
+    const { staff, deviceActive, outsideOutlets } = await plane.$transaction(async (tx) => {
       await tx.$executeRaw`SELECT set_config('app.tenant_id', ${claims.tenantId}, true)`
-      return tx.staffUser.findUnique({
+      const staffRow = await tx.staffUser.findUnique({
         where: { id: claims.id },
-        select: { tenantId: true, name: true, pinRevokedAt: true, sessionVersion: true, role: { select: { name: true } } },
+        select: { tenantId: true, name: true, pinRevokedAt: true, sessionVersion: true, outletIds: true, role: { select: { name: true } } },
       })
+      // restiq-backend#209 (SE-11): a session signed in on an enrolled till ends when that till is revoked.
+      const active = claims.deviceId === undefined || (await tx.device.count({ where: { id: claims.deviceId, tenantId: claims.tenantId, status: 'active', revokedAt: null } })) > 0
+      // Empty outletIds = works at every outlet (#197), so only restricted staff need the lookups.
+      const allowed = staffRow?.outletIds ?? []
+      const outside = allowed.length > 0 ? (await outletsReached(tx, request)).some((outletId) => !allowed.includes(outletId)) : false
+      return { staff: staffRow, deviceActive: active, outsideOutlets: outside }
     })
     if (!staff || staff.tenantId !== claims.tenantId || staff.pinRevokedAt || staff.sessionVersion !== claims.sessionVersion) {
       throw new UnauthorizedException({ code: 'session_revoked', message: 'This session has ended - log in again' })
+    }
+    if (!deviceActive) {
+      throw new UnauthorizedException({ code: 'device_revoked', message: 'This device was removed by the owner - set it up again with a new code' })
+    }
+    if (outsideOutlets) {
+      throw new ForbiddenException({ code: 'outlet_mismatch', message: `${staff.name} isn't set up to work at this outlet` })
     }
 
     const policy = this.reflector.getAllAndOverride<RoutePolicy | undefined>(ROUTE_PERMISSION, [context.getHandler(), context.getClass()])

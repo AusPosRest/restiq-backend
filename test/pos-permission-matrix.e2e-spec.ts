@@ -73,7 +73,7 @@ function withOutlet(path: string, outletId: string): string {
 // actions whose policy must stay as the catalogue intends.
 const INTENDED_POLICY: Readonly<Record<string, Permission>> = {
   'POST /pos/v1/bills/:id/finalize': 'settle_bills',
-  'POST /pos/v1/bills/:id/refund': 'settle_bills', // then the service still demands a manager PIN
+  'POST /pos/v1/bills/:id/refund': 'refunds', // then the service still demands a manager PIN
   'POST /pos/v1/bills/:id/intents': 'settle_bills',
   'POST /pos/v1/payment-intents/:id/cancel': 'settle_bills',
   'POST /pos/v1/payment-intents/:id/simulate': 'settle_bills',
@@ -123,7 +123,21 @@ describe('POS and kitchen permission matrix (e2e)', () => {
         billingPeriod: 'monthly',
       },
     })
-    for (const roleName of Object.keys(ROLE_PERMISSIONS)) {
+    it('a discount at finalize also needs the Discounts permission (restiq-backend#209, SE-29)', async () => {
+    const billPath = `/pos/v1/bills/${uuidv7()}/finalize`
+    const body = { discountMinor: 500, discountReason: 'Regular', tenders: [{ method: 'cash', amountMinor: 100 }] }
+    const accountant = await request(httpServer).post(billPath).set('Authorization', `Bearer ${tokens.get('Accountant')!}`).send(body)
+    expect(accountant.status).toBe(403)
+    expect((accountant.body as { error: { message: string } }).error.message).toBe('Your role cannot give discounts')
+    // Cashier holds Discounts: past the gate, the made-up bill is simply not found.
+    const cashier = await request(httpServer).post(billPath).set('Authorization', `Bearer ${tokens.get('Cashier')!}`).send(body)
+    expect(cashier.status).toBe(404)
+    // No discount: settle_bills alone is enough.
+    const plain = await request(httpServer).post(billPath).set('Authorization', `Bearer ${tokens.get('Accountant')!}`).send({ tenders: body.tenders })
+    expect(plain.status).toBe(404)
+  })
+
+  for (const roleName of Object.keys(ROLE_PERMISSIONS)) {
       const role = await prisma.role.create({ data: { tenantId, name: roleName, isSystem: true, isManager: roleName === 'Owner' || roleName === 'Manager' } })
       const staff = await prisma.staffUser.create({ data: { tenantId, roleId: role.id, name: roleName } })
       tokens.set(roleName, signPosToken({ sessionVersion: 0, id: staff.id, tenantId, outletId, name: roleName }))

@@ -234,7 +234,7 @@ describe('/pos/v1 refunds and adjustments (e2e)', () => {
     opts: { quantity?: number; discountMinor?: number } = {},
   ): Promise<{ billId: string; orderId: string; orderLineId: string; cashierToken: string; managerPin: string; bill: BillBody }> {
     const tableId = await createTable(prisma, tenantId, outletId)
-    const owner = await createStaff(prisma, tenantId, outletId, 'Asha')
+    const owner = await createStaff(prisma, tenantId, outletId, 'Asha', { isManager: true }) // #209: refunding needs the Refunds permission
     const managerPin = '1234'
     await createStaff(prisma, tenantId, outletId, 'Meera Manager', { isManager: true, pin: managerPin })
     const itemId = await createItemWithPrice(prisma, tenantId, priceMinor)
@@ -440,7 +440,7 @@ describe('/pos/v1 refunds and adjustments (e2e)', () => {
       const tenantId = await createTenant(prisma)
       const outletId = await createOutlet(prisma, tenantId)
       const tableId = await createTable(prisma, tenantId, outletId)
-      const owner = await createStaff(prisma, tenantId, outletId, 'Asha')
+      const owner = await createStaff(prisma, tenantId, outletId, 'Asha', { isManager: true }) // #209: refunding needs the Refunds permission
       const managerPin = '1234'
       await createStaff(prisma, tenantId, outletId, 'Meera Manager', { isManager: true, pin: managerPin })
       const itemId = await createItemWithPrice(prisma, tenantId, 10000)
@@ -468,7 +468,7 @@ describe('/pos/v1 refunds and adjustments (e2e)', () => {
 
       const tenantB = await createTenant(prisma, 'Tenant B')
       const outletB = await createOutlet(prisma, tenantB)
-      const staffB = await createStaff(prisma, tenantB, outletB, 'Rahul')
+      const staffB = await createStaff(prisma, tenantB, outletB, 'Rahul', { isManager: true })
       await createStaff(prisma, tenantB, outletB, 'Other Manager', { isManager: true, pin: '5555' })
 
       const res = await authed(request(httpServer).post(`/pos/v1/bills/${billId}/refund`), staffB.token).send({

@@ -1,5 +1,13 @@
 # Completed
 
+- **2026-10-11** - Sessions, devices, throttles and access - QA fixes (issue #209):
+  - Owner logout: `POST /admin/v1/auth/logout` moves `owner_users.session_version` on (audited `owner.logout`); the signed-out token answers 401 `session_revoked` (SE-9).
+  - Devices: enrolment returns a one-time `deviceSecret` (`devices.secret_hash` keeps its sha256). PIN login takes optional `deviceSecret`; only with it does `deviceId` get the till's own throttle bucket, otherwise the address limits apply (SE-12). Login on a revoked device answers 403 `device_revoked`; a session signed in on a till carries `did` and answers 401 `device_revoked` once the till is revoked (SE-11). Devices enrolled before this sign in as untrusted browsers until enrolled again.
+  - Outlet-restricted staff (`outletIds`) get 403 `outlet_mismatch` on any POS/kitchen request reaching another outlet - by path, body or query `outletId`, or the outlet of the order/bill/shift/ticket/payment intent/print job named (SE-26).
+  - Finalize with a discount needs `discounts`; refund needs `refunds` (was `settle_bills`); the manager PIN stays a second gate (SE-29).
+  - Throttles: device enrolment uses `resolveClientIp` + the shared `AttemptLimiter` (SE-32); table join PIN counts per guest address (10/15 min) plus a per-table 30/15 min cap (SE-24).
+  - Errors: every unexpected error answers `{ error: { code, message } }` - Prisma P2034/P2002 409 `conflict`, P2020 400 `validation_failed`, else 500 `internal_error` (SE-30).
+  - Migration `20261011093000_database_timezone_utc` sets the database's default timezone to UTC so Prisma timestamps are stored correctly (SE-31).
 - **2026-10-08** - Platform admin login and mail audit fixes (issue #203): the dev inbox moved to `GET /ops/v1/dev-inbox` and needs an operator session (it was public and showed live reset links); operator logout bumps `operator_users.session_version`, so the logged-out token (and every other session of that operator) answers 401 `session_revoked`; the login email is trimmed before validation.
 - **2026-10-08** - Configurable plan prices (issue #201): `plan_prices` (country x plan, monthly price in minor units or null for "on quote", annual discount percent), seeded A$49/129 and ₹499/999 at 20% off annual. `GET /ops/v1/plan-prices`; `PUT /ops/v1/plan-prices/:country/:plan` with a reason, audited as `plan_price.updated`.
 - **2026-10-08** - Mail simulator and owner invite emails (issue #198):

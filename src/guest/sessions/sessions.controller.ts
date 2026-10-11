@@ -1,5 +1,5 @@
 import { Body, Controller, Get, HttpCode, Param, Post } from '@nestjs/common'
-import { CurrentGuest, GuestPrincipal, Public } from '../../platform'
+import { ClientIp, CurrentGuest, GuestPrincipal, Public } from '../../platform'
 import { GuestSessionsService } from './sessions.service'
 import { JoinSessionDto, KioskSessionStartResult, OutletAvailability, SessionJoinResult, SessionStartResult, StartKioskSessionDto, StartSessionDto, TableSessionView } from './sessions.dtos'
 
@@ -26,8 +26,8 @@ export class GuestSessionsController {
   @Public()
   @Post('sessions/join')
   @HttpCode(200)
-  joinSession(@Body() dto: JoinSessionDto): Promise<SessionJoinResult> {
-    return this.sessions.joinSession(dto)
+  joinSession(@Body() dto: JoinSessionDto, @ClientIp() ip: string): Promise<SessionJoinResult> {
+    return this.sessions.joinSession(dto, ip)
   }
 
   // Issue #138: a kiosk tab's table-less session, bound to its enrolled device.

@@ -10,7 +10,7 @@ import request from 'supertest'
 import { afterAll, beforeAll, describe, expect, it } from 'vitest'
 import { AppModule } from '../src/app.module'
 import { createPrismaClient, PrismaClient } from '../src/db/client'
-import { ManagerAuthService, uuidv7 } from '../src/platform'
+import { hashDeviceSecret, ManagerAuthService, signPosToken, uuidv7 } from '../src/platform'
 
 // Full table list (not just this file's own tables): the e2e suite shares
 // one database and file execution order is not guaranteed, so every wipe()
@@ -83,6 +83,9 @@ async function wipe(prisma: PrismaClient): Promise<void> {
 
 type Server = Parameters<typeof request>[0]
 
+// #209: what every test till got at enrolment - presenting it is what makes a till trusted.
+const TILL_SECRET = 'dvs_e2e-till-secret'
+
 async function bootApp(trustProxyHops = 0): Promise<{ app: INestApplication; server: Server }> {
   const moduleRef = await Test.createTestingModule({ imports: [AppModule] }).compile()
   const app = moduleRef.createNestApplication<NestExpressApplication>()
@@ -131,7 +134,7 @@ describe('shared sign-in throttling (#171, e2e)', () => {
 
   async function device(tenantId: string, outletId: string, status: 'active' | 'revoked' = 'active'): Promise<string> {
     const row = await prisma.device.create({
-      data: { id: uuidv7(), tenantId, outletId, label: `pos-${uuidv7().slice(-6)}`, type: 'pos', status, hardwareKeyFingerprint: `fp-${uuidv7()}`, enrolledAt: new Date(), revokedAt: status === 'revoked' ? new Date() : null },
+      data: { id: uuidv7(), tenantId, outletId, label: `pos-${uuidv7().slice(-6)}`, type: 'pos', status, hardwareKeyFingerprint: `fp-${uuidv7()}`, secretHash: hashDeviceSecret(TILL_SECRET), enrolledAt: new Date(), revokedAt: status === 'revoked' ? new Date() : null },
       select: { id: true },
     })
     return row.id
@@ -192,7 +195,50 @@ describe('shared sign-in throttling (#171, e2e)', () => {
     const till = await device(tenantId, outletId)
     for (let i = 0; i < 10; i++) await pinLogin(a.server, { tenantId, pin: String(7000 + i) })
     expect((await pinLogin(a.server, { tenantId, pin: '1234' })).status).toBe(429)
-    expect((await pinLogin(a.server, { tenantId, pin: '1234', deviceId: till })).status).toBe(200)
+    expect((await pinLogin(a.server, { tenantId, pin: '1234', deviceId: till, deviceSecret: TILL_SECRET })).status).toBe(200)
+  })
+
+  it("a till's id without its secret is just another browser: an outsider can't lock the till out, nor add guesses per till id (#209, SE-12)", async () => {
+    const { tenantId, outletId } = await seedTenant()
+    await staff(tenantId, '1234')
+    const till = await device(tenantId, outletId)
+    const otherTill = await device(tenantId, outletId)
+    for (let i = 0; i < 10; i++) {
+      expect((await pinLogin(a.server, { tenantId, pin: String(7050 + i), deviceId: i % 2 === 0 ? till : otherTill, deviceSecret: 'guessed' })).status).toBe(401)
+    }
+    // The outsider's own address is spent, whichever till id it names...
+    expect((await pinLogin(a.server, { tenantId, pin: '1234', deviceId: otherTill })).status).toBe(429)
+    // ...and the real till, presenting its secret, still signs in.
+    expect((await pinLogin(a.server, { tenantId, pin: '1234', deviceId: till, deviceSecret: TILL_SECRET })).status).toBe(200)
+    const [row] = await prisma.$queryRaw<{ n: number }[]>`SELECT count(*)::int AS n FROM auth_attempts WHERE key LIKE ${`pos-pin:device:${tenantId}:%`} AND attempts > 0`
+    expect(row.n).toBe(0)
+  })
+
+  it('a revoked till signs nobody in, and the sessions it had end (#209, SE-11)', async () => {
+    const { tenantId, outletId } = await seedTenant()
+    await staff(tenantId, '1234')
+    const till = await device(tenantId, outletId)
+    const login = await pinLogin(a.server, { tenantId, pin: '1234', deviceId: till, deviceSecret: TILL_SECRET })
+    expect(login.status).toBe(200)
+    const token = (login.body as { token: string }).token
+    // A session signed in elsewhere (no till) is not tied to this till.
+    const elsewhere = (await pinLogin(a.server, { tenantId, pin: '1234' })).body as { token: string }
+    expect((await request(a.server).get('/pos/v1/menu').set('Authorization', `Bearer ${token}`)).status).toBe(200)
+
+    await prisma.device.update({ where: { id: till }, data: { status: 'revoked', revokedAt: new Date() } })
+
+    const ended = await request(a.server).get('/pos/v1/menu').set('Authorization', `Bearer ${token}`)
+    expect(ended.status).toBe(401)
+    expect((ended.body as { error: { code: string } }).error.code).toBe('device_revoked')
+    expect((await request(a.server).get('/pos/v1/menu').set('Authorization', `Bearer ${elsewhere.token}`)).status).toBe(200)
+
+    const again = await pinLogin(a.server, { tenantId, pin: '1234', deviceId: till, deviceSecret: TILL_SECRET })
+    expect(again.status).toBe(403)
+    expect((again.body as { error: { code: string } }).error.code).toBe('device_revoked')
+    // A token naming a device the tenant doesn't have is refused too.
+    const staffId = (await prisma.staffUser.findFirstOrThrow({ where: { tenantId } })).id
+    const forged = signPosToken({ id: staffId, tenantId, outletId, name: 'Staff 1234', sessionVersion: 0, deviceId: uuidv7() })
+    expect((await request(a.server).get('/pos/v1/menu').set('Authorization', `Bearer ${forged}`)).status).toBe(401)
   })
 
   it('an unknown or revoked device id is not trusted - it gets the address limit', async () => {
@@ -221,8 +267,8 @@ describe('shared sign-in throttling (#171, e2e)', () => {
     const pins = ['1111', '2222', '3333', '4444', '5555', '6666']
     for (const pin of pins) await staff(tenantId, pin)
     for (const pin of pins) {
-      expect((await pinLogin(a.server, { tenantId, pin: '9999', deviceId: till })).status).toBe(401)
-      expect((await pinLogin(a.server, { tenantId, pin, deviceId: till })).status).toBe(200)
+      expect((await pinLogin(a.server, { tenantId, pin: '9999', deviceId: till, deviceSecret: TILL_SECRET })).status).toBe(401)
+      expect((await pinLogin(a.server, { tenantId, pin, deviceId: till, deviceSecret: TILL_SECRET })).status).toBe(200)
     }
     const [row] = await prisma.$queryRaw<{ attempts: number }[]>`SELECT attempts FROM auth_attempts WHERE key = ${`pos-pin:device:${tenantId}:${till}`}`
     expect(row.attempts).toBe(6)
@@ -251,7 +297,7 @@ describe('shared sign-in throttling (#171, e2e)', () => {
     }
     expect((await pinLogin(proxied.server, { tenantId, pin: '1234' }, '192.0.2.99')).status).toBe(429)
     // The enrolled till is outside that cap.
-    expect((await pinLogin(proxied.server, { tenantId, pin: '1234', deviceId: till }, '192.0.2.99')).status).toBe(200)
+    expect((await pinLogin(proxied.server, { tenantId, pin: '1234', deviceId: till, deviceSecret: TILL_SECRET }, '192.0.2.99')).status).toBe(200)
   })
 
   it("the web server's forwarded client address counts only with the shared proxy secret", async () => {
