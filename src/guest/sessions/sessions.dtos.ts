@@ -1,4 +1,4 @@
-import { IsString, IsUUID, Matches, MaxLength } from 'class-validator'
+import { IsNotEmpty, IsOptional, IsString, IsUUID, Matches, MaxLength } from 'class-validator'
 import { NotBlank } from '../../platform'
 import type { TableSessionStatus } from '../../generated/prisma/client'
 
@@ -86,6 +86,13 @@ export interface KioskSessionStartResult {
 export interface SessionJoinResult {
   token: string
   session: TableSessionView
+}
+
+// CU-21: with a tableId the check also says whether that table can take a QR
+// order right now (reason 'table_busy' when staff already have an order on it).
+export class AvailabilityQueryDto {
+  @IsOptional() @IsUUID()
+  tableId?: string
 }
 
 export interface OutletAvailability {

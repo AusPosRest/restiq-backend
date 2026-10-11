@@ -260,6 +260,75 @@ describe('/guest/v1 table sessions (e2e)', () => {
     expect(restarted.session.guests).toEqual([expect.objectContaining({ name: 'Rohan' })])
   })
 
+  describe('stale sessions and busy tables (CU-21, CU-26)', () => {
+    async function start(outletId: string, tableId: string, name = 'Asha'): Promise<request.Response> {
+      return request(httpServer).post('/guest/v1/sessions').send({ outletId, tableId, name, phone: '+91 90000 11111' })
+    }
+
+    it('an untouched session older than 30 minutes with no order does not lock the table for the next guests', async () => {
+      const tenantId = await createTenant(prisma)
+      const outletId = await createOutlet(prisma, tenantId)
+      const tableId = await createTable(prisma, tenantId, outletId)
+      await enableQrOrdering(prisma, tenantId, outletId)
+      const first = (await start(outletId, tableId)).body as StartResult
+      const longAgo = new Date(Date.now() - 31 * 60 * 1000)
+      await prisma.tableSession.update({ where: { id: first.session.sessionId }, data: { createdAt: longAgo } })
+      await prisma.guest.updateMany({ where: { sessionId: first.session.sessionId }, data: { joinedAt: longAgo } })
+
+      const res = await start(outletId, tableId, 'Rohan')
+      expect(res.status).toBe(201)
+      expect((await prisma.tableSession.findUnique({ where: { id: first.session.sessionId } }))?.status).toBe('closed')
+    })
+
+    it('a session that placed an order is never treated as abandoned', async () => {
+      const tenantId = await createTenant(prisma)
+      const outletId = await createOutlet(prisma, tenantId)
+      const tableId = await createTable(prisma, tenantId, outletId)
+      await enableQrOrdering(prisma, tenantId, outletId)
+      const first = (await start(outletId, tableId)).body as StartResult
+      const longAgo = new Date(Date.now() - 31 * 60 * 1000)
+      await prisma.tableSession.update({ where: { id: first.session.sessionId }, data: { createdAt: longAgo } })
+      await prisma.guest.updateMany({ where: { sessionId: first.session.sessionId }, data: { joinedAt: longAgo } })
+      await prisma.order.create({ data: { tenantId, outletId, tableId, ownerId: null, status: 'sent', source: 'qr', sessionId: first.session.sessionId } })
+
+      const res = await start(outletId, tableId, 'Rohan')
+      expect(res.status).toBe(409)
+      expect((res.body as ErrorBody).error.code).toBe('session_already_open')
+      // The order belongs to the open session - the table is joinable, not busy.
+      const availability = await request(httpServer).get(`/guest/v1/outlets/${outletId}/availability?tableId=${tableId}`)
+      expect(availability.body).toEqual({ available: true })
+    })
+
+    it('says up front that a table with a staff order is busy, and refuses to start a session there', async () => {
+      const tenantId = await createTenant(prisma)
+      const outletId = await createOutlet(prisma, tenantId)
+      const tableId = await createTable(prisma, tenantId, outletId)
+      const freeTable = await createTable(prisma, tenantId, outletId, 'T2')
+      await enableQrOrdering(prisma, tenantId, outletId)
+      await prisma.order.create({ data: { tenantId, outletId, tableId, ownerId: null, status: 'open' } })
+
+      const busy = await request(httpServer).get(`/guest/v1/outlets/${outletId}/availability?tableId=${tableId}`)
+      expect(busy.body).toEqual({ available: false, reason: 'table_busy' })
+      const free = await request(httpServer).get(`/guest/v1/outlets/${outletId}/availability?tableId=${freeTable}`)
+      expect(free.body).toEqual({ available: true })
+
+      const res = await start(outletId, tableId)
+      expect(res.status).toBe(409)
+      expect((res.body as ErrorBody).error.code).toBe('table_has_active_order')
+      expect(await prisma.tableSession.count({ where: { tableId } })).toBe(0)
+    })
+
+    it('reports a table from another outlet as not found', async () => {
+      const tenantId = await createTenant(prisma)
+      const outletId = await createOutlet(prisma, tenantId)
+      const otherOutlet = await createOutlet(prisma, tenantId, 'Other')
+      const otherTable = await createTable(prisma, tenantId, otherOutlet)
+      await enableQrOrdering(prisma, tenantId, outletId)
+      const res = await request(httpServer).get(`/guest/v1/outlets/${outletId}/availability?tableId=${otherTable}`)
+      expect(res.body).toEqual({ available: false, reason: 'not_found' })
+    })
+  })
+
   it('joins with the right PIN and sees the earlier guest; a wrong PIN fails', async () => {
     const tenantId = await createTenant(prisma)
     const outletId = await createOutlet(prisma, tenantId)

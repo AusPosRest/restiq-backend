@@ -1,7 +1,7 @@
-import { Body, Controller, Get, HttpCode, Param, Post } from '@nestjs/common'
+import { Body, Controller, Get, HttpCode, Param, Post, Query } from '@nestjs/common'
 import { ClientIp, CurrentGuest, GuestPrincipal, Public } from '../../platform'
 import { GuestSessionsService } from './sessions.service'
-import { JoinSessionDto, KioskSessionStartResult, OutletAvailability, SessionJoinResult, SessionStartResult, StartKioskSessionDto, StartSessionDto, TableSessionView } from './sessions.dtos'
+import { AvailabilityQueryDto, JoinSessionDto, KioskSessionStartResult, OutletAvailability, SessionJoinResult, SessionStartResult, StartKioskSessionDto, StartSessionDto, TableSessionView } from './sessions.dtos'
 
 @Controller('guest/v1')
 export class GuestSessionsController {
@@ -12,8 +12,8 @@ export class GuestSessionsController {
   // sessions.service.ts's assertQrOrderingEnabled).
   @Public()
   @Get('outlets/:outletId/availability')
-  checkAvailability(@Param('outletId') outletId: string): Promise<OutletAvailability> {
-    return this.sessions.checkAvailability(outletId)
+  checkAvailability(@Param('outletId') outletId: string, @Query() query: AvailabilityQueryDto): Promise<OutletAvailability> {
+    return this.sessions.checkAvailability(outletId, query.tableId)
   }
 
   @Public()

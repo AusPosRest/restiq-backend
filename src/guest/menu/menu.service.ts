@@ -66,7 +66,8 @@ async function toItemView(tx: Tx, tenantId: string, outletId: string, item: Item
     currency = price?.currency ?? null
   }
 
-  const variants = await Promise.all(
+  // CU-23: same rule as the POS menu - an unpriced variant is not offered at all, never shown as "Price unavailable".
+  const priced = await Promise.all(
     item.variants.map(async (variant) => {
       const price = await resolveCurrentPrice(tx, { tenantId, itemId: item.id, variantId: variant.id, channel: MENU_PRICE_CHANNEL, outletId })
       return {
@@ -78,6 +79,7 @@ async function toItemView(tx: Tx, tenantId: string, outletId: string, item: Item
       }
     }),
   )
+  const variants = priced.filter((variant) => variant.priceMinor !== null)
 
   return {
     id: item.id,
@@ -100,6 +102,10 @@ async function toItemView(tx: Tx, tenantId: string, outletId: string, item: Item
     })),
     allergens: item.allergens.map((link) => ({ id: link.allergen.id, name: link.allergen.name })),
   }
+}
+
+function isPurchasable(item: MenuItemView): boolean {
+  return item.variants.length > 0 || item.priceMinor !== null
 }
 
 @Injectable()
@@ -126,7 +132,8 @@ export class GuestMenuService {
           id: category.id,
           name: category.name,
           sortOrder: category.sortOrder,
-          items: await Promise.all(category.items.map((item) => toItemView(tx, guest.tenantId, guest.outletId, item, photos))),
+          // CU-23: an item with nothing purchasable (no price, or no priced variant) is left off, as on the till.
+          items: (await Promise.all(category.items.map((item) => toItemView(tx, guest.tenantId, guest.outletId, item, photos)))).filter(isPurchasable),
         })),
       )
 

@@ -1,5 +1,5 @@
 import { Type } from 'class-transformer'
-import { ArrayUnique, IsArray, IsBoolean, IsDateString, IsEnum, IsInt, IsOptional, IsString, IsUUID, Length, Matches, MaxLength, Min, MinLength, ValidateNested } from 'class-validator'
+import { ArrayUnique, IsArray, IsBoolean, IsDateString, IsEnum, IsInt, IsOptional, IsString, IsUUID, Length, Matches, MaxLength, Min, MinLength, ValidateIf, ValidateNested } from 'class-validator'
 import type { PriceChannel, VegMarker } from '../../generated/prisma/client'
 import { NotBlank } from '../../platform'
 import { AllergenView } from './allergens.dtos'
@@ -23,6 +23,19 @@ export class CreateVariantDto {
 
   @IsOptional() @IsInt() @Min(0)
   sortOrder?: number
+
+  // PE-13/CU-1: a variant is created with its price, so it is never live at
+  // nothing. Applies to every channel, like a channel-less CreatePriceDto.
+  @IsOptional() @IsInt() @Min(0)
+  priceMinor?: number
+
+  @ValidateIf((dto: CreateVariantDto) => dto.priceMinor !== undefined) @Length(3, 3)
+  currency?: string
+
+  // PE-15: on an item's FIRST variant, the existing base price is kept as a
+  // variant of this name (default "Regular") so it stays on sale.
+  @IsOptional() @IsString() @MinLength(1) @MaxLength(60)
+  basePortionName?: string
 }
 
 export class CreateItemDto {
@@ -153,6 +166,8 @@ export interface VariantView {
   id: string
   name: string
   sortOrder: number
+  /** Current dine-in price (SE-20: inline, no per-item price request); null = not priced, so not sellable. */
+  priceMinor: number | null
 }
 
 export interface ItemView {
@@ -165,6 +180,9 @@ export interface ItemView {
   vegMarker: VegMarker | null
   available: boolean
   stationId: string | null
+  /** Current dine-in base price; null when unpriced. Ignored by the till and QR once the item has variants. */
+  priceMinor: number | null
+  currency: string | null
   variants: VariantView[]
   modifierGroups: ModifierGroupView[]
   allergens: AllergenView[]

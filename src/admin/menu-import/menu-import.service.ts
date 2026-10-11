@@ -33,9 +33,10 @@ function toJson(payload: DraftPayload): Prisma.InputJsonValue {
   return payload as unknown as Prisma.InputJsonValue
 }
 
-function toView(draft: { id: string; status: string; sourceType: string; fileName: string; payload: unknown }): MenuImportDraftView {
+function toView(draft: { id: string; status: string; sourceType: string; fileName: string; payload: unknown }, duplicates: DraftDuplicate[] = []): MenuImportDraftView {
   const payload = draft.payload as DraftPayload
-  const items: DraftItemView[] = payload.items.map((item) => ({ ...item }))
+  const reasonById = new Map(duplicates.map((d) => [d.id, d.reason]))
+  const items: DraftItemView[] = payload.items.map((item) => ({ ...item, duplicate: reasonById.get(item.id) ?? null }))
   return {
     importId: draft.id,
     status: draft.status as 'draft' | 'committed',
@@ -104,6 +105,13 @@ async function findDuplicates(
   return duplicates
 }
 
+// PE-11: the review table flags clashes as soon as the draft exists, not only
+// when commit refuses them.
+async function draftDuplicates(tx: Prisma.TransactionClient, tenantId: string, items: DraftItem[]): Promise<DraftDuplicate[]> {
+  const categories = await tx.menuCategory.findMany({ where: { tenantId } })
+  return findDuplicates(tx, tenantId, items, new Map(categories.map((category) => [category.name.toLowerCase(), { id: category.id }])))
+}
+
 function duplicatesMessage(duplicates: DraftDuplicate[]): string {
   const names = (reason: DraftDuplicate['reason']): string =>
     duplicates
@@ -144,7 +152,7 @@ export class MenuImportService {
       const draft = await tx.menuImportDraft.create({
         data: { tenantId: owner.tenantId, sourceType, fileName: file.originalname, payload: toJson({ items }) },
       })
-      return toView(draft)
+      return toView(draft, await draftDuplicates(tx, owner.tenantId, items))
     })
   }
 
@@ -176,11 +184,12 @@ export class MenuImportService {
         }
       }
 
+      const items = [...byId.values()]
       const updated = await tx.menuImportDraft.update({
         where: { id: importId },
-        data: { payload: toJson({ items: [...byId.values()] }) },
+        data: { payload: toJson({ items }) },
       })
-      return toView(updated)
+      return toView(updated, await draftDuplicates(tx, owner.tenantId, items))
     })
   }
 

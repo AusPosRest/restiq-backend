@@ -4,7 +4,7 @@
 // actions, so unlike routine content edits this also writes an audit_events
 // row with the caller's reason, in the same transaction as the insert.
 import { BadRequestException, Injectable, NotFoundException } from '@nestjs/common'
-import type { PriceChannel } from '../../generated/prisma/client'
+import type { PriceChannel, Prisma } from '../../generated/prisma/client'
 import { AdminPrincipal, RegionRegistryService } from '../../platform'
 import { CreatePriceDto, CurrentPriceView, ItemPriceView } from './items.dtos'
 import { currencyForCountry } from './commit-items'
@@ -23,6 +23,63 @@ function toView(row: { id: string; itemId: string; variantId: string | null; cha
     effectiveAt: row.effectiveAt.toISOString(),
     createdAt: row.createdAt.toISOString(),
   }
+}
+
+type Tx = Prisma.TransactionClient
+
+/**
+ * Inserts one price version (AD-11) and audits it. No channel = the unscoped
+ * default plus a matching row for every channel that already has its own price
+ * here (a channel-specific row would otherwise keep winning). Returns the
+ * unscoped (or the single requested channel's) row.
+ */
+export async function insertPrice(
+  tx: Tx,
+  owner: AdminPrincipal,
+  itemId: string,
+  input: { variantId: string | null; outletId: string | null; channel: PriceChannel | null; priceMinor: number; currency: string; effectiveAt?: Date; reason: string },
+) {
+  const scope = { itemId, variantId: input.variantId, outletId: input.outletId }
+  const existing = input.channel ? [] : await tx.itemPrice.findMany({ where: { tenantId: owner.tenantId, ...scope, channel: { not: null } }, distinct: ['channel'], select: { channel: true } })
+  const channels: Array<PriceChannel | null> = input.channel ? [input.channel] : [null, ...existing.map((row) => row.channel)]
+  const rows = []
+  for (const channel of channels) {
+    rows.push(
+      await tx.itemPrice.create({
+        data: {
+          tenantId: owner.tenantId,
+          ...scope,
+          channel,
+          priceMinor: BigInt(input.priceMinor),
+          currency: input.currency,
+          ...(input.effectiveAt ? { effectiveAt: input.effectiveAt } : {}),
+        },
+      }),
+    )
+  }
+  await tx.auditEvent.create({
+    data: { tenantId: owner.tenantId, actorId: owner.id, actorEmail: owner.email, action: 'menu.item.price_changed', reason: input.reason, occurredAt: new Date() },
+  })
+  return rows[0]
+}
+
+/**
+ * PE-15: an item's first variant would otherwise silently take its base
+ * portion off sale (POS/QR sell only variants once an item has any). The base
+ * portion becomes a variant of its own carrying every base price row - copied
+ * as new rows (insert-only), keeping each row's effectiveAt and createdAt so
+ * the current/scheduled resolution is identical.
+ */
+export async function copyBasePricesToVariant(tx: Tx, owner: AdminPrincipal, itemId: string, variantId: string, variantName: string): Promise<void> {
+  const rows = await tx.itemPrice.findMany({ where: { tenantId: owner.tenantId, itemId, variantId: null } })
+  for (const row of rows) {
+    await tx.itemPrice.create({
+      data: { tenantId: owner.tenantId, itemId, variantId, outletId: row.outletId, channel: row.channel, priceMinor: row.priceMinor, currency: row.currency, effectiveAt: row.effectiveAt, createdAt: row.createdAt },
+    })
+  }
+  await tx.auditEvent.create({
+    data: { tenantId: owner.tenantId, actorId: owner.id, actorEmail: owner.email, action: 'menu.item.price_changed', reason: `Existing price kept as the ${variantName} portion`, occurredAt: new Date() },
+  })
 }
 
 @Injectable()
@@ -55,37 +112,14 @@ export class PricesService {
         }
       }
 
-      // One channel when asked; otherwise the unscoped default plus a matching row for every channel
-      // that already has its own price here (a channel-specific row would otherwise keep winning).
-      const scope = { itemId, variantId: dto.variantId ?? null, outletId: dto.outletId ?? null }
-      const existing = dto.channel ? [] : await tx.itemPrice.findMany({ where: { tenantId: owner.tenantId, ...scope, channel: { not: null } }, distinct: ['channel'], select: { channel: true } })
-      const channels: Array<PriceChannel | null> = dto.channel ? [dto.channel] : [null, ...existing.map((row) => row.channel)]
-      const rows = []
-      for (const channel of channels) {
-        rows.push(
-          await tx.itemPrice.create({
-            data: {
-              tenantId: owner.tenantId,
-              ...scope,
-              channel,
-              priceMinor: BigInt(dto.priceMinor),
-              currency: dto.currency,
-              ...(dto.effectiveAt ? { effectiveAt: new Date(dto.effectiveAt) } : {}),
-            },
-          }),
-        )
-      }
-      const created = rows[0]
-
-      await tx.auditEvent.create({
-        data: {
-          tenantId: owner.tenantId,
-          actorId: owner.id,
-          actorEmail: owner.email,
-          action: 'menu.item.price_changed',
-          reason: dto.reason,
-          occurredAt: new Date(),
-        },
+      const created = await insertPrice(tx, owner, itemId, {
+        variantId: dto.variantId ?? null,
+        outletId: dto.outletId ?? null,
+        channel: dto.channel ?? null,
+        priceMinor: dto.priceMinor,
+        currency: dto.currency,
+        effectiveAt: dto.effectiveAt ? new Date(dto.effectiveAt) : undefined,
+        reason: dto.reason,
       })
 
       return toView(created)
