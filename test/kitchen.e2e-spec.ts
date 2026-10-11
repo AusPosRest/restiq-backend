@@ -309,7 +309,10 @@ describe('/kitchen/v1 ticket domain, routing, and fire-on-send (e2e)', () => {
       await fire(orderId, waiter.token)
 
       // pos/CAP-3: adding a line remains possible after the order is "sent".
+      // restiq-backend#210: it waits on the till until Send to kitchen again.
       await addLine(orderId, item, waiter.token, 2)
+      expect(await prisma.ticketLine.count({ where: { ticket: { orderId } } })).toBe(1)
+      await fire(orderId, waiter.token)
 
       const queue = (await authed(request(httpServer).get(`/kitchen/v1/outlets/${outletId}/stations/${tandoor}/queue`), waiter.token)).body as TicketBody[]
       expect(queue).toHaveLength(1)
@@ -336,6 +339,7 @@ describe('/kitchen/v1 ticket domain, routing, and fire-on-send (e2e)', () => {
       await authed(request(httpServer).post(`/kitchen/v1/tickets/${firstTicket?.id}/bump`), waiter.token).send()
 
       await addLine(orderId, item, waiter.token, 2)
+      await fire(orderId, waiter.token)
 
       const allTickets = await prisma.ticket.findMany({ where: { orderId }, orderBy: { firedAt: 'asc' } })
       expect(allTickets).toHaveLength(2)

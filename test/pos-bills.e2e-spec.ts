@@ -312,14 +312,30 @@ describe('/pos/v1 bill and settle (e2e)', () => {
       expect(bill.billNumber).toBeNull()
     })
 
-    it('rejects a non-owner creating a bill, naming the current owner', async () => {
+    it('rejects a non-owner who cannot settle bills, naming the current owner', async () => {
       const tenantId = await createTenant(prisma)
       const outletId = await createOutlet(prisma, tenantId)
       const { orderId } = await setUpSentOrder(tenantId, outletId, 10000)
-      const other = await createStaff(prisma, tenantId, outletId, 'Vikram')
+      const waiterRole = await prisma.role.create({ data: { tenantId, name: 'Waiter', isSystem: true, isManager: false } })
+      const waiter = await prisma.staffUser.create({ data: { tenantId, roleId: waiterRole.id, name: 'Vikram' } })
+      const token = signPosToken({ sessionVersion: 0, id: waiter.id, tenantId, outletId, name: 'Vikram' })
 
-      const res = await authed(request(httpServer).post(`/pos/v1/orders/${orderId}/bill`), other.token).send()
+      const res = await authed(request(httpServer).post(`/pos/v1/orders/${orderId}/bill`), token).send()
       expect(res.status).toBe(403)
+      expect((res.body as { error: { message: string } }).error.message).toMatch(/^This order belongs to .+\. Take it over first/)
+    })
+
+    it('lets a cashier open and settle the bill of a waiter-owned order without a transfer (SE-23)', async () => {
+      const tenantId = await createTenant(prisma)
+      const outletId = await createOutlet(prisma, tenantId)
+      const { orderId } = await setUpSentOrder(tenantId, outletId, 10000)
+      const cashier = await createStaff(prisma, tenantId, outletId, 'Vikram')
+
+      const res = await authed(request(httpServer).post(`/pos/v1/orders/${orderId}/bill`), cashier.token).send()
+      expect(res.status).toBe(201)
+      const bill = res.body as BillBody
+      const finalized = await authed(request(httpServer).post(`/pos/v1/bills/${bill.id}/finalize`), cashier.token).send({ tenders: [{ method: 'cash', amountMinor: bill.totalMinor }] })
+      expect(finalized.status).toBe(200)
     })
 
     it('is idempotent: a second POST for the same order returns 200 with the same bill id and writes no second row (issue #98)', async () => {

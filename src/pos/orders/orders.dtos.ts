@@ -1,5 +1,5 @@
 import { Type } from 'class-transformer'
-import { ArrayMaxSize, ArrayUnique, IsArray, IsEnum, IsInt, IsOptional, IsString, IsUUID, Min, MinLength, ValidateNested } from 'class-validator'
+import { ArrayMaxSize, ArrayUnique, IsArray, IsEnum, IsInt, IsOptional, IsString, IsUUID, MaxLength, Min, MinLength, ValidateNested } from 'class-validator'
 import { ComboSelectionDto } from '../../admin'
 import type { OrderSource, OrderStatus } from '../../generated/prisma/client'
 
@@ -36,6 +36,9 @@ export interface OrderView {
   // guest-placed (source 'qr') order that no staff member has yet taken over
   // via transfer() - see Order.ownerId's schema comment.
   ownerId: string | null
+  // restiq-backend#210: the owner's display name, so a till never shows a raw
+  // staff id. Null exactly when ownerId is null.
+  ownerName: string | null
   status: OrderStatus
   // pos/CAP-6 (issue #62): null on every table (dine-in) order; a real,
   // gapless-per-outlet sequential number on a counter order (tableId null),
@@ -77,6 +80,10 @@ export class AddOrderLineDto {
 
   @IsOptional() @IsInt() @Min(1)
   seatNumber?: number
+
+  // restiq-backend#210: special instructions for the kitchen ("less spicy").
+  @IsOptional() @IsString() @MaxLength(200)
+  note?: string
 }
 
 export class AddComboLineDto {
@@ -111,6 +118,16 @@ export class UpdateOrderLineDto {
   seatNumber?: number
 }
 
+// restiq-backend#210: void a line the kitchen already has - a manager PIN and
+// a reason, same gate as a refund (ManagerAuthService 'void_after_fire').
+export class VoidOrderLineDto {
+  @IsString() @MinLength(1)
+  managerPin!: string
+
+  @IsString() @MinLength(1) @MaxLength(200)
+  reason!: string
+}
+
 export interface OrderLineModifierView {
   id: string
   modifierId: string
@@ -141,6 +158,14 @@ export interface OrderLineView {
   // Nullable as of qr-self-order/CAP-4 (issue #77): null for a guest-placed
   // line, which has no staff adder - see guestId/guestName instead.
   addedByStaffId: string | null
+  // restiq-backend#210: the adder's display name (null for a guest line).
+  addedByStaffName: string | null
+  // restiq-backend#210: special instructions typed on the till, or null.
+  note: string | null
+  // restiq-backend#210: true once this line is on a kitchen ticket (for a
+  // combo, once any of its items is). Until then it can be changed or removed
+  // freely; after, only a manager-approved void takes it back.
+  sentToKitchen: boolean
   // qr-self-order/CAP-4 (AD-18): the guest who added this line via the
   // shared cart, carried over at placement - null for every pos-added line.
   // guestName is a snapshot (same posture as CartLineView's), not a live

@@ -1,6 +1,6 @@
 import { Body, Controller, Delete, Get, HttpCode, Param, Patch, Post } from '@nestjs/common'
 import { AnyStaff, CurrentStaff, PosPrincipal, RequirePermission } from '../../platform'
-import { AddComboLineDto, AddOrderLineDto, OrderView, TableMapEntry, TransferOrderDto, UpdateOrderLineDto, UpdateOrderStatusDto } from './orders.dtos'
+import { AddComboLineDto, AddOrderLineDto, OrderView, TableMapEntry, TransferOrderDto, UpdateOrderLineDto, UpdateOrderStatusDto, VoidOrderLineDto } from './orders.dtos'
 import { OrderLinesService } from './order-lines.service'
 import { OrdersService } from './orders.service'
 
@@ -58,6 +58,15 @@ export class PosOrdersController {
     return this.orders.getOrder(staff, orderId)
   }
 
+  // restiq-backend#210: throw away an order with nothing on it (a mistaken
+  // table tap, an abandoned counter sale) - see OrdersService.discard.
+  @Delete('orders/:orderId')
+  @RequirePermission('take_orders')
+  @HttpCode(204)
+  async discard(@CurrentStaff() staff: PosPrincipal, @Param('orderId') orderId: string): Promise<void> {
+    await this.orders.discard(staff, orderId)
+  }
+
   @Patch('orders/:orderId/status')
   @RequirePermission('fire_kitchen')
   updateStatus(
@@ -98,6 +107,20 @@ export class PosOrdersController {
     @Body() dto: UpdateOrderLineDto,
   ): Promise<OrderView> {
     return this.orderLines.updateLine(staff, orderId, lineId, dto)
+  }
+
+  // restiq-backend#210: the service still demands a manager PIN + reason
+  // (same layering as bills/:id/refund under settle_bills).
+  @Post('orders/:orderId/lines/:lineId/void')
+  @RequirePermission('take_orders')
+  @HttpCode(200)
+  voidLine(
+    @CurrentStaff() staff: PosPrincipal,
+    @Param('orderId') orderId: string,
+    @Param('lineId') lineId: string,
+    @Body() dto: VoidOrderLineDto,
+  ): Promise<OrderView> {
+    return this.orderLines.voidLine(staff, orderId, lineId, dto)
   }
 
   @Delete('orders/:orderId/lines/:lineId')

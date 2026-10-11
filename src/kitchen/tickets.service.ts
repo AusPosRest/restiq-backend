@@ -1,7 +1,7 @@
 // kitchen-display/CAP-1..5 (issue #67, AD-16): the ticket domain's sole
 // owner. Two kinds of entry points into this file:
 //
-//  - fireOnSend/fireAddedLine take a caller-supplied `tx` and participate in
+//  - fireOnSend takes a caller-supplied `tx` and participate in
 //    the CALLER's transaction (pos/orders' open->sent transition and
 //    pos/order-lines' addLine, per AD-16's "same transaction" rule) - they
 //    open no transaction of their own.
@@ -9,7 +9,7 @@
 //    reads, the stations picker) is a normal pos-realm action/read that
 //    opens its own transaction, same shape as every pos/admin service.
 import { ConflictException, Injectable, NotFoundException } from '@nestjs/common'
-import type { Order, OrderLine, Prisma, Station } from '../generated/prisma/client'
+import type { Order, Prisma, Station } from '../generated/prisma/client'
 import { PosPrincipal, RegionRegistryService } from '../platform'
 import { setTenantContext } from './tenant-context'
 import { AllDaySummaryEntryView, ExpoOrderView, ExpoStationEntryView, StationView, TicketLineView, TicketView } from './tickets.dtos'
@@ -100,6 +100,8 @@ function toTicketLineView(line: TicketLineWithOrderLine): TicketLineView {
     modifiers: line.orderLine.modifiers.map((m) => ({ id: m.id, name: m.modifier.name })),
     addOnBatch: line.addOnBatch,
     voided: line.voided,
+    // restiq-backend#210: the till's special instructions for this line.
+    note: line.orderLine.note,
   }
 }
 
@@ -139,16 +141,22 @@ export class KitchenTicketsService {
   // -- fire hook (invoked from pos/orders and pos/order-lines, same tx) -----
 
   /**
-   * Whole-order fire (pos/CAP-2's open->sent transition): every line on the
-   * order is unfired at this point (the order was "open"), so every line is
-   * grouped by resolved station and ticketed in one pass - one ticket per
-   * station, addOnBatch 0. A no-op if the order somehow has no lines yet.
+   * Fires every line on the order the kitchen doesn't have yet, grouped by
+   * resolved station (pos/CAP-2's open->sent transition, guest placement,
+   * and - restiq-backend#210 - a later "Send to kitchen" for items added to an
+   * already-sent order, plus finalize as a backstop so a paid order always
+   * reaches the kitchen). Per station: appended as the next ADD-ON batch to
+   * that station's still-QUEUED ticket, or a brand-new ticket (batch 0) when
+   * there is none or the last one there was already bumped (documented edge,
+   * issue #67 scope). Voided lines never fire. Returns how many lines fired.
    */
-  async fireOnSend(tx: Tx, order: Pick<Order, 'id' | 'tenantId' | 'outletId'>): Promise<void> {
+  async fireOnSend(tx: Tx, order: Pick<Order, 'id' | 'tenantId' | 'outletId'>): Promise<number> {
     // A combo's parent line has no item and nothing to cook - its child lines
     // (the chosen items) are what the kitchen gets (restiq-backend#160).
-    const lines = (await tx.orderLine.findMany({ where: { orderId: order.id }, include: { item: true } })).flatMap((l) => (l.item ? [{ ...l, item: l.item }] : []))
-    if (lines.length === 0) return
+    const lines = (
+      await tx.orderLine.findMany({ where: { orderId: order.id, voidedAt: null, ticketLines: { none: {} } }, include: { item: true }, orderBy: { createdAt: 'asc' } })
+    ).flatMap((l) => (l.item ? [{ ...l, item: l.item }] : []))
+    if (lines.length === 0) return 0
 
     const defaultStationId = await resolveDefaultStationId(tx, order.tenantId, order.outletId)
     const groups = new Map<string | null, typeof lines>()
@@ -160,37 +168,22 @@ export class KitchenTicketsService {
     }
 
     for (const [stationId, groupLines] of groups) {
-      const ticket = await tx.ticket.create({ data: { tenantId: order.tenantId, outletId: order.outletId, orderId: order.id, stationId } })
+      const existing = await tx.ticket.findFirst({ where: { orderId: order.id, stationId }, orderBy: { firedAt: 'desc' } })
+      let ticketId: string
+      let addOnBatch = 0
+      if (existing && existing.status === 'queued') {
+        const maxBatch = await tx.ticketLine.aggregate({ where: { ticketId: existing.id }, _max: { addOnBatch: true } })
+        ticketId = existing.id
+        addOnBatch = (maxBatch._max.addOnBatch ?? 0) + 1
+        await tx.ticketEvent.create({ data: { tenantId: order.tenantId, ticketId, type: 'add_on_fired' } })
+      } else {
+        ticketId = (await tx.ticket.create({ data: { tenantId: order.tenantId, outletId: order.outletId, orderId: order.id, stationId } })).id
+      }
       for (const line of groupLines) {
-        await tx.ticketLine.create({ data: { tenantId: order.tenantId, ticketId: ticket.id, orderLineId: line.id, quantity: line.quantity, addOnBatch: 0 } })
+        await tx.ticketLine.create({ data: { tenantId: order.tenantId, ticketId, orderLineId: line.id, quantity: line.quantity, addOnBatch } })
       }
     }
-  }
-
-  /**
-   * A single new line added to an already-"sent" order (pos/CAP-3's addLine
-   * allows this - see order-lines.service.ts's assertOrderNotClosed, not
-   * assertOrderOpenForEdit). Appends an ADD-ON batch to the station's
-   * existing QUEUED ticket; opens a brand-new ticket at that station only if
-   * there is no ticket there yet, or the prior one there was already bumped
-   * (documented edge, issue #67 scope) - never a second ticket alongside a
-   * still-queued one.
-   */
-  async fireAddedLine(tx: Tx, order: Pick<Order, 'id' | 'tenantId' | 'outletId'>, line: Pick<OrderLine, 'id' | 'quantity'> & { item: { stationId: string | null } }): Promise<void> {
-    const defaultStationId = await resolveDefaultStationId(tx, order.tenantId, order.outletId)
-    const stationId = line.item.stationId ?? defaultStationId
-
-    const existing = await tx.ticket.findFirst({ where: { orderId: order.id, stationId }, orderBy: { firedAt: 'desc' } })
-    if (existing && existing.status === 'queued') {
-      const maxBatch = await tx.ticketLine.aggregate({ where: { ticketId: existing.id }, _max: { addOnBatch: true } })
-      const nextBatch = (maxBatch._max.addOnBatch ?? 0) + 1
-      await tx.ticketLine.create({ data: { tenantId: order.tenantId, ticketId: existing.id, orderLineId: line.id, quantity: line.quantity, addOnBatch: nextBatch } })
-      await tx.ticketEvent.create({ data: { tenantId: order.tenantId, ticketId: existing.id, type: 'add_on_fired' } })
-      return
-    }
-
-    const ticket = await tx.ticket.create({ data: { tenantId: order.tenantId, outletId: order.outletId, orderId: order.id, stationId } })
-    await tx.ticketLine.create({ data: { tenantId: order.tenantId, ticketId: ticket.id, orderLineId: line.id, quantity: line.quantity, addOnBatch: 0 } })
+    return lines.length
   }
 
   // -- actions (CAP-2/CAP-4, no actor attribution) --------------------------

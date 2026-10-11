@@ -280,7 +280,7 @@ export class GuestBillsService {
   }
 
   private async writeShares(tx: Tx, tenantId: string, bill: BillWithTenders): Promise<BillShareView[]> {
-    const lines = await tx.orderLine.findMany({ where: { orderId: bill.orderId }, include: { modifiers: true }, orderBy: { createdAt: 'asc' } })
+    const lines = await tx.orderLine.findMany({ where: { orderId: bill.orderId, voidedAt: null }, include: { modifiers: true }, orderBy: { createdAt: 'asc' } })
     const totals = new Map<string, { guestName: string; lineTotal: bigint }>()
     for (const line of lines) {
       // Every qr-placed line carries a guestId (guest/orders' placeOrder) -
