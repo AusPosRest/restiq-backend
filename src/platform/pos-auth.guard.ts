@@ -42,16 +42,17 @@ async function outletsReached(tx: Tx, request: Request): Promise<string[]> {
 
   const route = (request.route as { path?: string } | undefined)?.path ?? ''
   const id = params.id && UUID.test(params.id) ? params.id : undefined
-  const lookups: Promise<{ outletId: string } | null>[] = []
+  // One query at a time - they share the transaction's single connection.
+  const lookups: (() => Promise<{ outletId: string } | null>)[] = []
   const select = { outletId: true } as const
-  if (params.orderId && UUID.test(params.orderId)) lookups.push(tx.order.findUnique({ where: { id: params.orderId }, select }))
-  if (params.ticketId && UUID.test(params.ticketId)) lookups.push(tx.ticket.findUnique({ where: { id: params.ticketId }, select }))
-  if (id && route.includes('/bills/:id')) lookups.push(tx.bill.findUnique({ where: { id }, select }))
-  if (id && route.includes('/shifts/:id')) lookups.push(tx.shift.findUnique({ where: { id }, select }))
-  if (id && route.includes('/payment-intents/:id')) lookups.push(tx.paymentIntent.findUnique({ where: { id }, select }))
-  if (id && route.includes('/print-jobs/:id')) lookups.push(tx.printJob.findUnique({ where: { id }, select }))
-  const owned = (await Promise.all(lookups)).map((row) => row?.outletId)
-  return [...named, ...owned].filter((outletId): outletId is string => typeof outletId === 'string')
+  if (params.orderId && UUID.test(params.orderId)) lookups.push(() => tx.order.findUnique({ where: { id: params.orderId }, select }))
+  if (params.ticketId && UUID.test(params.ticketId)) lookups.push(() => tx.ticket.findUnique({ where: { id: params.ticketId }, select }))
+  if (id && route.includes('/bills/:id')) lookups.push(() => tx.bill.findUnique({ where: { id }, select }))
+  if (id && route.includes('/shifts/:id')) lookups.push(() => tx.shift.findUnique({ where: { id }, select }))
+  if (id && route.includes('/payment-intents/:id')) lookups.push(() => tx.paymentIntent.findUnique({ where: { id }, select }))
+  if (id && route.includes('/print-jobs/:id')) lookups.push(() => tx.printJob.findUnique({ where: { id }, select }))
+  for (const lookup of lookups) named.push((await lookup())?.outletId)
+  return named.filter((outletId): outletId is string => typeof outletId === 'string')
 }
 
 /** Injects the guard-verified pos staff session into a handler parameter. */
