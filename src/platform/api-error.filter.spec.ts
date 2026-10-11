@@ -5,6 +5,7 @@ import { ApiErrorFilter } from './api-error.filter'
 function run(exception: unknown): { status: number; body: unknown } {
   const out = { status: 0, body: undefined as unknown }
   const response = {
+    headersSent: false,
     status(code: number) {
       out.status = code
       return this

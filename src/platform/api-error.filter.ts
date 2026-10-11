@@ -26,6 +26,11 @@ export class ApiErrorFilter implements ExceptionFilter {
 
   catch(exception: unknown, host: ArgumentsHost): void {
     const response = host.switchToHttp().getResponse<Response>()
+    if (response.headersSent) {
+      // Too late to answer (e.g. a stream already started) - log it and let the connection end as it is.
+      this.logger.error(exception instanceof Error ? (exception.stack ?? exception.message) : String(exception))
+      return
+    }
     if (!(exception instanceof HttpException)) {
       const known = PRISMA_ERRORS[prismaCode(exception) ?? '']
       if (!known || known.status >= 500) this.logger.error(exception instanceof Error ? (exception.stack ?? exception.message) : String(exception))
