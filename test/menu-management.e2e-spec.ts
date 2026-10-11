@@ -694,6 +694,19 @@ describe('/admin/v1/menu (e2e)', () => {
       expect(audit[0]?.reason).toBe('Initial price')
     })
 
+    it('refuses a price in a currency other than the tenant\'s own (restiq-backend#208, SE-8)', async () => {
+      const { token } = await createOwner(prisma)
+      const { item } = await itemWithVariant(token)
+      const res = await authed(request(httpServer).post(`/admin/v1/menu/items/${item.id}/prices`), token).send({
+        channel: 'aggregator',
+        priceMinor: 100,
+        currency: 'USD',
+        reason: 'Wrong currency',
+      })
+      expect(res.status).toBe(400)
+      expect(await prisma.itemPrice.count({ where: { itemId: item.id, currency: 'USD' } })).toBe(0)
+    })
+
     it('current-price read resolves the immediate price and ignores a future-scheduled one', async () => {
       const { token } = await createOwner(prisma)
       const { item, variantId } = await itemWithVariant(token)

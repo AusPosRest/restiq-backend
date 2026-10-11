@@ -296,6 +296,15 @@ export class BillsService {
         }
       }
 
+      // restiq-backend#208 (PE-17): cash goes into a drawer, so it needs an
+      // open shift at this outlet - otherwise the cash-up can never reconcile it.
+      if (dto.tenders.some((t) => t.method === 'cash')) {
+        const openShift = await tx.shift.findFirst({ where: { outletId: bill.outletId, closedAt: null }, select: { id: true } })
+        if (!openShift) {
+          throw new ConflictException({ code: 'shift_not_open', message: 'Open a shift with your starting cash float before taking cash' })
+        }
+      }
+
       for (const tender of dto.tenders) {
         await createTenderRecord(tx, {
           tenantId: staff.tenantId,

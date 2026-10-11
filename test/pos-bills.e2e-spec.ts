@@ -127,6 +127,8 @@ async function wipe(prisma: PrismaClient): Promise<void> {
   await prisma.ticket.deleteMany()
   await prisma.order.deleteMany()
   await prisma.clockEvent.deleteMany()
+  await prisma.cashMovement.deleteMany()
+  await prisma.shift.deleteMany()
   await prisma.staffUser.deleteMany()
   await prisma.role.deleteMany()
   await prisma.outletCapability.deleteMany()
@@ -244,6 +246,11 @@ async function createStaff(
   const role = await prisma.role.upsert({ where: { tenantId_name: { tenantId, name: opts?.isManager ? 'Manager' : 'Cashier' } }, update: {}, create: { tenantId, name: opts?.isManager ? 'Manager' : 'Cashier', isSystem: true, isManager: opts?.isManager ?? false } })
   const pinHash = opts?.pin ? await argon2.hash(opts.pin) : undefined
   const staff = await prisma.staffUser.create({ data: { tenantId, roleId: role.id, name, pinHash } })
+  // restiq-backend#208 (PE-17): cash needs an open shift at the outlet - the
+  // first staff member created for an outlet opens one.
+  if (!(await prisma.shift.findFirst({ where: { outletId, closedAt: null } }))) {
+    await prisma.shift.create({ data: { tenantId, outletId, openedByStaffId: staff.id, floatMinor: 0n } })
+  }
   const token = signPosToken({ sessionVersion: 0, id: staff.id, tenantId, outletId, name })
   return { id: staff.id, token }
 }
@@ -269,6 +276,9 @@ describe('/pos/v1 bill and settle (e2e)', () => {
   })
 
   afterAll(async () => {
+    // Leave no shifts behind (PE-17 fixtures open them): other spec files'
+    // wipe() helpers predate them and would trip their FK on staff_users.
+    await wipe(prisma)
     await app.close()
     await prisma.$disconnect()
   })
@@ -410,7 +420,7 @@ describe('/pos/v1 bill and settle (e2e)', () => {
       expect(rows).toHaveLength(1)
     })
 
-    it('rejects billing an order closed via a direct status transition with no bill ever created', async () => {
+    it('rejects billing an order that is already closed with no bill ever created', async () => {
       const tenantId = await createTenant(prisma)
       const outletId = await createOutlet(prisma, tenantId)
       const tableId = await createTable(prisma, tenantId, outletId)
@@ -418,7 +428,8 @@ describe('/pos/v1 bill and settle (e2e)', () => {
       const opened = await authed(request(httpServer).post(`/pos/v1/outlets/${outletId}/tables/${tableId}/order`), owner.token).send()
       const orderId = (opened.body as OrderBody).id
       await authed(request(httpServer).patch(`/pos/v1/orders/${orderId}/status`), owner.token).send({ status: 'sent' })
-      await authed(request(httpServer).patch(`/pos/v1/orders/${orderId}/status`), owner.token).send({ status: 'closed' })
+      // The status route can no longer close it (restiq-backend#208, SE-5) - legacy data can still hold one.
+      await prisma.order.update({ where: { id: orderId }, data: { status: 'closed' } })
 
       const res = await authed(request(httpServer).post(`/pos/v1/orders/${orderId}/bill`), owner.token).send()
       expect(res.status).toBe(409)
@@ -487,6 +498,24 @@ describe('/pos/v1 bill and settle (e2e)', () => {
       })
       expect(res.status).toBe(200)
       expect((res.body as BillBody).tenders).toHaveLength(2)
+    })
+
+    it('refuses cash while no shift is open at the outlet, and takes it once one is (restiq-backend#208, PE-17)', async () => {
+      const tenantId = await createTenant(prisma)
+      const outletId = await createOutlet(prisma, tenantId)
+      const { orderId, ownerToken } = await setUpSentOrder(tenantId, outletId, 10000)
+      await prisma.shift.updateMany({ where: { outletId }, data: { closedAt: new Date() } })
+      const billId = ((await authed(request(httpServer).post(`/pos/v1/orders/${orderId}/bill`), ownerToken).send()).body as BillBody).id
+
+      const refused = await authed(request(httpServer).post(`/pos/v1/bills/${billId}/finalize`), ownerToken).send({ tenders: [{ method: 'cash', amountMinor: 21000 }] })
+      expect(refused.status).toBe(409)
+      expect((refused.body as ErrorBody).error.code).toBe('shift_not_open')
+      expect(await prisma.tender.count({ where: { billId } })).toBe(0)
+
+      const opened = await authed(request(httpServer).post('/pos/v1/shifts'), ownerToken).send({ outletId, floatMinor: 100000 })
+      expect(opened.status).toBe(201)
+      const paid = await authed(request(httpServer).post(`/pos/v1/bills/${billId}/finalize`), ownerToken).send({ tenders: [{ method: 'cash', amountMinor: 21000 }] })
+      expect(paid.status).toBe(200)
     })
 
     it('records an external tender with its reference, and rejects one without (issue #146)', async () => {

@@ -7,6 +7,7 @@ import { BadRequestException, Injectable, NotFoundException } from '@nestjs/comm
 import type { PriceChannel } from '../../generated/prisma/client'
 import { AdminPrincipal, RegionRegistryService } from '../../platform'
 import { CreatePriceDto, CurrentPriceView, ItemPriceView } from './items.dtos'
+import { currencyForCountry } from './commit-items'
 import { resolveCurrentPrice } from './pricing'
 import { setTenantContext } from './tenant-context'
 
@@ -35,6 +36,11 @@ export class PricesService {
       const item = await tx.menuItem.findUnique({ where: { id: itemId } })
       if (!item || item.tenantId !== owner.tenantId) {
         throw new NotFoundException({ code: 'not_found', message: 'No such menu item' })
+      }
+      // restiq-backend#208 (SE-8): a price is always in the tenant's own currency.
+      const tenant = await tx.tenant.findUniqueOrThrow({ where: { id: owner.tenantId }, select: { country: true } })
+      if (dto.currency !== currencyForCountry(tenant.country)) {
+        throw new BadRequestException({ code: 'validation_failed', message: `Prices must be in ${currencyForCountry(tenant.country)}` })
       }
       if (dto.variantId) {
         const variant = await tx.itemVariant.findUnique({ where: { id: dto.variantId } })

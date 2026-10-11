@@ -362,6 +362,25 @@ describe('/pos/v1 order lines (e2e)', () => {
       expect((res.body as ErrorBody).error.code).toBe('no_price')
     })
 
+    it('rejects an item switched off (86\'d) tenant-wide or at this outlet, like the guest cart does (restiq-backend#208, SE-25)', async () => {
+      const tenantId = await createTenant(prisma)
+      const outletId = await createOutlet(prisma, tenantId)
+      const tableId = await createTable(prisma, tenantId, outletId)
+      const waiter = await createStaff(prisma, tenantId, outletId, 'Asha')
+      const off = await createItemWithPrice(prisma, tenantId, 19000)
+      await prisma.menuItem.update({ where: { id: off.itemId }, data: { available: false } })
+      const offHere = await createItemWithPrice(prisma, tenantId, 19000)
+      await prisma.itemOutletOverride.create({ data: { tenantId, itemId: offHere.itemId, outletId, available: false } })
+      const order = await openOrder(outletId, tableId, waiter.token)
+
+      for (const itemId of [off.itemId, offHere.itemId]) {
+        const res = await authed(request(httpServer).post(`/pos/v1/orders/${order.id}/lines`), waiter.token).send({ itemId, quantity: 1 })
+        expect(res.status).toBe(400)
+        expect((res.body as ErrorBody).error.code).toBe('item_unavailable')
+      }
+      expect(await prisma.orderLine.count({ where: { orderId: order.id } })).toBe(0)
+    })
+
     it('rejects an item that belongs to another tenant', async () => {
       const tenantId = await createTenant(prisma)
       const otherTenantId = await createTenant(prisma, 'Curry Leaf Kitchens')
@@ -396,7 +415,8 @@ describe('/pos/v1 order lines (e2e)', () => {
       const { itemId } = await createItemWithPrice(prisma, tenantId, 19000)
       const order = await openOrder(outletId, tableId, waiter.token)
       await authed(request(httpServer).patch(`/pos/v1/orders/${order.id}/status`), waiter.token).send({ status: 'sent' })
-      await authed(request(httpServer).patch(`/pos/v1/orders/${order.id}/status`), waiter.token).send({ status: 'closed' })
+      // Only finalising a bill closes an order (restiq-backend#208, SE-5) - closed directly here.
+      await prisma.order.update({ where: { id: order.id }, data: { status: 'closed' } })
 
       const res = await authed(request(httpServer).post(`/pos/v1/orders/${order.id}/lines`), waiter.token).send({ itemId, quantity: 1 })
       expect(res.status).toBe(409)

@@ -102,6 +102,33 @@ async function computeCashSalesMinor(tx: Tx, tenantId: string, outletId: string,
   return cashTenders.reduce((sum, t) => sum + t.amountMinor, 0n)
 }
 
+/**
+ * Cash handed back across the counter for refunds issued at this outlet
+ * since the shift opened (restiq-backend#208, SE-16). A credit note records
+ * no refund method, so a refund is taken as going back in cash up to the
+ * cash its bill was paid with (net of that bill's earlier refunds) - any
+ * rest went back to the card/UPI/external tender that paid it, not the drawer.
+ */
+async function computeCashRefundsMinor(tx: Tx, tenantId: string, outletId: string, sinceOpenedAt: Date): Promise<bigint> {
+  const inShift = await tx.creditNote.findMany({ where: { tenantId, createdAt: { gte: sinceOpenedAt }, originalBill: { outletId } }, select: { originalBillId: true } })
+  if (inShift.length === 0) return 0n
+  const notes = await tx.creditNote.findMany({
+    where: { tenantId, originalBillId: { in: [...new Set(inShift.map((n) => n.originalBillId))] } },
+    select: { originalBillId: true, subtotalMinor: true, taxMinor: true, createdAt: true, originalBill: { select: { pricesIncludeTax: true, tenders: { where: { method: 'cash' }, select: { amountMinor: true } } } } },
+    orderBy: [{ createdAt: 'asc' }, { id: 'asc' }],
+  })
+  const cashLeft = new Map<string, bigint>()
+  let refundedMinor = 0n
+  for (const note of notes) {
+    const left = cashLeft.get(note.originalBillId) ?? note.originalBill.tenders.reduce((sum, t) => sum + t.amountMinor, 0n)
+    const noteTotal = note.originalBill.pricesIncludeTax ? note.subtotalMinor : note.subtotalMinor + note.taxMinor
+    const cash = noteTotal < left ? noteTotal : left
+    cashLeft.set(note.originalBillId, left - cash)
+    if (note.createdAt >= sinceOpenedAt) refundedMinor += cash
+  }
+  return refundedMinor
+}
+
 // The pos guard only verifies the JWT signature/audience (issue #44's real
 // login isn't wired up yet - see pos-jwt.ts's stub notice); it never touches
 // the database. Every mutating action here re-checks that the session's
@@ -229,7 +256,8 @@ export class ShiftsService {
       // time, so an outlet + "finalized since this shift opened" filter is
       // unambiguous - no new column needed).
       const cashSalesMinor = await computeCashSalesMinor(tx, staff.tenantId, shift.outletId, shift.openedAt)
-      const expectedMinor = shift.floatMinor + cashSalesMinor - paidOutMinor - bankDropMinor
+      const cashRefundsMinor = await computeCashRefundsMinor(tx, staff.tenantId, shift.outletId, shift.openedAt)
+      const expectedMinor = shift.floatMinor + cashSalesMinor - cashRefundsMinor - paidOutMinor - bankDropMinor
       const countedMinor = BigInt(dto.countedMinor)
       const overShortMinor = countedMinor - expectedMinor
 

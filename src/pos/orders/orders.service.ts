@@ -124,12 +124,13 @@ export async function buildOrderView(tx: Tx, order: Order): Promise<OrderView> {
   }
 }
 
-// open->sent->closed only, forward-only - no OrderLine yet so "sent" just
-// marks the order handed to the kitchen; "closed" is a placeholder ahead of
-// pos/CAP-7's Bill (finalising a Bill will be what actually closes an order).
+// open->sent only, forward-only. "closed" is never reachable through this
+// route (restiq-backend#208, SE-5): finalising the order's Bill is what
+// closes it (bill-core's commitFinalize), so an order can never end up
+// closed with no bill and no payment behind it.
 const FORWARD_TRANSITIONS: Record<Order['status'], Order['status'][]> = {
   open: ['sent'],
-  sent: ['closed'],
+  sent: [],
   closed: [],
 }
 

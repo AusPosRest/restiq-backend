@@ -97,6 +97,8 @@ async function wipe(prisma: PrismaClient): Promise<void> {
   await prisma.ticket.deleteMany()
   await prisma.order.deleteMany()
   await prisma.clockEvent.deleteMany()
+  await prisma.cashMovement.deleteMany()
+  await prisma.shift.deleteMany()
   await prisma.staffUser.deleteMany()
   await prisma.role.deleteMany()
   await prisma.outletCapability.deleteMany()
@@ -158,6 +160,11 @@ async function createTable(prisma: PrismaClient, tenantId: string, outletId: str
 async function createStaff(prisma: PrismaClient, tenantId: string, outletId: string, name: string): Promise<{ id: string; token: string }> {
   const role = await prisma.role.upsert({ where: { tenantId_name: { tenantId, name: 'Cashier' } }, update: {}, create: { tenantId, name: 'Cashier', isSystem: true, isManager: false } })
   const staff = await prisma.staffUser.create({ data: { tenantId, roleId: role.id, name } })
+  // restiq-backend#208 (PE-17): cash needs an open shift at the outlet - the
+  // first staff member created for an outlet opens one.
+  if (!(await prisma.shift.findFirst({ where: { outletId, closedAt: null } }))) {
+    await prisma.shift.create({ data: { tenantId, outletId, openedByStaffId: staff.id, floatMinor: 0n } })
+  }
   const token = signPosToken({ sessionVersion: 0, id: staff.id, tenantId, outletId, name })
   return { id: staff.id, token }
 }
@@ -399,6 +406,26 @@ describe('/pos/v1 payment intents - simulated card terminal (e2e)', () => {
       expect(late.status).toBe(200)
       expect((late.body as IntentBody).status).toBe('succeeded')
       expect(await prisma.tender.count({ where: { billId, method: 'card_terminal' } })).toBe(1)
+    })
+  })
+
+  describe('a late capture on a bill already settled another way (restiq-backend#208, SE-28)', () => {
+    it('writes no second tender on the finalised bill and flags the capture for a refund', async () => {
+      const { billId, token } = await setUpOpenBill()
+      const intent = (await sendToTerminal(billId, token, 21000)).body as IntentBody
+      await prisma.paymentIntent.update({ where: { id: intent.id }, data: { expiresAt: new Date(Date.now() - 1000) } })
+      expect(((await authed(request(httpServer).get(`/pos/v1/payment-intents/${intent.id}`), token)).body as IntentBody).status).toBe('expired')
+
+      const cash = await authed(request(httpServer).post(`/pos/v1/bills/${billId}/finalize`), token).send({ tenders: [{ method: 'cash', amountMinor: 21000 }] })
+      expect(cash.status).toBe(200)
+
+      const late = await authed(request(httpServer).post(`/pos/v1/payment-intents/${intent.id}/simulate`), token).send({ outcome: 'success' })
+      expect(late.status).toBe(200)
+      expect(late.body as IntentBody).toMatchObject({ status: 'succeeded', tenderId: null, failureReason: 'late_capture_refund_due' })
+
+      const tenders = await prisma.tender.findMany({ where: { billId } })
+      expect(tenders.map((t) => [t.method, Number(t.amountMinor)])).toEqual([['cash', 21000]])
+      expect(await prisma.auditEvent.count({ where: { action: 'payment.late_capture_refund_due' } })).toBe(1)
     })
   })
 
