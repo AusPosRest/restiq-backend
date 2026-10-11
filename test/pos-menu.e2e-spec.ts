@@ -59,6 +59,7 @@ async function wipe(prisma: PrismaClient): Promise<void> {
   // this file behaves the same way regardless of which spec runs last.
   await prisma.creditNote.deleteMany()
   await prisma.orderLineModifier.deleteMany()
+  await prisma.ticketLine.deleteMany()
   await prisma.orderLine.deleteMany()
   await prisma.invoice.deleteMany()
   await prisma.subscription.deleteMany()
