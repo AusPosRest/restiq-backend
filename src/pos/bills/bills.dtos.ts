@@ -208,9 +208,10 @@ export interface InvoiceView {
   // invented here - a future receipt-template story owns any of that). Null
   // on the pro-forma view - an open bill has none yet.
   invoiceNumber: string | null
-  // "Tax Invoice" for an AU/ABN seller (AU's GST law requires the literal
-  // phrase on a compliant tax invoice), "Invoice" otherwise; "Bill" for an
-  // open bill's pro-forma view, regardless of country (issue #125).
+  // "Tax Invoice" for a GST-registered seller (both countries' GST law
+  // requires the literal phrase), "Bill of Supply" for an IN composition
+  // dealer, "Receipt" for an unregistered AU seller; "Bill" for an open
+  // bill's pro-forma view, regardless of country (issue #125).
   title: string
   // Null on the pro-forma view - an open bill has no finalizedAt yet.
   issuedAt: string | null
@@ -218,6 +219,13 @@ export interface InvoiceView {
   seller: InvoiceSellerView
   footerMessage: string | null
   lines: InvoiceLineView[]
+  // IN GST invoice fields (PE-18): SAC 996331 (restaurant service) and the
+  // place of supply read off the seller's GSTIN state code. Null for AU and
+  // for an IN composition dealer.
+  sacCode: string | null
+  placeOfSupply: string | null
+  // The counter token the customer was called by; null for a table order.
+  tokenNumber: number | null
   subtotalMinor: number
   discountMinor: number | null
   discountReason: string | null

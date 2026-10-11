@@ -477,7 +477,7 @@ describe('/guest/v1 checkout and split payment, simulated (e2e)', () => {
       expect(res.status).toBe(200)
       const invoice = res.body as InvoiceBody
       expect(invoice.invoiceNumber).toBe(String((paid.body as BillBody).billNumber))
-      expect(invoice.title).toBe('Invoice')
+      expect(invoice.title).toBe('Tax Invoice')
       expect(invoice.footerMessage).toBeNull()
       expect(invoice.seller.phone).toBe('+91 90000 00000')
       expect(invoice.seller.email).toBe('contact@test.example')
