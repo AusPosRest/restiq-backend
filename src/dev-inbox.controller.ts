@@ -1,6 +1,6 @@
-// #198: the mail simulator's inbox, for testing without Mailjet. Answers 404 unless MAIL_PROVIDER=simulator,
-// which production never allows (production-config.ts), so password-reset and invite links stay private there.
-// restiq-backend#203: lives under /ops/* so the global OpsAuthGuard requires an operator session too.
+// #198: the mail simulator's inbox, for testing without Mailjet. restiq-backend#203: lives under /ops/* so the
+// global OpsAuthGuard requires an operator session. #213: with a real provider (production) it holds only the
+// mail of tenants in Test mode, so a real restaurant's invite and reset links never appear here.
 import { Controller, Get, Query } from '@nestjs/common'
 import { InboxMessage, MailService } from './platform'
 

@@ -37,6 +37,7 @@ import { ReportsService } from './reports/reports.service'
 import { AdminRolesController } from './staff/roles.controller'
 import { AdminStaffController } from './staff/staff.controller'
 import { StaffService } from './staff/staff.service'
+import { AdminTenantController } from './tenant.controller'
 
 @Module({
   imports: [PlatformModule, OpsModule],
@@ -60,6 +61,7 @@ import { StaffService } from './staff/staff.service'
     AdminReportsController,
     AdminTaxController,
     AdminAgreementController,
+    AdminTenantController,
   ],
   providers: [
     AdminAuthService,

@@ -1,6 +1,6 @@
 import { Body, Controller, Delete, Get, HttpCode, Param, ParseIntPipe, ParseUUIDPipe, Patch, Post, Put, Query } from '@nestjs/common'
 import { CurrentOperator, OpsPrincipal, slugProblem } from '../../platform'
-import { ReasonDto, UpdateBrandingDto, UpdateTenantDto } from './directory.dtos'
+import { ReasonDto, SetModeDto, UpdateBrandingDto, UpdateTenantDto } from './directory.dtos'
 import { InviteView, TenantDetail, TenantDirectoryService, TenantListResult } from './directory.service'
 import { SubmitTenantDto } from './submit.dto'
 import { DraftView, OpsTenantsService, ProvisionResult } from './tenants.service'
@@ -32,7 +32,7 @@ export class OpsTenantsController {
   }
 
   @Get('draft')
-  async getDraft(@CurrentOperator() operator: OpsPrincipal): Promise<{ draft: DraftView }> {
+  async getDraft(@CurrentOperator() operator: OpsPrincipal): Promise<{ draft: DraftView | null }> {
     return { draft: await this.tenants.getDraft(operator.id) }
   }
 
@@ -118,6 +118,17 @@ export class OpsTenantsController {
     @Body() dto: ReasonDto,
   ): Promise<{ tenant: { id: string; status: string } }> {
     return this.directory.reactivate(operator, id, dto.reason)
+  }
+
+  // #213: Test / Live mode. Audited like every other tenant mutation.
+  @Post(':id/mode')
+  @HttpCode(200)
+  setMode(
+    @CurrentOperator() operator: OpsPrincipal,
+    @Param('id', ParseUUIDPipe) id: string,
+    @Body() dto: SetModeDto,
+  ): Promise<{ tenant: { id: string; testMode: boolean; liveSince: string | null } }> {
+    return this.directory.setMode(operator, id, dto.mode, dto.reason)
   }
 
   @Delete(':id')

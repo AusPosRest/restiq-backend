@@ -559,6 +559,32 @@ describe('/pos/v1 payment intents - simulated card terminal (e2e)', () => {
       expect((await prisma.bill.findUniqueOrThrow({ where: { id: billId } })).status).toBe('open')
     })
 
+    // #213: a Test-mode tenant keeps the simulated terminal with the server switch off; a Live one never gets it.
+    it('a Test-mode tenant still gets simulated card payments end to end, and its invoice says so', async () => {
+      const { tenantId, billId, token } = await setUpOpenBill()
+      await prisma.tenant.update({ where: { id: tenantId }, data: { liveSince: null } })
+      process.env.PAYMENTS_SIMULATOR = 'off'
+      // The POS / KDS header reads the mode for its TEST badge.
+      expect(((await authed(request(httpServer).get('/pos/v1/tenant'), token)).body as { testMode: boolean }).testMode).toBe(true)
+
+      const sent = await sendToTerminal(billId, token, 21000)
+      expect(sent.status).toBe(201)
+      const intent = sent.body as IntentBody
+      const approve = await authed(request(httpServer).post(`/pos/v1/payment-intents/${intent.id}/simulate`), token).send({ outcome: 'success' })
+      expect(approve.status).toBe(200)
+      const finalized = await authed(request(httpServer).post(`/pos/v1/bills/${billId}/finalize`), token).send({ tenders: [] })
+      expect(finalized.status).toBe(200)
+      const invoice = await authed(request(httpServer).get(`/pos/v1/bills/${billId}/invoice`), token)
+      expect((invoice.body as { testMode: boolean }).testMode).toBe(true)
+
+      // Once Live, the same tenant's simulated payments stop - and that old test invoice stays a test one.
+      await prisma.tenant.update({ where: { id: tenantId }, data: { liveSince: new Date() } })
+      expect(((await authed(request(httpServer).get(`/pos/v1/bills/${billId}/invoice`), token)).body as { testMode: boolean }).testMode).toBe(true)
+      const { billId: liveBill, token: liveToken } = await setUpOpenBill()
+      expect((await sendToTerminal(liveBill, liveToken, 21000)).status).toBe(409)
+      expect(((await authed(request(httpServer).get(`/pos/v1/bills/${liveBill}/invoice`), liveToken)).body as { testMode: boolean }).testMode).toBe(false)
+    })
+
     it('anything but the exact value "on" is off', async () => {
       const { billId, token } = await setUpOpenBill()
       for (const value of ['', 'true', 'ON', '1']) {

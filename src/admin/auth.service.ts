@@ -131,7 +131,7 @@ export class AdminAuthService {
       await setOwnerLoginContext(tx)
       await setPasswordResetContext(tx)
       const owners = await tx.ownerUser.findMany({ where: { email: normalized } })
-      const issued: string[] = []
+      const issued: Array<{ link: string; tenantId: string }> = []
       for (const owner of owners) {
         // A new request ends any link still open for this owner.
         await tx.ownerPasswordReset.updateMany({ where: { ownerId: owner.id, usedAt: null }, data: { usedAt: new Date() } })
@@ -139,12 +139,12 @@ export class AdminAuthService {
         await tx.ownerPasswordReset.create({
           data: { tenantId: owner.tenantId, ownerId: owner.id, tokenHash: createHash('sha256').update(raw).digest('hex'), expiresAt: new Date(Date.now() + RESET_TOKEN_TTL_MS) },
         })
-        issued.push(webLink(`/admin/reset-password?token=${raw}`))
+        issued.push({ link: webLink(`/admin/reset-password?token=${raw}`), tenantId: owner.tenantId })
       }
       return issued
     })
-    for (const link of links) {
-      void this.mail.send({ to: normalized, ...resetEmail(link) }).catch((error: unknown) => this.logger.error(`Password reset email failed: ${String(error)}`))
+    for (const { link, tenantId } of links) {
+      void this.mail.send({ to: normalized, ...resetEmail(link) }, { tenantId }).catch((error: unknown) => this.logger.error(`Password reset email failed: ${String(error)}`))
     }
     return { accepted: true }
   }

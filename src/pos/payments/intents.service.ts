@@ -12,7 +12,7 @@
 // handler (B6) calls the same confirmIntent.
 import { BadRequestException, ConflictException, ForbiddenException, Injectable, NotFoundException } from '@nestjs/common'
 import type { Prisma } from '../../generated/prisma/client'
-import { paymentsSimulatorEnabled, PosPrincipal, RegionRegistryService, uuidv7 } from '../../platform'
+import { paymentsSimulatorFor, PosPrincipal, RegionRegistryService, uuidv7 } from '../../platform'
 import { isUniqueViolation, loadBill, refreshOpenBillTotals, toBillView } from '../bills'
 import { setTenantContext } from '../tenant-context'
 import { linkedPeripheral, queueFor } from '../device-routing'
@@ -50,16 +50,17 @@ export class PaymentIntentsService {
    * never exceed what is still due after every tender already on the bill.
    */
   async createIntent(staff: PosPrincipal, billId: string, dto: CreatePaymentIntentDto): Promise<{ view: PaymentIntentView; created: boolean }> {
-    // #170: the simulator is the only card provider so far - with it off there is nothing to send to.
-    if (!paymentsSimulatorEnabled()) {
-      throw new ConflictException({
-        code: 'provider_unavailable',
-        message: 'Card terminal payments are not connected yet - take the card on your own terminal and record it as an external payment',
-      })
-    }
     const plane = this.plane()
     return plane.$transaction(async (tx) => {
       await setTenantContext(tx, staff.tenantId)
+      // #170: the simulator is the only card provider so far - with it off there is nothing to send to.
+      // #213: a tenant in Test mode always has it.
+      if (!(await paymentsSimulatorFor(tx, staff.tenantId))) {
+        throw new ConflictException({
+          code: 'provider_unavailable',
+          message: 'Card terminal payments are not connected yet - take the card on your own terminal and record it as an external payment',
+        })
+      }
       const bill = await refreshOpenBillTotals(tx, await loadBill(tx, staff.tenantId, billId))
       if (bill.status === 'finalized') {
         throw new ConflictException({ code: 'already_finalized', message: 'This bill has already been finalised' })
@@ -197,7 +198,7 @@ export class PaymentIntentsService {
       await setTenantContext(tx, staff.tenantId)
       const intent = await loadIntent(tx, staff.tenantId, intentId)
       // #170: with the simulator off the webhook does not exist, for old intents too.
-      if (intent.provider !== 'simulated' || !paymentsSimulatorEnabled()) {
+      if (intent.provider !== 'simulated' || !(await paymentsSimulatorFor(tx, staff.tenantId))) {
         throw new NotFoundException({ code: 'not_found', message: 'No such payment intent' })
       }
 

@@ -125,6 +125,8 @@ model Tenant {
   // Flat map of design-token overrides (logo URL, accent color, ...) applied
   // to the tenant's guest-facing surfaces.
   brandingTokens    Json             @default("{}") @map("branding_tokens")
+  // #213 Test / Live mode: when the tenant last went Live; null = Test mode (see platform/tenant-mode.ts).
+  liveSince         DateTime?        @default(now()) @map("live_since") @db.Timestamptz(6)
   createdAt         DateTime         @default(now()) @map("created_at") @db.Timestamptz(6)
   updatedAt         DateTime         @updatedAt @map("updated_at") @db.Timestamptz(6)
   deletedAt         DateTime?        @map("deleted_at") @db.Timestamptz(6)

@@ -1,4 +1,4 @@
-import { BadRequestException, ConflictException, Injectable, Logger, NotFoundException } from '@nestjs/common'
+import { BadRequestException, ConflictException, Injectable, Logger } from '@nestjs/common'
 import { createHash, randomBytes } from 'node:crypto'
 import type { Prisma } from '../../generated/prisma/client'
 import { assertTimezonesFitCountry, MailMessage, MailService, OpsPrincipal, PrismaService, RegionRegistryService, slugify, slugProblem, uuidv7, webLink } from '../../platform'
@@ -122,11 +122,10 @@ export class OpsTenantsService {
 
   // --- Drafts (control plane): an operator's in-flight wizard, never a tenant.
 
-  async getDraft(operatorId: string): Promise<DraftView> {
+  /** PE-6: no draft is a normal answer (null), not an error. */
+  async getDraft(operatorId: string): Promise<DraftView | null> {
     const draft = await this.prisma.client.onboardingDraft.findUnique({ where: { operatorId } })
-    if (!draft) {
-      throw new NotFoundException({ code: 'not_found', message: 'No onboarding draft exists for this operator' })
-    }
+    if (!draft) return null
     return { steps: draft.steps as Record<string, unknown>, updatedAt: draft.updatedAt.toISOString() }
   }
 
@@ -199,6 +198,8 @@ export class OpsTenantsService {
             status: 'provisioning',
             plan: dto.subscription.plan,
             billingPeriod: dto.subscription.billingPeriod,
+            // #213: Live from day one unless the wizard's "Test tenant" box was ticked.
+            ...(dto.testMode && { liveSince: null }),
           },
         })
 
@@ -293,7 +294,7 @@ export class OpsTenantsService {
 
     // Sent after the commit, in the background: a mail outage must not undo the onboarding.
     void this.mail
-      .send(ownerInviteEmail(invite.email, dto.ownerInvite.firstName, dto.business.companyName, inviteToken))
+      .send(ownerInviteEmail(invite.email, dto.ownerInvite.firstName, dto.business.companyName, inviteToken), { tenantId })
       .catch((error: unknown) => this.logger.error(`Owner invite email failed: ${String(error)}`))
 
     return {

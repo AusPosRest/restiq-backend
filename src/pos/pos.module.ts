@@ -22,6 +22,7 @@ import { PaymentIntentsService } from './payments/intents.service'
 import { PosShiftsController } from './shifts/shifts.controller'
 import { ShiftsService } from './shifts/shifts.service'
 import { PosTablesController } from './tables/tables.controller'
+import { PosTenantController } from './tenant.controller'
 
 @Module({
   imports: [PlatformModule, GuestModule, KitchenModule],
@@ -36,6 +37,7 @@ import { PosTablesController } from './tables/tables.controller'
     PosPaymentIntentsController,
     PosTablesController,
     PosDevicesController,
+    PosTenantController,
   ],
   providers: [
     PosAuthService,
