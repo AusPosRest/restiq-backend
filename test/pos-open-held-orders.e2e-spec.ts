@@ -197,7 +197,8 @@ describe('/pos/v1 outlet-wide open and held orders (e2e)', () => {
       await authed(request(httpServer).post(`/pos/v1/outlets/${outletId}/tables/${tableId}/order`), waiter.token).send()
     ).body as OrderBody
     await authed(request(httpServer).patch(`/pos/v1/orders/${order.id}/status`), waiter.token).send({ status: 'sent' })
-    await authed(request(httpServer).patch(`/pos/v1/orders/${order.id}/status`), waiter.token).send({ status: 'closed' })
+    // Only finalising a bill closes an order (restiq-backend#208, SE-5) - closed directly here.
+    await prisma.order.update({ where: { id: order.id }, data: { status: 'closed' } })
 
     const res = await authed(request(httpServer).get(`/pos/v1/outlets/${outletId}/orders`), waiter.token)
     expect(res.status).toBe(200)

@@ -272,7 +272,6 @@ describe('/guest/v1 order status tracking (e2e)', () => {
       await enableQrOrdering(prisma, tenantId, outletId)
       const item = await createItemWithPrice(prisma, tenantId, 15000)
       const { token, sessionId } = await startSession(outletId, tableId)
-      const staffToken = await createStaff(prisma, tenantId, outletId, 'Server Priya')
 
       await authed(request(httpServer).post('/guest/v1/cart/lines'), token).send({ itemId: item, quantity: 1 })
       const firstOrder = (await authed(request(httpServer).post('/guest/v1/orders'), token).send({})).body as PlacedOrderBody
@@ -280,7 +279,8 @@ describe('/guest/v1 order status tracking (e2e)', () => {
       // time - pos/CAP-2 constraint) means a second order can only be placed
       // on the same table once the first is closed - the same thing a staff
       // member would do after settling the first round's bill.
-      await authed(request(httpServer).patch(`/pos/v1/orders/${firstOrder.orderId}/status`), staffToken).send({ status: 'closed' })
+      // Only finalising a bill closes an order (restiq-backend#208, SE-5) - closed directly here.
+      await prisma.order.update({ where: { id: firstOrder.orderId }, data: { status: 'closed' } })
       await authed(request(httpServer).post('/guest/v1/cart/lines'), token).send({ itemId: item, quantity: 2 })
       const secondOrder = (await authed(request(httpServer).post('/guest/v1/orders'), token).send({})).body as PlacedOrderBody
 
