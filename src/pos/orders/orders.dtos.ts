@@ -1,5 +1,5 @@
 import { Type } from 'class-transformer'
-import { ArrayMaxSize, ArrayUnique, IsArray, IsEnum, IsInt, IsOptional, IsString, IsUUID, Min, MinLength, ValidateNested } from 'class-validator'
+import { ArrayMaxSize, ArrayUnique, IsArray, IsEnum, IsInt, IsOptional, IsString, IsUUID, Max, Min, MinLength, ValidateNested } from 'class-validator'
 import { ComboSelectionDto } from '../../admin'
 import type { OrderSource, OrderStatus } from '../../generated/prisma/client'
 
@@ -69,7 +69,8 @@ export class AddOrderLineDto {
   @IsOptional() @IsUUID()
   variantId?: string
 
-  @IsInt() @Min(1)
+  // SE-13: a sane cap (and well inside the int4 column) - 400, never a 500.
+  @IsInt() @Min(1) @Max(999)
   quantity!: number
 
   @IsOptional() @IsArray() @ArrayUnique() @IsUUID('all', { each: true })
@@ -83,7 +84,8 @@ export class AddComboLineDto {
   @IsUUID()
   comboId!: string
 
-  @IsInt() @Min(1)
+  // SE-13: a sane cap (and well inside the int4 column) - 400, never a 500.
+  @IsInt() @Min(1) @Max(999)
   quantity!: number
 
   @IsArray() @ArrayMaxSize(60) @ValidateNested({ each: true }) @Type(() => ComboSelectionDto)
@@ -101,7 +103,7 @@ export class AddComboLineDto {
 // them wholesale, re-validated the same way as on add. Omitting seatNumber
 // leaves it untouched too (pos/CAP-4, issue #58).
 export class UpdateOrderLineDto {
-  @IsOptional() @IsInt() @Min(1)
+  @IsOptional() @IsInt() @Min(1) @Max(999)
   quantity?: number
 
   @IsOptional() @IsArray() @ArrayUnique() @IsUUID('all', { each: true })

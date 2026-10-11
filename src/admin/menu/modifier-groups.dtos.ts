@@ -5,7 +5,8 @@ export class CreateModifierDto {
   @IsString() @MinLength(1)
   name!: string
 
-  @IsOptional() @IsInt()
+  // SE-7: same rule as an item price - an add-on can't be a hidden discount.
+  @IsOptional() @IsInt() @Min(0)
   priceMinor?: number
 }
 
