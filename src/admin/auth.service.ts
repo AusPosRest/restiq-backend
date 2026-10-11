@@ -180,6 +180,18 @@ export class AdminAuthService {
     })
   }
 
+  /** restiq-backend#209: moves the owner's sessionVersion on, so this token and every other one they hold stops working. */
+  async logout(owner: AdminPrincipal): Promise<void> {
+    const plane = this.registry.planeFor(this.registry.homeRegion())
+    await plane.$transaction(async (tx) => {
+      await tx.$executeRaw`SELECT set_config('app.tenant_id', ${owner.tenantId}, true)`
+      await tx.ownerUser.update({ where: { id: owner.id }, data: { sessionVersion: { increment: 1 } } })
+      await tx.auditEvent.create({
+        data: { tenantId: owner.tenantId, actorId: owner.id, actorEmail: owner.email, action: 'owner.logout', reason: 'Owner signed out; every session was ended', occurredAt: new Date() },
+      })
+    })
+  }
+
   /** Who an unused, unexpired invite is for (issue #193) - reads only, consumes nothing. */
   async inviteDetails(token: string): Promise<InviteDetails> {
     const tokenHash = createHash('sha256').update(token).digest('hex')

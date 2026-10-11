@@ -1,5 +1,5 @@
 import { Body, Controller, HttpCode, Post } from '@nestjs/common'
-import { ClientIp, Public } from '../platform'
+import { AdminPrincipal, ClientIp, CurrentOwner, Public } from '../platform'
 import { AcceptInviteDto, InviteDetailsDto } from './accept-invite.dto'
 import { AcceptInviteResult, AdminAuthService, InviteDetails, OwnerSessionResult } from './auth.service'
 import { LoginDto } from './login.dto'
@@ -44,5 +44,12 @@ export class AdminAuthController {
   @HttpCode(204)
   resetPassword(@Body() dto: ResetPasswordDto): Promise<void> {
     return this.auth.resetPassword(dto.token, dto.password)
+  }
+
+  // restiq-backend#209: ends every session this owner holds (all browsers), same as operator logout (#203).
+  @Post('logout')
+  @HttpCode(204)
+  logout(@CurrentOwner() owner: AdminPrincipal): Promise<void> {
+    return this.auth.logout(owner)
   }
 }
