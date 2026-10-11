@@ -1,5 +1,11 @@
 # Completed
 
+- **2026-10-11** - Menu variants, kitchen and QR tables (issue #211):
+  - `POST /admin/v1/menu/items/:id/variants` takes `priceMinor` + `currency` (the variant's price, audited) and `basePortionName`. An item's first variant keeps its existing base price on sale as a variant of that name (default "Regular"), copying the base price rows. `GET` item responses carry `priceMinor`/`currency` and per-variant `priceMinor` (dine-in, current) inline.
+  - The guest menu leaves out unpriced variants and items with nothing purchasable, as the POS menu already did.
+  - Kitchen: expo keeps a paid/closed order while any ticket is still queued; tickets fired over 12 hours ago leave station queues, expo and all-day counts; an item routed to another outlet's station goes to the same-named station at the order's outlet, else its default.
+  - Guest sessions: `GET /guest/v1/outlets/:id/availability?tableId=` reports `table_busy` when a live order no open session owns is on the table; session start refuses it with 409 `table_has_active_order`; a session with no order and no activity for 30 minutes is replaced by the next start.
+  - Menu import drafts flag `duplicate: on_menu | repeated` per row.
 - **2026-10-08** - Platform admin login and mail audit fixes (issue #203): the dev inbox moved to `GET /ops/v1/dev-inbox` and needs an operator session (it was public and showed live reset links); operator logout bumps `operator_users.session_version`, so the logged-out token (and every other session of that operator) answers 401 `session_revoked`; the login email is trimmed before validation.
 - **2026-10-08** - Configurable plan prices (issue #201): `plan_prices` (country x plan, monthly price in minor units or null for "on quote", annual discount percent), seeded A$49/129 and ₹499/999 at 20% off annual. `GET /ops/v1/plan-prices`; `PUT /ops/v1/plan-prices/:country/:plan` with a reason, audited as `plan_price.updated`.
 - **2026-10-08** - Mail simulator and owner invite emails (issue #198):
