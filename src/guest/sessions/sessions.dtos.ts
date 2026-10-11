@@ -1,4 +1,4 @@
-import { IsNotEmpty, IsOptional, IsString, IsUUID, Matches, MaxLength } from 'class-validator'
+import { IsOptional, IsString, IsUUID, Matches, MaxLength } from 'class-validator'
 import { NotBlank } from '../../platform'
 import type { TableSessionStatus } from '../../generated/prisma/client'
 

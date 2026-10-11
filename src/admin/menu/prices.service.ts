@@ -105,11 +105,6 @@ export class PricesService {
           throw new BadRequestException({ code: 'validation_failed', message: 'No such variant on this item' })
         }
       }
-      // PE-10: an AUD tenant's prices are AUD, an INR tenant's are INR - never a mix.
-      const tenant = await tx.tenant.findUniqueOrThrow({ where: { id: owner.tenantId }, select: { country: true } })
-      if (dto.currency !== (tenant.country === 'IN' ? 'INR' : 'AUD')) {
-        throw new BadRequestException({ code: 'validation_failed', message: `Prices for this restaurant must be in ${tenant.country === 'IN' ? 'INR' : 'AUD'}` })
-      }
       if (dto.outletId) {
         const outlet = await tx.outlet.findUnique({ where: { id: dto.outletId } })
         if (!outlet || outlet.tenantId !== owner.tenantId) {
