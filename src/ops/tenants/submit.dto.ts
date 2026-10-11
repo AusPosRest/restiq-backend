@@ -24,6 +24,15 @@ export const OUTLET_TYPES = ['dine_in', 'qsr', 'cloud_kitchen', 'food_court'] as
 export const PLANS = ['standard', 'enterprise'] as const
 export const BILLING_PERIODS = ['monthly', 'annual'] as const
 
+// PE-6: GET /ops/v1/tenants/tax-number-available - the wizard's step-2 check.
+export class TaxNumberQueryDto {
+  @IsIn(COUNTRIES)
+  country!: (typeof COUNTRIES)[number]
+
+  @IsString() @IsNotEmpty() @MaxLength(20)
+  number!: string
+}
+
 export class BusinessDetailsDto {
   @IsString() @IsNotEmpty() @MaxLength(200)
   companyName!: string

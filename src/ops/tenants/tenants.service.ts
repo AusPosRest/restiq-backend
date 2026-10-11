@@ -298,10 +298,20 @@ export class OpsTenantsService {
     return found !== null
   }
 
+  /** Same rules as submit: the country's format, then the unique registration number. */
+  async taxNumberAvailability(country: 'IN' | 'AU', registrationNumber: string): Promise<{ available: boolean; reason: 'taken' | 'invalid' | null }> {
+    if (!taxNumberWellFormed(country, registrationNumber)) return { available: false, reason: 'invalid' }
+    const plane = this.registry.planeFor(this.registry.homeRegion())
+    const found = await plane.$transaction(async (tx) => {
+      await tx.$executeRaw`SELECT set_config('app.operator_context', 'operator', true)`
+      return tx.tenantTaxRegistration.findUnique({ where: { registrationNumber }, select: { id: true } })
+    })
+    return found ? { available: false, reason: 'taken' } : { available: true, reason: null }
+  }
+
   private validateTaxNumber(dto: SubmitTenantDto): void {
     const { country, registrationNumber } = dto.tax
-    const ok = country === 'IN' ? GSTIN_PATTERN.test(registrationNumber) : ABN_PATTERN.test(registrationNumber)
-    if (!ok) {
+    if (!taxNumberWellFormed(country, registrationNumber)) {
       const label = country === 'IN' ? 'GSTIN (15 characters, e.g. 29ABCDE1234F1Z5)' : 'ABN (11 digits)'
       throw new BadRequestException({ code: 'validation_failed', message: `registrationNumber is not a valid ${label}` })
     }
@@ -312,6 +322,10 @@ export class OpsTenantsService {
       throw new BadRequestException({ code: 'validation_failed', message: 'gstRatePercent is only allowed when gstRegistered is not false' })
     }
   }
+}
+
+function taxNumberWellFormed(country: 'IN' | 'AU', registrationNumber: string): boolean {
+  return country === 'IN' ? GSTIN_PATTERN.test(registrationNumber) : ABN_PATTERN.test(registrationNumber)
 }
 
 function isUniqueViolation(error: unknown): boolean {

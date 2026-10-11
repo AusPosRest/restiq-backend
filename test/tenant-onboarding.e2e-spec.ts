@@ -366,6 +366,38 @@ describe('/ops/v1/tenants onboarding (e2e)', () => {
     })
   })
 
+  // PE-6: the wizard checks the tax number on step 2, not only at submit.
+  describe('GET /ops/v1/tenants/tax-number-available', () => {
+    function check(country: string, number: string): request.Test {
+      return authed(request(httpServer).get('/ops/v1/tenants/tax-number-available').query({ country, number }))
+    }
+
+    it('says a fresh, well-formed number is available', async () => {
+      expect((await check('IN', '33AAACT2727Q1ZW').expect(200)).body).toEqual({ available: true, reason: null })
+      expect((await check('AU', '98765432109').expect(200)).body).toEqual({ available: true, reason: null })
+    })
+
+    it('says taken once another tenant uses it, and names nobody', async () => {
+      await authed(request(httpServer).post('/ops/v1/tenants'))
+        .send(submitPayload({ registrationNumber: '32AAACT2727Q1ZW', companyName: 'Secret Owner Co' }))
+        .expect(201)
+      const res = await check('IN', '32AAACT2727Q1ZW').expect(200)
+      expect(res.body).toEqual({ available: false, reason: 'taken' })
+      expect(JSON.stringify(res.body)).not.toContain('Secret')
+    })
+
+    it('says invalid for a number in the wrong format for the country', async () => {
+      expect((await check('IN', '98765432109').expect(200)).body).toEqual({ available: false, reason: 'invalid' })
+      expect((await check('AU', '33AAACT2727Q1ZW').expect(200)).body).toEqual({ available: false, reason: 'invalid' })
+    })
+
+    it('rejects an unknown country and needs an operator session', async () => {
+      const bad = await check('US', '123').expect(400)
+      expect((bad.body as { error: { code: string } }).error.code).toBe('validation_failed')
+      await request(httpServer).get('/ops/v1/tenants/tax-number-available').query({ country: 'IN', number: '33AAACT2727Q1ZW' }).expect(401)
+    })
+  })
+
   describe('GET /ops/v1/tenants', () => {
     it('lists provisioned tenants', async () => {
       const res = await authed(request(httpServer).get('/ops/v1/tenants'))
