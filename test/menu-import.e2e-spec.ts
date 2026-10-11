@@ -20,6 +20,7 @@ interface DraftItemBody {
   priceMinor: number
   currency: string
   confidence: { name: number; shortName: number; category: number; price: number; overall: number }
+  duplicate: 'on_menu' | 'repeated' | null
 }
 
 interface DraftBody {
@@ -464,6 +465,11 @@ describe('/admin/v1/menu-import (e2e)', () => {
       const second = await upload(token, csvBuffer([['Name', 'Category', 'Price'], ['butter chicken', 'mains', '300'], ['Chicken Tikka', 'Mains', '280']]), 'menu2.csv')
       const draft = second.body as DraftBody
       const clash = draft.items.find((i) => i.name === 'butter chicken')
+      // PE-11: flagged on the draft itself, before any commit attempt.
+      expect(draft.items.map((i) => [i.name, i.duplicate])).toEqual([
+        ['butter chicken', 'on_menu'],
+        ['Chicken Tikka', null],
+      ])
 
       const refused = await request(httpServer).post(`/admin/v1/menu-import/${draft.importId}/commit`).set('Authorization', `Bearer ${token}`)
       expect(refused.status).toBe(409)
