@@ -1861,6 +1861,9 @@ model CreditNote {
   // never-persisted-derived-total convention as BillView.totalMinor.
   subtotalMinor     BigInt   @map("subtotal_minor")
   taxMinor          BigInt   @map("tax_minor")
+  // restiq-backend#221: how the money went back. Null only on notes issued
+  // before this column existed - shift close treats those as cash first.
+  method            TenderMethod?
   createdAt         DateTime @default(now()) @map("created_at") @db.Timestamptz(6)
 
   tenant          Tenant           @relation(fields: [tenantId], references: [id])

@@ -555,6 +555,7 @@ export async function buildInvoiceView(tx: Tx, tenantId: string, billId: string)
     // bills.service.ts's toCreditNoteView: an AU/inclusive bill's refunded
     // subtotal already contains its own tax.
     amountMinor: Number(bill.pricesIncludeTax ? note.subtotalMinor : note.subtotalMinor + note.taxMinor),
+    method: note.method,
     reason: note.reason,
     createdAt: note.createdAt.toISOString(),
   }))

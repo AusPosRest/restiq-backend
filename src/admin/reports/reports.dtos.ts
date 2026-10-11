@@ -62,6 +62,8 @@ export interface PaymentTenderRow {
 export interface PaymentCreditNoteRow {
   id: string
   amountMinor: number
+  // How the money went back; null on a note issued before this was recorded.
+  method: string | null
   reason: string
   createdAt: string
 }

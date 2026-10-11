@@ -72,6 +72,7 @@ function toCreditNoteView(note: CreditNoteWithLines, pricesIncludeTax: boolean):
     subtotalMinor: Number(note.subtotalMinor),
     taxMinor: Number(note.taxMinor),
     totalMinor: pricesIncludeTax ? Number(note.subtotalMinor) : Number(note.subtotalMinor + note.taxMinor),
+    method: note.method,
     createdAt: note.createdAt.toISOString(),
     lines: note.lines.map(toCreditNoteLineView),
   }
@@ -368,7 +369,8 @@ export class BillsService {
       let priorGrossMinor = 0n
       for (const l of priorLines) {
         refundedSoFar.set(l.orderLineId, (refundedSoFar.get(l.orderLineId) ?? 0) + l.quantity)
-        priorGrossMinor += l.amountMinor
+        // Gross, not amountMinor - a line's amount is net of the discount (#221).
+        priorGrossMinor += l.unitPriceMinor * BigInt(l.quantity)
       }
 
       const targets =
@@ -441,6 +443,19 @@ export class BillsService {
       const subtotalMinor = maxZero(prorate(cumGrossMinor, billNetMinor) - (prior._sum.subtotalMinor ?? 0n))
       const taxMinor = maxZero(prorate(cumGrossMinor, bill.taxMinor) - (prior._sum.taxMinor ?? 0n))
 
+      // restiq-backend#221: each line's amount is its share of that net
+      // subtotal (gross-weighted, rounded down), the last line taking the
+      // remainder, so the lines always add up to the note's subtotal.
+      let allocatedMinor = 0n
+      lineData.forEach((l, i) => {
+        l.amountMinor = i === lineData.length - 1 ? subtotalMinor - allocatedMinor : grossMinor === 0n ? 0n : (subtotalMinor * l.amountMinor) / grossMinor
+        allocatedMinor += l.amountMinor
+      })
+
+      // Default: the bill's main tender - its largest, earliest on a tie.
+      const mainTender = bill.tenders.reduce<(typeof bill.tenders)[number] | null>((best, t) => (!best || t.amountMinor > best.amountMinor ? t : best), null)
+      const method = dto.method ?? mainTender?.method ?? null
+
       // Refund is unconditionally gated (unlike finalize()'s above-threshold
       // discount) - validate the refund request itself first (cheap), then
       // spend a manager-PIN check only on a request that's actually valid.
@@ -456,6 +471,7 @@ export class BillsService {
           createdByStaffId: staff.id,
           subtotalMinor,
           taxMinor,
+          method,
           lines: {
             create: lineData.map((l) => ({
               id: uuidv7(),
