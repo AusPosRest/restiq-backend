@@ -2,7 +2,7 @@ import { Body, Controller, Delete, Get, HttpCode, Param, ParseIntPipe, ParseUUID
 import { CurrentOperator, OpsPrincipal, slugProblem } from '../../platform'
 import { ReasonDto, SetModeDto, UpdateBrandingDto, UpdateTenantDto } from './directory.dtos'
 import { InviteView, TenantDetail, TenantDirectoryService, TenantListResult } from './directory.service'
-import { SubmitTenantDto } from './submit.dto'
+import { SubmitTenantDto, TaxNumberQueryDto } from './submit.dto'
 import { DraftView, OpsTenantsService, ProvisionResult } from './tenants.service'
 
 // Is this subdomain free? (D14) Separate from the tenants routes: it is about a name, not a tenant.
@@ -34,6 +34,12 @@ export class OpsTenantsController {
   @Get('draft')
   async getDraft(@CurrentOperator() operator: OpsPrincipal): Promise<{ draft: DraftView | null }> {
     return { draft: await this.tenants.getDraft(operator.id) }
+  }
+
+  // PE-6: free / taken / malformed, never which tenant holds it.
+  @Get('tax-number-available')
+  taxNumberAvailable(@Query() query: TaxNumberQueryDto): Promise<{ available: boolean; reason: 'taken' | 'invalid' | null }> {
+    return this.tenants.taxNumberAvailability(query.country, query.number)
   }
 
   @Put('draft/steps/:step')

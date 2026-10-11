@@ -156,6 +156,19 @@ export class MenuImportService {
     })
   }
 
+  async latest(owner: AdminPrincipal): Promise<MenuImportDraftView | null> {
+    const plane = this.registry.planeFor(this.registry.homeRegion())
+    return plane.$transaction(async (tx) => {
+      await setTenantContext(tx, owner.tenantId)
+      const draft = await tx.menuImportDraft.findFirst({
+        where: { tenantId: owner.tenantId, status: 'draft' },
+        orderBy: { updatedAt: 'desc' },
+      })
+      if (!draft) return null
+      return toView(draft, await draftDuplicates(tx, owner.tenantId, (draft.payload as unknown as DraftPayload).items))
+    })
+  }
+
   async patch(owner: AdminPrincipal, importId: string, edits: PatchDraftItemDto[], removeIds: readonly string[] = []): Promise<MenuImportDraftView> {
     const plane = this.registry.planeFor(this.registry.homeRegion())
 

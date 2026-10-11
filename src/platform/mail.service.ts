@@ -76,7 +76,8 @@ export class MailService {
   async inbox(to?: string): Promise<InboxMessage[]> {
     const rows = await this.prisma.client.simulatedMessage.findMany({
       where: to ? { to: { equals: to.trim(), mode: 'insensitive' } } : {},
-      orderBy: { createdAt: 'desc' },
+      // createdAt is only millisecond-precise; the time-ordered uuidv7 id breaks same-millisecond ties.
+      orderBy: [{ createdAt: 'desc' }, { id: 'desc' }],
       take: INBOX_LIMIT,
     })
     return rows.map((row) => ({ id: row.id, to: row.to, subject: row.subject, text: row.text, html: row.html ?? undefined, sentAt: row.createdAt.toISOString() }))

@@ -270,6 +270,54 @@ describe('/admin/v1/menu-import (e2e)', () => {
     })
   })
 
+  // PE-11: leaving the import page and coming back picks the draft up again.
+  describe('GET /admin/v1/menu-import/latest', () => {
+    function latest(token: string): Promise<request.Response> {
+      return request(httpServer).get('/admin/v1/menu-import/latest').set('Authorization', `Bearer ${token}`)
+    }
+
+    it('answers { draft: null } when the tenant has no open draft', async () => {
+      const { token } = await createOwner(prisma)
+      const res = await latest(token)
+      expect(res.status).toBe(200)
+      expect(res.body).toEqual({ draft: null })
+    })
+
+    it("returns the tenant's most recently edited open draft, with its edits and duplicate flags", async () => {
+      const { token } = await createOwner(prisma)
+      await upload(token, csvBuffer(SAMPLE_CSV_ROWS), 'older.csv')
+      const newer = (await upload(token, csvBuffer([...SAMPLE_CSV_ROWS, ['Butter Chicken', 'Mains', '', '320']]), 'newer.csv')).body as DraftBody
+      const salad = newer.items.find((i) => i.name === 'Garden Salad')
+      await request(httpServer)
+        .patch(`/admin/v1/menu-import/${newer.importId}`)
+        .set('Authorization', `Bearer ${token}`)
+        .send({ items: [{ id: salad?.id, name: 'House Salad' }] })
+
+      const res = await latest(token)
+      expect(res.status).toBe(200)
+      const draft = (res.body as { draft: DraftBody }).draft
+      expect(draft.importId).toBe(newer.importId)
+      expect(draft.fileName).toBe('newer.csv')
+      expect(draft.items.map((i) => i.name)).toContain('House Salad')
+      expect(draft.items.filter((i) => i.duplicate === 'repeated')).toHaveLength(1)
+    })
+
+    it('skips committed drafts and never shows another tenant\'s draft', async () => {
+      const owner1 = await createOwner(prisma)
+      const owner2 = await createOwner(prisma)
+      const draft = (await upload(owner1.token, csvBuffer(SAMPLE_CSV_ROWS), 'menu.csv')).body as DraftBody
+      expect((await latest(owner2.token)).body).toEqual({ draft: null })
+
+      await request(httpServer).post(`/admin/v1/menu-import/${draft.importId}/commit`).set('Authorization', `Bearer ${owner1.token}`).expect(201)
+      expect((await latest(owner1.token)).body).toEqual({ draft: null })
+    })
+
+    it('requires an admin session', async () => {
+      const res = await request(httpServer).get('/admin/v1/menu-import/latest')
+      expect(res.status).toBe(401)
+    })
+  })
+
   describe('PATCH /admin/v1/menu-import/:importId', () => {
     async function draftFor(token: string): Promise<DraftBody> {
       const res = await upload(token, csvBuffer(SAMPLE_CSV_ROWS), 'menu.csv')
