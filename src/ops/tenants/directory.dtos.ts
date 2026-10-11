@@ -1,6 +1,6 @@
 // Mutation payloads for Tenant Detail. Every one carries a required reason
 // (AD-6) - a reasonless mutation never reaches a service method.
-import { IsEmail, IsNotEmpty, IsObject, IsOptional, IsString, MaxLength } from 'class-validator'
+import { IsEmail, IsIn, IsNotEmpty, IsObject, IsOptional, IsString, MaxLength } from 'class-validator'
 
 class MutationDto {
   @IsString() @IsNotEmpty() @MaxLength(500)
@@ -32,3 +32,9 @@ export class UpdateBrandingDto extends MutationDto {
 }
 
 export class ReasonDto extends MutationDto {}
+
+// #213: switch a tenant between Test and Live mode.
+export class SetModeDto extends MutationDto {
+  @IsIn(['test', 'live'])
+  mode!: 'test' | 'live'
+}

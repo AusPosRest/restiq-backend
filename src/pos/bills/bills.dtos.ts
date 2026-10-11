@@ -208,6 +208,9 @@ export interface InvoiceView {
   // invented here - a future receipt-template story owns any of that). Null
   // on the pro-forma view - an open bill has none yet.
   invoiceNumber: string | null
+  // restiq-backend#213: true when the bill was rung up while the tenant was in Test mode. Clients print
+  // "Test mode - not a valid tax invoice" on it.
+  testMode: boolean
   // "Tax Invoice" for an AU/ABN seller (AU's GST law requires the literal
   // phrase on a compliant tax invoice), "Invoice" otherwise; "Bill" for an
   // open bill's pro-forma view, regardless of country (issue #125).

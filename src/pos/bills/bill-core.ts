@@ -17,7 +17,7 @@
 // '!**/pos/bills' exception to the pos-module-boundary rule) with no cycle.
 import { BadRequestException, ConflictException, NotFoundException } from '@nestjs/common'
 import type { Prisma } from '../../generated/prisma/client'
-import { paymentsSimulatorEnabled, uuidv7 } from '../../platform'
+import { isTestSale, paymentsSimulatorFor, uuidv7 } from '../../platform'
 import { BillView, InvoiceCreditNoteView, InvoiceLineView, InvoiceView, TaxBreakdownLineView, TenderView } from './bills.dtos'
 import { computeTax, TaxBreakdownLine, TaxCountry, TaxResult } from './tax'
 
@@ -374,7 +374,7 @@ export async function commitFinalize(tx: Tx, params: CommitFinalizeParams): Prom
 
   // #170: a tender written by the simulated terminal (while it was on)
   // collected no money - with the simulator off it can't settle a bill.
-  if (!paymentsSimulatorEnabled()) {
+  if (!(await paymentsSimulatorFor(tx, bill.tenantId))) {
     const simulated = await tx.tender.count({ where: { billId: bill.id, paymentIntent: { provider: 'simulated' } } })
     if (simulated > 0) {
       throw new ConflictException({
@@ -483,7 +483,7 @@ export async function buildInvoiceView(tx: Tx, tenantId: string, billId: string)
   const bill = await refreshOpenBillTotals(tx, await loadBill(tx, tenantId, billId))
   const isFinalized = bill.status === 'finalized'
 
-  const [orderLines, outlet, taxContext, creditNotes] = await Promise.all([
+  const [orderLines, outlet, taxContext, creditNotes, mode] = await Promise.all([
     tx.orderLine.findMany({
       where: { orderId: bill.orderId },
       include: { item: true, variant: true, combo: true, modifiers: { include: { modifier: true } } },
@@ -492,6 +492,7 @@ export async function buildInvoiceView(tx: Tx, tenantId: string, billId: string)
     tx.outlet.findUniqueOrThrow({ where: { id: bill.outletId }, select: { name: true, address: true } }),
     loadTenantTaxProfile(tx, tenantId),
     tx.creditNote.findMany({ where: { originalBillId: bill.id }, orderBy: { createdAt: 'asc' } }),
+    tx.tenant.findUniqueOrThrow({ where: { id: tenantId }, select: { liveSince: true } }),
   ])
 
   const unitOf = (line: (typeof orderLines)[number]) => line.unitPriceMinor + line.modifiers.reduce((sum, m) => sum + m.priceMinor, 0n)
@@ -534,6 +535,8 @@ export async function buildInvoiceView(tx: Tx, tenantId: string, billId: string)
   return {
     status: bill.status,
     invoiceNumber: isFinalized ? String(bill.billNumber) : null,
+    // #213: rung up while the tenant was in Test mode - not a valid tax invoice.
+    testMode: isTestSale(mode.liveSince, bill.finalizedAt),
     title: isFinalized ? (taxContext.country === 'AU' ? (taxContext.gstRegistered ? 'Tax Invoice' : 'Receipt') : 'Invoice') : 'Bill',
     issuedAt: isFinalized ? bill.finalizedAt!.toISOString() : null,
     currency: currencyForCountry(taxContext.country),

@@ -155,10 +155,11 @@ describe('/ops/v1/tenants onboarding (e2e)', () => {
   }
 
   describe('drafts', () => {
-    it('404s when no draft exists', async () => {
+    // PE-6: no draft is a normal answer, not a 404 the console logs as an error.
+    it('answers draft: null when no draft exists', async () => {
       const res = await authed(request(httpServer).get('/ops/v1/tenants/draft'))
-      expect(res.status).toBe(404)
-      expect((res.body as { error: { code: string } }).error.code).toBe('not_found')
+      expect(res.status).toBe(200)
+      expect(res.body).toEqual({ draft: null })
     })
 
     it('saves steps independently and returns them on resume', async () => {
@@ -190,7 +191,7 @@ describe('/ops/v1/tenants onboarding (e2e)', () => {
 
     it('deletes the draft', async () => {
       expect((await authed(request(httpServer).delete('/ops/v1/tenants/draft'))).status).toBe(204)
-      expect((await authed(request(httpServer).get('/ops/v1/tenants/draft'))).status).toBe(404)
+      expect((await authed(request(httpServer).get('/ops/v1/tenants/draft'))).body).toEqual({ draft: null })
     })
 
     it('rejects draft routes without an ops token', async () => {
@@ -222,6 +223,8 @@ describe('/ops/v1/tenants onboarding (e2e)', () => {
       expect(tenant?.status).toBe('provisioning')
       expect(tenant?.country).toBe('IN')
       expect(tenant?.plan).toBe('enterprise')
+      // #213: Live unless the wizard's "Test tenant" box was ticked.
+      expect(tenant?.liveSince).not.toBeNull()
 
       expect(await prisma.tenantTaxRegistration.count({ where: { tenantId } })).toBe(1)
       expect(await prisma.brand.count({ where: { tenantId } })).toBe(1)
@@ -266,13 +269,23 @@ describe('/ops/v1/tenants onboarding (e2e)', () => {
       expect((await prisma.outletCapability.findFirstOrThrow({ where: { outletId: qsr.id, key: 'token_queue' } })).enabled).toBe(true)
     })
 
+    it('provisions a Test-mode tenant when the wizard asks for one (#213)', async () => {
+      const res = await authed(request(httpServer).post('/ops/v1/tenants')).send({
+        ...submitPayload({ registrationNumber: '07AABCT1332L1ZD', companyName: 'Test Mode Co' }),
+        testMode: true,
+      })
+      expect(res.status).toBe(201)
+      const tenant = await prisma.tenant.findUniqueOrThrow({ where: { id: (res.body as { tenant: { id: string } }).tenant.id } })
+      expect(tenant.liveSince).toBeNull()
+    })
+
     it('deletes the operator draft on successful submit', async () => {
       await authed(request(httpServer).put('/ops/v1/tenants/draft/steps/1')).send({ companyName: 'Another Co' })
       const res = await authed(request(httpServer).post('/ops/v1/tenants')).send(
         submitPayload({ registrationNumber: '27ZYXWV9876K1Z8', companyName: 'Another Co' }),
       )
       expect(res.status).toBe(201)
-      expect((await authed(request(httpServer).get('/ops/v1/tenants/draft'))).status).toBe(404)
+      expect((await authed(request(httpServer).get('/ops/v1/tenants/draft'))).body).toEqual({ draft: null })
     })
 
     it('rolls back EVERYTHING on a mid-transaction failure and keeps the draft', async () => {

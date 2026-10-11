@@ -143,6 +143,10 @@ export class SubmitTenantDto {
   @IsOptional() @IsString() @MaxLength(40)
   slug?: string
 
+  // #213: a Test-mode tenant (simulated payments and mail, kept out of the KPIs). Default: Live.
+  @IsOptional() @IsBoolean()
+  testMode?: boolean
+
   // AD-6 audit reason. The wizard does not collect one, so it defaults.
   @IsOptional() @IsString() @IsNotEmpty() @MaxLength(500)
   reason?: string

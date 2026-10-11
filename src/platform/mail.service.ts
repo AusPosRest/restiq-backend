@@ -3,8 +3,11 @@
 // message is stored in simulated_messages and shown by the dev inbox, GET /ops/v1/dev-inbox) and `log`
 // (the default: the message goes to the server log and nowhere else, for tests).
 // Production refuses to start unless Mailjet is configured (production-config.ts).
-import { Injectable, Logger, NotFoundException } from '@nestjs/common'
+// restiq-backend#213: mail for a tenant in Test mode always goes to the simulator, whatever the provider,
+// so a demo tenant's invites and reset links land in the operators' inbox, never in a real mailbox.
+import { Injectable, Logger } from '@nestjs/common'
 import { PrismaService } from './prisma.service'
+import { tenantInTestMode } from './tenant-mode'
 
 export interface MailMessage {
   to: string
@@ -34,8 +37,9 @@ export class MailService {
 
   constructor(private readonly prisma: PrismaService) {}
 
-  async send(message: MailMessage): Promise<void> {
-    if (provider() === 'simulator') {
+  /** `tenantId`: the tenant the email is about, so a Test-mode tenant's mail is simulated. */
+  async send(message: MailMessage, options: { tenantId?: string } = {}): Promise<void> {
+    if (provider() === 'simulator' || (options.tenantId !== undefined && (await this.isTestTenant(options.tenantId)))) {
       await this.prisma.client.simulatedMessage.create({ data: { to: message.to, subject: message.subject, text: message.text, html: message.html } })
       this.logger.log(`[mail:simulator] to=${message.to} subject="${message.subject}"`)
       return
@@ -65,14 +69,23 @@ export class MailService {
     if (!response.ok) throw new Error(`Mailjet answered ${response.status}`)
   }
 
-  /** The simulator's newest messages, optionally for one address. 404 unless the simulator is the provider. */
+  /**
+   * The simulator's newest messages, optionally for one address. With a real provider only Test-mode
+   * tenants' mail is stored here (#213), so the inbox stays open to operators either way.
+   */
   async inbox(to?: string): Promise<InboxMessage[]> {
-    if (provider() !== 'simulator') throw new NotFoundException({ code: 'not_found', message: 'The mail simulator is off' })
     const rows = await this.prisma.client.simulatedMessage.findMany({
       where: to ? { to: { equals: to.trim(), mode: 'insensitive' } } : {},
       orderBy: { createdAt: 'desc' },
       take: INBOX_LIMIT,
     })
     return rows.map((row) => ({ id: row.id, to: row.to, subject: row.subject, text: row.text, html: row.html ?? undefined, sentAt: row.createdAt.toISOString() }))
+  }
+
+  private isTestTenant(tenantId: string): Promise<boolean> {
+    return this.prisma.client.$transaction(async (tx) => {
+      await tx.$executeRaw`SELECT set_config('app.tenant_id', ${tenantId}, true)`
+      return tenantInTestMode(tx, tenantId)
+    })
   }
 }
