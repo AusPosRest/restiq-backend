@@ -110,7 +110,8 @@ export function isUniqueViolation(error: unknown): boolean {
 /**
  * Issue #103: the customer-payable total, aware of pricesIncludeTax. For an
  * exclusive-tax bill (IN), tax sits on top of subtotalMinor, so the total is
- * subtotal + tax - discount, same formula this module always used. For an
+ * subtotal + tax - discount, same formula this module always used - with
+ * taxMinor already computed on the discounted value (SE-2, commitFinalize). For an
  * inclusive-tax bill (AU), subtotalMinor IS already the tax-inclusive figure
  * (computeSubtotal() sums the order lines' own menu prices unchanged - it
  * has no country awareness of its own) and taxMinor is only how much of that
@@ -161,6 +162,18 @@ export function toBillView(bill: BillWithTenders): BillView {
     finalizedAt: bill.finalizedAt?.toISOString() ?? null,
     tenders: bill.tenders.map(toTenderView),
   }
+}
+
+/**
+ * SE-4/SE-6: takes the bill's row lock for the rest of the caller's
+ * transaction, so two concurrent refunds/finalises of the same bill run one
+ * after the other - the second then sees the first's committed credit note
+ * or status, instead of both passing their checks (or deadlocking on the
+ * tender/counter writes). Call it first, before anything reads the bill.
+ * RLS still applies, so another tenant's bill id locks nothing.
+ */
+export async function lockBill(tx: Tx, billId: string): Promise<void> {
+  await tx.$queryRaw`SELECT id FROM bills WHERE id = ${billId}::uuid FOR UPDATE`
 }
 
 export async function loadBill(tx: Tx, tenantId: string, billId: string): Promise<BillWithTenders> {
@@ -222,18 +235,22 @@ export interface CreateOrGetBillResult {
  * comment) so it calls this directly after its own session/order-active
  * check.
  */
-async function computeBillTotals(tx: Tx, tenantId: string, orderId: string): Promise<{ subtotalMinor: bigint; tax: TaxResult }> {
-  const subtotalMinor = await computeSubtotal(tx, orderId)
+/** Tax on a taxable value (the subtotal, or the subtotal less a bill discount - SE-2) under the tenant's current tax registration. */
+async function computeTaxOn(tx: Tx, tenantId: string, taxableMinor: bigint): Promise<TaxResult> {
   const taxContext = await loadTenantTaxProfile(tx, tenantId)
-  const tax = computeTax({
+  return computeTax({
     country: taxContext.country,
     taxProfile: taxContext.taxProfile,
     compositionScheme: taxContext.compositionScheme,
     gstRegistered: taxContext.gstRegistered,
     gstRatePercent: taxContext.gstRatePercent,
-    subtotalMinor,
+    subtotalMinor: taxableMinor,
   })
-  return { subtotalMinor, tax }
+}
+
+async function computeBillTotals(tx: Tx, tenantId: string, orderId: string): Promise<{ subtotalMinor: bigint; tax: TaxResult }> {
+  const subtotalMinor = await computeSubtotal(tx, orderId)
+  return { subtotalMinor, tax: await computeTaxOn(tx, tenantId, subtotalMinor) }
 }
 
 /**
@@ -384,7 +401,17 @@ export async function commitFinalize(tx: Tx, params: CommitFinalizeParams): Prom
     }
   }
 
-  const totalMinor = computeTotalMinor(bill.subtotalMinor, bill.taxMinor, params.discountMinor ?? 0n, bill.pricesIncludeTax)
+  // SE-2: a discount given at the time of sale reduces the taxable value
+  // (IN GST s.15(3)(a); for AU the GST share is backed out of the discounted
+  // price), so the tax is recomputed on subtotal - discount and that figure
+  // is what gets stored - the total, invoice and refunds all read it.
+  const discountMinor = params.discountMinor ?? 0n
+  if (discountMinor > bill.subtotalMinor) {
+    throw new BadRequestException({ code: 'validation_failed', message: 'The discount cannot be more than the bill subtotal' })
+  }
+  const tax = discountMinor > 0n ? await computeTaxOn(tx, params.tenantId, bill.subtotalMinor - discountMinor) : null
+  const taxMinor = tax?.taxMinor ?? bill.taxMinor
+  const totalMinor = computeTotalMinor(bill.subtotalMinor, taxMinor, discountMinor, bill.pricesIncludeTax)
   const tenderAgg = await tx.tender.aggregate({ where: { billId: bill.id }, _sum: { amountMinor: true } })
   const tenderTotal = tenderAgg._sum.amountMinor ?? 0n
   if (tenderTotal !== totalMinor) {
@@ -414,6 +441,10 @@ export async function commitFinalize(tx: Tx, params: CommitFinalizeParams): Prom
       billNumber: counter.lastNumber,
       discountMinor: params.discountMinor,
       discountReason: params.discountReason,
+      ...(tax && {
+        taxMinor: tax.taxMinor,
+        taxBreakdown: toStoredTaxBreakdown(tax.breakdown, tax.notes) as unknown as Prisma.InputJsonValue,
+      }),
       status: 'finalized',
       finalizedByStaffId: params.finalizedByStaffId,
       finalizedAt: new Date(),
