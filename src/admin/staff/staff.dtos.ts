@@ -2,10 +2,11 @@
 // comes from the signed-in owner's session (AD-5), same posture as every
 // other admin DTO. roleId is validated against the tenant's seeded roles in
 // the service, not here - the DTO only checks shape.
-import { ArrayMaxSize, IsArray, IsEmail, IsNotEmpty, IsOptional, IsString, IsUUID, MaxLength, MinLength } from 'class-validator'
+import { ArrayMaxSize, IsArray, IsEmail, IsNotEmpty, IsOptional, IsString, IsUUID, MaxLength } from 'class-validator'
+import { NotBlank } from '../../platform'
 
 export class CreateStaffDto {
-  @IsString() @MinLength(1) @MaxLength(200)
+  @IsString() @NotBlank() @MaxLength(200)
   name!: string
 
   @IsOptional() @IsEmail()
@@ -20,7 +21,7 @@ export class CreateStaffDto {
 }
 
 export class UpdateStaffDto {
-  @IsOptional() @IsString() @MinLength(1) @MaxLength(200)
+  @IsOptional() @IsString() @NotBlank() @MaxLength(200)
   name?: string
 
   @IsOptional() @IsUUID()

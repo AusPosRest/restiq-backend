@@ -532,6 +532,74 @@ describe('/pos/v1 bill and settle (e2e)', () => {
       expect((fetched.body as BillBody).status).toBe('open')
     })
 
+    it('a double-tapped finalise settles once and answers the second with 409, not a 500 deadlock (SE-6)', async () => {
+      const tenantId = await createTenant(prisma)
+      const outletId = await createOutlet(prisma, tenantId)
+      const { orderId, ownerToken } = await setUpSentOrder(tenantId, outletId, 10000)
+      const billId = ((await authed(request(httpServer).post(`/pos/v1/orders/${orderId}/bill`), ownerToken).send()).body as BillBody).id
+
+      const finalize = () => authed(request(httpServer).post(`/pos/v1/bills/${billId}/finalize`), ownerToken).send({ tenders: [{ method: 'cash', amountMinor: 21000 }] })
+      const results = await Promise.all([finalize(), finalize(), finalize()])
+      expect(results.map((r) => r.status).sort()).toEqual([200, 409, 409])
+      for (const r of results.filter((x) => x.status === 409)) expect((r.body as ErrorBody).error.code).toBe('already_finalized')
+      expect(await prisma.tender.count({ where: { billId } })).toBe(1)
+    })
+
+    describe('tax on a discounted bill (SE-2)', () => {
+      it('IN: GST is charged on subtotal - discount, CGST and SGST equal, and the invoice agrees', async () => {
+        const tenantId = await createTenant(prisma)
+        await createTaxRegistration(prisma, tenantId, { taxProfile: 'India GST - CGST/SGST split', registrationType: 'gstin' })
+        const outletId = await createOutlet(prisma, tenantId)
+        const { orderId, ownerToken } = await setUpSentOrder(tenantId, outletId, 28900) // subtotal 57800
+        const billId = ((await authed(request(httpServer).post(`/pos/v1/orders/${orderId}/bill`), ownerToken).send()).body as BillBody).id
+
+        // The old pre-discount total (57800 + 2890 - 5780 = 54910) is no longer what's owed.
+        const stale = await authed(request(httpServer).post(`/pos/v1/bills/${billId}/finalize`), ownerToken).send({
+          discountMinor: 5780,
+          discountReason: '10 pct',
+          tenders: [{ method: 'cash', amountMinor: 54910 }],
+        })
+        expect(stale.status).toBe(400)
+        expect((stale.body as ErrorBody).error.code).toBe('tender_mismatch')
+
+        // Taxable 52020; 2.5% = 1300.5 -> 1301 each; total 52020 + 2602 = 54622.
+        const res = await authed(request(httpServer).post(`/pos/v1/bills/${billId}/finalize`), ownerToken).send({
+          discountMinor: 5780,
+          discountReason: '10 pct',
+          tenders: [{ method: 'cash', amountMinor: 54622 }],
+        })
+        expect(res.status).toBe(200)
+        const bill = res.body as BillBody
+        expect(bill.taxMinor).toBe(2602)
+        expect(bill.taxBreakdown).toEqual([
+          { label: 'CGST', ratePercent: 2.5, amountMinor: 1301 },
+          { label: 'SGST', ratePercent: 2.5, amountMinor: 1301 },
+        ])
+        expect(bill.totalMinor).toBe(54622)
+
+        const invoice = await authed(request(httpServer).get(`/pos/v1/bills/${billId}/invoice`), ownerToken)
+        expect(invoice.body).toMatchObject({ subtotalMinor: 57800, discountMinor: 5780, taxMinor: 2602, totalMinor: 54622 })
+      })
+
+      it('AU: the GST share is backed out of the discounted price', async () => {
+        const tenantId = await createAuTenant(prisma)
+        await createTaxRegistration(prisma, tenantId, { taxProfile: 'Australia GST', registrationType: 'abn', legalEntityName: 'Sydney Harbour Bistro Pty Ltd' })
+        const outletId = await createOutlet(prisma, tenantId, 'Darling Harbour')
+        const { orderId, ownerToken } = await setUpSentOrder(tenantId, outletId, 5500) // subtotal 11000 inc. GST
+        const billId = ((await authed(request(httpServer).post(`/pos/v1/orders/${orderId}/bill`), ownerToken).send()).body as BillBody).id
+
+        const res = await authed(request(httpServer).post(`/pos/v1/bills/${billId}/finalize`), ownerToken).send({
+          discountMinor: 1100,
+          discountReason: 'Staff meal',
+          tenders: [{ method: 'cash', amountMinor: 9900 }],
+        })
+        expect(res.status).toBe(200)
+        const bill = res.body as BillBody
+        expect(bill.totalMinor).toBe(9900)
+        expect(bill.taxMinor).toBe(900) // 9900 - round(9900 * 10 / 11)
+      })
+    })
+
     describe('discount above threshold (platform/manager-auth, AD-15)', () => {
       it('rejects a discount above the threshold with no manager PIN, and with a wrong one', async () => {
         const tenantId = await createTenant(prisma)
@@ -545,7 +613,7 @@ describe('/pos/v1 bill and settle (e2e)', () => {
         const noPin = await authed(request(httpServer).post(`/pos/v1/bills/${billId}/finalize`), ownerToken).send({
           discountMinor: 5000,
           discountReason: 'Regular customer',
-          tenders: [{ method: 'cash', amountMinor: 16000 }],
+          tenders: [{ method: 'cash', amountMinor: 15750 }],
         })
         expect(noPin.status).toBe(400)
         expect((noPin.body as ErrorBody).error.code).toBe('manager_pin_required')
@@ -554,7 +622,7 @@ describe('/pos/v1 bill and settle (e2e)', () => {
           discountMinor: 5000,
           discountReason: 'Regular customer',
           managerPin: '9999',
-          tenders: [{ method: 'cash', amountMinor: 16000 }],
+          tenders: [{ method: 'cash', amountMinor: 15750 }],
         })
         expect(wrongPin.status).toBe(401)
 
@@ -573,12 +641,14 @@ describe('/pos/v1 bill and settle (e2e)', () => {
           discountMinor: 5000,
           discountReason: 'Regular customer',
           managerPin: '1234',
-          tenders: [{ method: 'cash', amountMinor: 16000 }],
+          tenders: [{ method: 'cash', amountMinor: 15750 }],
         })
         expect(res.status).toBe(200)
         const bill = res.body as BillBody
         expect(bill.discountMinor).toBe(5000)
-        expect(bill.totalMinor).toBe(16000)
+        // SE-2: tax on the discounted 15000 (750), not on 20000 (1000).
+        expect(bill.taxMinor).toBe(750)
+        expect(bill.totalMinor).toBe(15750)
 
         const auditRow = await prisma.auditEvent.findFirst({ where: { tenantId, action: 'discount_above_threshold' } })
         expect(auditRow).toMatchObject({ approverName: 'Meera Manager', reason: 'Regular customer' })
@@ -594,7 +664,7 @@ describe('/pos/v1 bill and settle (e2e)', () => {
         const res = await authed(request(httpServer).post(`/pos/v1/bills/${billId}/finalize`), ownerToken).send({
           discountMinor: 1000,
           discountReason: 'Loyalty rounding',
-          tenders: [{ method: 'cash', amountMinor: 20000 }],
+          tenders: [{ method: 'cash', amountMinor: 19950 }], // 19000 + 5% tax on the discounted value
         })
         expect(res.status).toBe(200)
         expect((res.body as BillBody).discountMinor).toBe(1000)

@@ -397,6 +397,21 @@ describe('/guest/v1/cart shared group cart (e2e)', () => {
       expect((res.body as ErrorBody).error.code).toBe('modifier_selection_invalid')
     })
 
+    it('rejects an absurd quantity with 400, not a 500 (SE-13)', async () => {
+      const tenantId = await createTenant(prisma)
+      const outletId = await createOutlet(prisma, tenantId)
+      const tableId = await createTable(prisma, tenantId, outletId)
+      await enableQrOrdering(prisma, tenantId, outletId)
+      const { tokenA } = await startAndJoin(prisma, outletId, tableId)
+      const { itemId } = await createItemWithPrice(prisma, tenantId, 19000)
+
+      for (const quantity of [2000000, 3000000000]) {
+        const res = await authed(request(httpServer).post('/guest/v1/cart/lines'), tokenA).send({ itemId, quantity })
+        expect(res.status).toBe(400)
+      }
+      expect(await prisma.cartLine.count()).toBe(0)
+    })
+
     it('re-validates min/max on PATCH re-selection', async () => {
       const tenantId = await createTenant(prisma)
       const outletId = await createOutlet(prisma, tenantId)

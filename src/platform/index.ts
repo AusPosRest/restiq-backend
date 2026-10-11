@@ -31,3 +31,4 @@ export { MailService, webLink, type InboxMessage, type MailMessage } from './mai
 export { baseDomain, TENANT_HOST_HEADER, TenantAddressService } from './tenant-address.service'
 export { RESERVED_SLUGS, SLUG_PATTERN, slugFromHost, slugify, slugProblem } from './tenant-slug'
 export type { SlugProblem } from './tenant-slug'
+export { NotBlank } from './not-blank'
