@@ -187,12 +187,20 @@ export class PosAuthService {
     }
   }
 
-  /** restiq-backend#169: ends every session this staff member holds (all devices) by moving their sessionVersion on. */
+  /** #169/#242: revoke only the presented token; legacy tokens without jti still end all sessions to prevent replay. */
   async logout(staff: PosPrincipal): Promise<void> {
     const plane = this.plane()
     await plane.$transaction(async (tx) => {
       await setTenantContext(tx, staff.tenantId)
-      await tx.staffUser.update({ where: { id: staff.id }, data: { sessionVersion: { increment: 1 } } })
+      if (staff.token) {
+        await tx.revokedPosToken.upsert({
+          where: { jti: staff.token.jti },
+          create: { jti: staff.token.jti, tenantId: staff.tenantId, expiresAt: new Date(staff.token.expiresAt * 1000) },
+          update: {},
+        })
+      } else {
+        await tx.staffUser.update({ where: { id: staff.id }, data: { sessionVersion: { increment: 1 } } })
+      }
     })
   }
 }
