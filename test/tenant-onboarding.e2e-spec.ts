@@ -41,8 +41,8 @@ function submitPayload(overrides?: {
     brandsOutlets: {
       brandName: 'Spice Route',
       outlets: [
-        { name: 'Indiranagar', address: '100 Feet Road, Indiranagar', type: 'dine_in', timezone: 'Asia/Kolkata' },
-        { name: 'Koramangala', address: '5th Block, Koramangala', type: 'qsr', timezone: 'Asia/Kolkata' },
+        { name: 'Indiranagar', address: '100 Feet Road, Indiranagar', type: 'dine_in', timezone: country === 'IN' ? 'Asia/Kolkata' : 'Australia/Sydney' },
+        { name: 'Koramangala', address: '5th Block, Koramangala', type: 'qsr', timezone: country === 'IN' ? 'Asia/Kolkata' : 'Australia/Perth' },
       ],
     },
     subscription: { plan: 'enterprise', billingPeriod: 'monthly' },
@@ -89,6 +89,7 @@ async function wipe(prisma: PrismaClient): Promise<void> {
   await prisma.menuCategory.deleteMany()
   await prisma.billShare.deleteMany()
   await prisma.tender.deleteMany()
+  await prisma.paymentIntent.deleteMany()
   await prisma.bill.deleteMany()
   await prisma.billNumberCounter.deleteMany()
   await prisma.tokenNumberCounter.deleteMany()
@@ -154,10 +155,11 @@ describe('/ops/v1/tenants onboarding (e2e)', () => {
   }
 
   describe('drafts', () => {
-    it('404s when no draft exists', async () => {
+    // PE-6: no draft is a normal answer, not a 404 the console logs as an error.
+    it('answers draft: null when no draft exists', async () => {
       const res = await authed(request(httpServer).get('/ops/v1/tenants/draft'))
-      expect(res.status).toBe(404)
-      expect((res.body as { error: { code: string } }).error.code).toBe('not_found')
+      expect(res.status).toBe(200)
+      expect(res.body).toEqual({ draft: null })
     })
 
     it('saves steps independently and returns them on resume', async () => {
@@ -189,7 +191,7 @@ describe('/ops/v1/tenants onboarding (e2e)', () => {
 
     it('deletes the draft', async () => {
       expect((await authed(request(httpServer).delete('/ops/v1/tenants/draft'))).status).toBe(204)
-      expect((await authed(request(httpServer).get('/ops/v1/tenants/draft'))).status).toBe(404)
+      expect((await authed(request(httpServer).get('/ops/v1/tenants/draft'))).body).toEqual({ draft: null })
     })
 
     it('rejects draft routes without an ops token', async () => {
@@ -221,6 +223,8 @@ describe('/ops/v1/tenants onboarding (e2e)', () => {
       expect(tenant?.status).toBe('provisioning')
       expect(tenant?.country).toBe('IN')
       expect(tenant?.plan).toBe('enterprise')
+      // #213: Live unless the wizard's "Test tenant" box was ticked.
+      expect(tenant?.liveSince).not.toBeNull()
 
       expect(await prisma.tenantTaxRegistration.count({ where: { tenantId } })).toBe(1)
       expect(await prisma.brand.count({ where: { tenantId } })).toBe(1)
@@ -251,13 +255,37 @@ describe('/ops/v1/tenants onboarding (e2e)', () => {
       expect(audit[0]?.reason).toBeTruthy()
     })
 
+    it('gives every new outlet its type\'s starter setup (D2): a dine-in hall with tables, a QSR counter with stations only', async () => {
+      const res = await authed(request(httpServer).post('/ops/v1/tenants')).send(submitPayload({ registrationNumber: '06AABCU9603R1ZV', companyName: 'Starter Setup Co' }))
+      expect(res.status).toBe(201)
+      const tenantId = (res.body as { tenant: { id: string } }).tenant.id
+      const dineIn = await prisma.outlet.findFirstOrThrow({ where: { tenantId, type: 'dine_in' } })
+      const qsr = await prisma.outlet.findFirstOrThrow({ where: { tenantId, type: 'qsr' } })
+
+      expect(await prisma.station.count({ where: { outletId: dineIn.id } })).toBe(5)
+      expect(await prisma.diningTable.count({ where: { floor: { outletId: dineIn.id } } })).toBe(8)
+      expect(await prisma.station.count({ where: { outletId: qsr.id } })).toBe(4)
+      expect(await prisma.floor.count({ where: { outletId: qsr.id } })).toBe(0)
+      expect((await prisma.outletCapability.findFirstOrThrow({ where: { outletId: qsr.id, key: 'token_queue' } })).enabled).toBe(true)
+    })
+
+    it('provisions a Test-mode tenant when the wizard asks for one (#213)', async () => {
+      const res = await authed(request(httpServer).post('/ops/v1/tenants')).send({
+        ...submitPayload({ registrationNumber: '07AABCT1332L1ZD', companyName: 'Test Mode Co' }),
+        testMode: true,
+      })
+      expect(res.status).toBe(201)
+      const tenant = await prisma.tenant.findUniqueOrThrow({ where: { id: (res.body as { tenant: { id: string } }).tenant.id } })
+      expect(tenant.liveSince).toBeNull()
+    })
+
     it('deletes the operator draft on successful submit', async () => {
       await authed(request(httpServer).put('/ops/v1/tenants/draft/steps/1')).send({ companyName: 'Another Co' })
       const res = await authed(request(httpServer).post('/ops/v1/tenants')).send(
         submitPayload({ registrationNumber: '27ZYXWV9876K1Z8', companyName: 'Another Co' }),
       )
       expect(res.status).toBe(201)
-      expect((await authed(request(httpServer).get('/ops/v1/tenants/draft'))).status).toBe(404)
+      expect((await authed(request(httpServer).get('/ops/v1/tenants/draft'))).body).toEqual({ draft: null })
     })
 
     it('rolls back EVERYTHING on a mid-transaction failure and keeps the draft', async () => {
@@ -329,12 +357,69 @@ describe('/ops/v1/tenants onboarding (e2e)', () => {
       expect(Number(registration?.gstRatePercent)).toBe(12)
     })
 
+    it('PE-9: rejects an outlet timezone that is not in the tenant\'s country, or not a real timezone', async () => {
+      for (const timezone of ['Asia/Kolkata', 'Mars/Olympus']) {
+        const payload = submitPayload({ country: 'AU', registrationNumber: '12345678901', companyName: `Wrong Zone ${timezone}` })
+        payload.brandsOutlets.outlets[0].timezone = timezone
+        const res = await authed(request(httpServer).post('/ops/v1/tenants')).send(payload)
+        expect(res.status).toBe(400)
+        expect((res.body as { error: { code: string; message: string } }).error).toMatchObject({ code: 'validation_failed' })
+      }
+    })
+
+    it('PE-9/PE-10: an Australian tenant keeps the chosen Australian timezones and gets an AUD sample menu at Australian prices', async () => {
+      const res = await authed(request(httpServer).post('/ops/v1/tenants')).send(
+        submitPayload({ country: 'AU', registrationNumber: '12345678902', companyName: 'Surry Hills Bistro' }),
+      )
+      expect(res.status).toBe(201)
+      const tenantId = (res.body as { tenant: { id: string } }).tenant.id
+      const outlets = await prisma.outlet.findMany({ where: { tenantId }, orderBy: { name: 'asc' } })
+      expect(outlets.map((o) => o.timezone)).toEqual(['Australia/Sydney', 'Australia/Perth'])
+      const prices = await prisma.itemPrice.findMany({ where: { tenantId }, include: { item: true } })
+      expect(prices.length).toBeGreaterThan(0)
+      expect(new Set(prices.map((p) => p.currency))).toEqual(new Set(['AUD']))
+      expect(prices.every((p) => p.priceMinor <= 4000n)).toBe(true)
+      expect(prices.map((p) => p.item.name)).not.toContain('Filter Coffee')
+    })
+
     it('rejects gstRatePercent when gstRegistered is false', async () => {
       const res = await authed(request(httpServer).post('/ops/v1/tenants')).send(
         submitPayload({ country: 'AU', registrationNumber: '73824719605', companyName: 'Rejected Rate Co', gstRegistered: false, gstRatePercent: 10 }),
       )
       expect(res.status).toBe(400)
       expect((res.body as { error: { code: string } }).error.code).toBe('validation_failed')
+    })
+  })
+
+  // PE-6: the wizard checks the tax number on step 2, not only at submit.
+  describe('GET /ops/v1/tenants/tax-number-available', () => {
+    function check(country: string, number: string): request.Test {
+      return authed(request(httpServer).get('/ops/v1/tenants/tax-number-available').query({ country, number }))
+    }
+
+    it('says a fresh, well-formed number is available', async () => {
+      expect((await check('IN', '33AAACT2727Q1ZW').expect(200)).body).toEqual({ available: true, reason: null })
+      expect((await check('AU', '98765432109').expect(200)).body).toEqual({ available: true, reason: null })
+    })
+
+    it('says taken once another tenant uses it, and names nobody', async () => {
+      await authed(request(httpServer).post('/ops/v1/tenants'))
+        .send(submitPayload({ registrationNumber: '32AAACT2727Q1ZW', companyName: 'Secret Owner Co' }))
+        .expect(201)
+      const res = await check('IN', '32AAACT2727Q1ZW').expect(200)
+      expect(res.body).toEqual({ available: false, reason: 'taken' })
+      expect(JSON.stringify(res.body)).not.toContain('Secret')
+    })
+
+    it('says invalid for a number in the wrong format for the country', async () => {
+      expect((await check('IN', '98765432109').expect(200)).body).toEqual({ available: false, reason: 'invalid' })
+      expect((await check('AU', '33AAACT2727Q1ZW').expect(200)).body).toEqual({ available: false, reason: 'invalid' })
+    })
+
+    it('rejects an unknown country and needs an operator session', async () => {
+      const bad = await check('US', '123').expect(400)
+      expect((bad.body as { error: { code: string } }).error.code).toBe('validation_failed')
+      await request(httpServer).get('/ops/v1/tenants/tax-number-available').query({ country: 'IN', number: '33AAACT2727Q1ZW' }).expect(401)
     })
   })
 

@@ -5,7 +5,7 @@
 import { BadRequestException, ConflictException, Injectable, NotFoundException } from '@nestjs/common'
 import { createHash, randomBytes } from 'node:crypto'
 import type { Prisma } from '../../generated/prisma/client'
-import { OpsPrincipal, RegionRegistryService, uuidv7 } from '../../platform'
+import { hashDeviceSecret, OpsPrincipal, RegionRegistryService, uuidv7 } from '../../platform'
 import { DEVICE_STATUSES, DEVICE_TYPES, DeviceTypeValue, EnrollDeviceDto, GenerateCodeDto, HeartbeatDto } from './devices.dtos'
 
 export const CODE_TTL_MS = 15 * 60 * 1000
@@ -28,6 +28,14 @@ export interface DeviceView {
   revokedAt: string | null
   // Device topology (issue #134): the POS a printer/terminal is linked to.
   pairedPosId: string | null
+}
+
+export interface EnrollResult {
+  device: DeviceView
+  tenantName: string | null
+  outletName: string | null
+  /** restiq-backend#209: shown once - the device presents it at PIN sign-in to prove it is this device. Only its hash is stored. */
+  deviceSecret: string
 }
 
 // Who to hold accountable for the enroll() audit_events row - an ops
@@ -102,8 +110,19 @@ function hashCode(normalized: string): string {
   return createHash('sha256').update(normalized).digest('hex')
 }
 
-function defaultLabel(type: string, id: string): string {
-  return `${type.toUpperCase()}-${id.slice(0, 8)}`
+// restiq-backend#210 (PE-19): a device enrolled without a label gets a
+// human name - "Till 2", "Kitchen screen 1" - never an id fragment.
+const DEVICE_TYPE_NAMES: Record<string, string> = {
+  pos: 'Till',
+  kds: 'Kitchen screen',
+  kiosk: 'Kiosk',
+  cds: 'Customer display',
+  printer: 'Printer',
+  terminal: 'Card terminal',
+}
+
+function defaultLabel(type: string, sameTypeCount: number): string {
+  return `${DEVICE_TYPE_NAMES[type] ?? 'Device'} ${sameTypeCount + 1}`
 }
 
 function toDeviceView(device: {
@@ -253,7 +272,7 @@ export class DevicesService {
   // one-time-use/expiry semantics). `actor` carries whoever is accountable
   // for the audit_events row: an ops operator for the existing route, or a
   // device actor (null actorId, a synthetic actorEmail) for the public one.
-  async enrollWithActor(actor: EnrollActor, dto: EnrollDeviceDto): Promise<{ device: DeviceView }> {
+  async enrollWithActor(actor: EnrollActor, dto: EnrollDeviceDto): Promise<EnrollResult> {
     const codeHash = hashCode(normalizeCode(dto.code))
     const reason = actor.reason ?? DEFAULT_ENROLL_REASON
     const plane = this.registry.planeFor(this.registry.homeRegion())
@@ -280,14 +299,18 @@ export class DevicesService {
 
       const id = uuidv7()
       const now = new Date()
+      const deviceSecret = `dvs_${randomBytes(32).toString('hex')}`
       const device = await tx.device.create({
         data: {
           id,
           tenantId: record.tenantId,
           outletId: record.outletId,
-          label: dto.label?.trim() || defaultLabel(record.deviceType, id),
+          label:
+            dto.label?.trim() ||
+            defaultLabel(record.deviceType, await tx.device.count({ where: { tenantId: record.tenantId, outletId: record.outletId, type: record.deviceType } })),
           type: record.deviceType,
           hardwareKeyFingerprint: dto.hardwareKeyFingerprint,
+          secretHash: hashDeviceSecret(deviceSecret),
           enrolledAt: now,
         },
       })
@@ -319,7 +342,12 @@ export class DevicesService {
         })
       }
 
-      return { device: toDeviceView(device) }
+      // issue #187: the device shows these instead of raw ids (its card, the POS PIN pad).
+      const [tenant, outlet] = await Promise.all([
+        tx.tenant.findUnique({ where: { id: record.tenantId }, select: { name: true } }),
+        tx.outlet.findUnique({ where: { id: record.outletId }, select: { name: true } }),
+      ])
+      return { device: toDeviceView(device), tenantName: tenant?.name ?? null, outletName: outlet?.name ?? null, deviceSecret }
     })
   }
 

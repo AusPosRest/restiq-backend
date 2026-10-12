@@ -1,4 +1,4 @@
-import { BadRequestException, Body, Controller, HttpCode, Param, Patch, Post, UploadedFile, UseInterceptors } from '@nestjs/common'
+import { BadRequestException, Body, Controller, Get, HttpCode, Param, Patch, Post, UploadedFile, UseInterceptors } from '@nestjs/common'
 import { FileInterceptor } from '@nestjs/platform-express'
 import { memoryStorage } from 'multer'
 import { AdminPrincipal, CurrentOwner } from '../../platform'
@@ -9,6 +9,12 @@ import { MAX_UPLOAD_BYTES } from './upload-validation'
 @Controller('admin/v1/menu-import')
 export class AdminMenuImportController {
   constructor(private readonly menuImport: MenuImportService) {}
+
+  // PE-11: the open draft the owner left, so the import page can resume it.
+  @Get('latest')
+  async latest(@CurrentOwner() owner: AdminPrincipal): Promise<{ draft: MenuImportDraftView | null }> {
+    return { draft: await this.menuImport.latest(owner) }
+  }
 
   @Post('upload')
   @HttpCode(201)
@@ -26,7 +32,7 @@ export class AdminMenuImportController {
     @Param('importId') importId: string,
     @Body() dto: PatchMenuImportDraftDto,
   ): Promise<MenuImportDraftView> {
-    return this.menuImport.patch(owner, importId, dto.items)
+    return this.menuImport.patch(owner, importId, dto.items, dto.removeIds)
   }
 
   @Post(':importId/commit')

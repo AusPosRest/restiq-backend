@@ -4,7 +4,7 @@
 // modifierIds) - same server-side rules, different destination (CartLine,
 // not OrderLine, per CartLine's schema comment).
 import { Type } from 'class-transformer'
-import { ArrayMaxSize, ArrayUnique, IsArray, IsInt, IsOptional, IsUUID, Min, ValidateNested } from 'class-validator'
+import { ArrayMaxSize, ArrayUnique, IsArray, IsInt, IsOptional, IsUUID, Max, Min, ValidateNested } from 'class-validator'
 import { ComboSelectionDto } from '../../admin'
 
 export class AddCartLineDto {
@@ -14,7 +14,8 @@ export class AddCartLineDto {
   @IsOptional() @IsUUID()
   variantId?: string
 
-  @IsInt() @Min(1)
+  // SE-13: same cap as the POS.
+  @IsInt() @Min(1) @Max(999)
   quantity!: number
 
   @IsOptional() @IsArray() @ArrayUnique() @IsUUID('all', { each: true })
@@ -27,7 +28,8 @@ export class AddCartComboDto {
   @IsUUID()
   comboId!: string
 
-  @IsInt() @Min(1)
+  // SE-13: same cap as the POS.
+  @IsInt() @Min(1) @Max(999)
   quantity!: number
 
   @IsArray() @ArrayMaxSize(60) @ValidateNested({ each: true }) @Type(() => ComboSelectionDto)
@@ -40,7 +42,7 @@ export class AddCartComboDto {
 // passing (possibly empty) modifierIds replaces them wholesale, re-validated
 // the same way as on add.
 export class UpdateCartLineDto {
-  @IsOptional() @IsInt() @Min(1)
+  @IsOptional() @IsInt() @Min(1) @Max(999)
   quantity?: number
 
   @IsOptional() @IsArray() @ArrayUnique() @IsUUID('all', { each: true })

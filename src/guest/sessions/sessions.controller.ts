@@ -1,7 +1,7 @@
-import { Body, Controller, Get, HttpCode, Param, Post } from '@nestjs/common'
-import { CurrentGuest, GuestPrincipal, Public } from '../../platform'
+import { Body, Controller, Get, HttpCode, Param, ParseUUIDPipe, Post, Query } from '@nestjs/common'
+import { ClientIp, CurrentGuest, GuestPrincipal, Public } from '../../platform'
 import { GuestSessionsService } from './sessions.service'
-import { JoinSessionDto, OutletAvailability, SessionJoinResult, SessionStartResult, StartSessionDto, TableSessionView } from './sessions.dtos'
+import { AvailabilityQueryDto, JoinSessionDto, KioskSessionStartResult, OutletAvailability, SessionJoinResult, SessionStartResult, StartKioskSessionDto, StartSessionDto, TableSessionView, TableWelcomeView } from './sessions.dtos'
 
 @Controller('guest/v1')
 export class GuestSessionsController {
@@ -12,8 +12,8 @@ export class GuestSessionsController {
   // sessions.service.ts's assertQrOrderingEnabled).
   @Public()
   @Get('outlets/:outletId/availability')
-  checkAvailability(@Param('outletId') outletId: string): Promise<OutletAvailability> {
-    return this.sessions.checkAvailability(outletId)
+  checkAvailability(@Param('outletId') outletId: string, @Query() query: AvailabilityQueryDto): Promise<OutletAvailability> {
+    return this.sessions.checkAvailability(outletId, query.tableId)
   }
 
   @Public()
@@ -26,12 +26,27 @@ export class GuestSessionsController {
   @Public()
   @Post('sessions/join')
   @HttpCode(200)
-  joinSession(@Body() dto: JoinSessionDto): Promise<SessionJoinResult> {
-    return this.sessions.joinSession(dto)
+  joinSession(@Body() dto: JoinSessionDto, @ClientIp() ip: string): Promise<SessionJoinResult> {
+    return this.sessions.joinSession(dto, ip)
+  }
+
+  // Issue #138: a kiosk tab's table-less session, bound to its enrolled device.
+  @Public()
+  @Post('kiosk/sessions')
+  @HttpCode(201)
+  startKioskSession(@Body() dto: StartKioskSessionDto): Promise<KioskSessionStartResult> {
+    return this.sessions.startKioskSession(dto)
   }
 
   @Get('session')
   getCurrentSession(@CurrentGuest() guest: GuestPrincipal): Promise<TableSessionView> {
     return this.sessions.getCurrentSession(guest)
+  }
+
+  // CU-22/PE-24: the restaurant and table a QR scan points at, for the welcome screen.
+  @Public()
+  @Get('outlets/:outletId/tables/:tableId/welcome')
+  getTableWelcome(@Param('outletId', ParseUUIDPipe) outletId: string, @Param('tableId', ParseUUIDPipe) tableId: string): Promise<TableWelcomeView> {
+    return this.sessions.getTableWelcome(outletId, tableId)
   }
 }

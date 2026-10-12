@@ -78,6 +78,7 @@ async function wipe(prisma: PrismaClient): Promise<void> {
   await prisma.menuItem.deleteMany()
   await prisma.menuCategory.deleteMany()
   await prisma.tender.deleteMany()
+  await prisma.paymentIntent.deleteMany()
   await prisma.bill.deleteMany()
   await prisma.billNumberCounter.deleteMany()
   await prisma.tokenNumberCounter.deleteMany()
@@ -156,9 +157,9 @@ async function createStation(prisma: PrismaClient, tenantId: string, outletId: s
 }
 
 async function createStaff(prisma: PrismaClient, tenantId: string, outletId: string, name: string): Promise<string> {
-  const role = await prisma.role.create({ data: { tenantId, name: `Waiter-${uuidv7()}`, isSystem: false } })
+  const role = await prisma.role.upsert({ where: { tenantId_name: { tenantId, name: 'Cashier' } }, update: {}, create: { tenantId, name: 'Cashier', isSystem: true, isManager: false } })
   const staff = await prisma.staffUser.create({ data: { tenantId, roleId: role.id, name } })
-  return signPosToken({ id: staff.id, tenantId, outletId, name })
+  return signPosToken({ sessionVersion: 0, id: staff.id, tenantId, outletId, name })
 }
 
 async function createItemWithPrice(prisma: PrismaClient, tenantId: string, priceMinor: number, opts?: { stationId?: string; shortName?: string }): Promise<string> {
@@ -271,7 +272,6 @@ describe('/guest/v1 order status tracking (e2e)', () => {
       await enableQrOrdering(prisma, tenantId, outletId)
       const item = await createItemWithPrice(prisma, tenantId, 15000)
       const { token, sessionId } = await startSession(outletId, tableId)
-      const staffToken = await createStaff(prisma, tenantId, outletId, 'Server Priya')
 
       await authed(request(httpServer).post('/guest/v1/cart/lines'), token).send({ itemId: item, quantity: 1 })
       const firstOrder = (await authed(request(httpServer).post('/guest/v1/orders'), token).send({})).body as PlacedOrderBody
@@ -279,7 +279,8 @@ describe('/guest/v1 order status tracking (e2e)', () => {
       // time - pos/CAP-2 constraint) means a second order can only be placed
       // on the same table once the first is closed - the same thing a staff
       // member would do after settling the first round's bill.
-      await authed(request(httpServer).patch(`/pos/v1/orders/${firstOrder.orderId}/status`), staffToken).send({ status: 'closed' })
+      // Only finalising a bill closes an order (restiq-backend#208, SE-5) - closed directly here.
+      await prisma.order.update({ where: { id: firstOrder.orderId }, data: { status: 'closed' } })
       await authed(request(httpServer).post('/guest/v1/cart/lines'), token).send({ itemId: item, quantity: 2 })
       const secondOrder = (await authed(request(httpServer).post('/guest/v1/orders'), token).send({})).body as PlacedOrderBody
 

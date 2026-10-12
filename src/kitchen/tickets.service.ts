@@ -1,7 +1,7 @@
 // kitchen-display/CAP-1..5 (issue #67, AD-16): the ticket domain's sole
 // owner. Two kinds of entry points into this file:
 //
-//  - fireOnSend/fireAddedLine take a caller-supplied `tx` and participate in
+//  - fireOnSend takes a caller-supplied `tx` and participate in
 //    the CALLER's transaction (pos/orders' open->sent transition and
 //    pos/order-lines' addLine, per AD-16's "same transaction" rule) - they
 //    open no transaction of their own.
@@ -9,7 +9,7 @@
 //    reads, the stations picker) is a normal pos-realm action/read that
 //    opens its own transaction, same shape as every pos/admin service.
 import { ConflictException, Injectable, NotFoundException } from '@nestjs/common'
-import type { Order, OrderLine, Prisma, Station } from '../generated/prisma/client'
+import type { Order, Prisma, Station } from '../generated/prisma/client'
 import { PosPrincipal, RegionRegistryService } from '../platform'
 import { setTenantContext } from './tenant-context'
 import { AllDaySummaryEntryView, ExpoOrderView, ExpoStationEntryView, StationView, TicketLineView, TicketView } from './tickets.dtos'
@@ -48,10 +48,37 @@ async function resolveDefaultStationId(tx: Tx, tenantId: string, outletId: strin
   return station?.id ?? null
 }
 
+// PE-21: an item routes to one station, but stations belong to an outlet. At
+// another outlet (or once that station is deleted) the item goes to the
+// station there with the same name, else the outlet's default - never to a
+// screen in a different outlet.
+async function routeStationId(tx: Tx, order: Pick<Order, 'outletId'>, itemStationId: string | null, defaultStationId: string | null): Promise<string | null> {
+  if (!itemStationId) return defaultStationId
+  const station = await tx.station.findUnique({ where: { id: itemStationId } })
+  if (!station) return defaultStationId
+  if (station.outletId === order.outletId && !station.deletedAt) return station.id
+  const sameName = await tx.station.findFirst({ where: { tenantId: station.tenantId, outletId: order.outletId, name: station.name, deletedAt: null } })
+  return sameName?.id ?? defaultStationId
+}
+
 // The public "station id" path segment for the unrouted synthetic grouping -
 // there is no real Station row to address it by, since Ticket.stationId is
 // nullable precisely for this case.
 export const UNROUTED_STATION_PARAM = 'unrouted'
+
+/**
+ * How far back the Done tab looks (issue #167). A rolling window, not "since
+ * midnight", so a service running past midnight keeps its own tickets on
+ * screen; reopening is limited to the same window, since a ticket bumped
+ * yesterday has no business going back on a live station board.
+ */
+const BUMPED_WINDOW_MS = 12 * 60 * 60 * 1000
+// CU-20: the same window bounds what is still live. A ticket fired more than
+// 12 hours ago and never bumped is a leftover (yesterday's unclosed order),
+// not food anyone is cooking - it stays in the data but leaves the boards.
+const LIVE_WINDOW_MS = BUMPED_WINDOW_MS
+const liveSince = (): Date => new Date(Date.now() - LIVE_WINDOW_MS)
+const BUMPED_MAX = 200
 
 /** Resolves a `:stationId` path param (a real station id, or the literal "unrouted") to the DB value, validating outlet ownership. */
 export async function resolveStationParam(tx: Tx, tenantId: string, outletId: string, stationIdParam: string): Promise<string | null> {
@@ -91,6 +118,8 @@ function toTicketLineView(line: TicketLineWithOrderLine): TicketLineView {
     modifiers: line.orderLine.modifiers.map((m) => ({ id: m.id, name: m.modifier.name })),
     addOnBatch: line.addOnBatch,
     voided: line.voided,
+    // restiq-backend#210: the till's special instructions for this line.
+    note: line.orderLine.note,
   }
 }
 
@@ -130,58 +159,49 @@ export class KitchenTicketsService {
   // -- fire hook (invoked from pos/orders and pos/order-lines, same tx) -----
 
   /**
-   * Whole-order fire (pos/CAP-2's open->sent transition): every line on the
-   * order is unfired at this point (the order was "open"), so every line is
-   * grouped by resolved station and ticketed in one pass - one ticket per
-   * station, addOnBatch 0. A no-op if the order somehow has no lines yet.
+   * Fires every line on the order the kitchen doesn't have yet, grouped by
+   * resolved station (pos/CAP-2's open->sent transition, guest placement,
+   * and - restiq-backend#210 - a later "Send to kitchen" for items added to an
+   * already-sent order, plus finalize as a backstop so a paid order always
+   * reaches the kitchen). Per station: appended as the next ADD-ON batch to
+   * that station's still-QUEUED ticket, or a brand-new ticket (batch 0) when
+   * there is none or the last one there was already bumped (documented edge,
+   * issue #67 scope). Voided lines never fire. Returns how many lines fired.
    */
-  async fireOnSend(tx: Tx, order: Pick<Order, 'id' | 'tenantId' | 'outletId'>): Promise<void> {
+  async fireOnSend(tx: Tx, order: Pick<Order, 'id' | 'tenantId' | 'outletId'>): Promise<number> {
     // A combo's parent line has no item and nothing to cook - its child lines
     // (the chosen items) are what the kitchen gets (restiq-backend#160).
-    const lines = (await tx.orderLine.findMany({ where: { orderId: order.id }, include: { item: true } })).flatMap((l) => (l.item ? [{ ...l, item: l.item }] : []))
-    if (lines.length === 0) return
+    const lines = (
+      await tx.orderLine.findMany({ where: { orderId: order.id, voidedAt: null, ticketLines: { none: {} } }, include: { item: true }, orderBy: { createdAt: 'asc' } })
+    ).flatMap((l) => (l.item ? [{ ...l, item: l.item }] : []))
+    if (lines.length === 0) return 0
 
     const defaultStationId = await resolveDefaultStationId(tx, order.tenantId, order.outletId)
     const groups = new Map<string | null, typeof lines>()
     for (const line of lines) {
-      const stationId = line.item.stationId ?? defaultStationId
+      const stationId = await routeStationId(tx, order, line.item.stationId, defaultStationId)
       const group = groups.get(stationId)
       if (group) group.push(line)
       else groups.set(stationId, [line])
     }
 
     for (const [stationId, groupLines] of groups) {
-      const ticket = await tx.ticket.create({ data: { tenantId: order.tenantId, outletId: order.outletId, orderId: order.id, stationId } })
+      const existing = await tx.ticket.findFirst({ where: { orderId: order.id, stationId }, orderBy: { firedAt: 'desc' } })
+      let ticketId: string
+      let addOnBatch = 0
+      if (existing && existing.status === 'queued') {
+        const maxBatch = await tx.ticketLine.aggregate({ where: { ticketId: existing.id }, _max: { addOnBatch: true } })
+        ticketId = existing.id
+        addOnBatch = (maxBatch._max.addOnBatch ?? 0) + 1
+        await tx.ticketEvent.create({ data: { tenantId: order.tenantId, ticketId, type: 'add_on_fired' } })
+      } else {
+        ticketId = (await tx.ticket.create({ data: { tenantId: order.tenantId, outletId: order.outletId, orderId: order.id, stationId } })).id
+      }
       for (const line of groupLines) {
-        await tx.ticketLine.create({ data: { tenantId: order.tenantId, ticketId: ticket.id, orderLineId: line.id, quantity: line.quantity, addOnBatch: 0 } })
+        await tx.ticketLine.create({ data: { tenantId: order.tenantId, ticketId, orderLineId: line.id, quantity: line.quantity, addOnBatch } })
       }
     }
-  }
-
-  /**
-   * A single new line added to an already-"sent" order (pos/CAP-3's addLine
-   * allows this - see order-lines.service.ts's assertOrderNotClosed, not
-   * assertOrderOpenForEdit). Appends an ADD-ON batch to the station's
-   * existing QUEUED ticket; opens a brand-new ticket at that station only if
-   * there is no ticket there yet, or the prior one there was already bumped
-   * (documented edge, issue #67 scope) - never a second ticket alongside a
-   * still-queued one.
-   */
-  async fireAddedLine(tx: Tx, order: Pick<Order, 'id' | 'tenantId' | 'outletId'>, line: Pick<OrderLine, 'id' | 'quantity'> & { item: { stationId: string | null } }): Promise<void> {
-    const defaultStationId = await resolveDefaultStationId(tx, order.tenantId, order.outletId)
-    const stationId = line.item.stationId ?? defaultStationId
-
-    const existing = await tx.ticket.findFirst({ where: { orderId: order.id, stationId }, orderBy: { firedAt: 'desc' } })
-    if (existing && existing.status === 'queued') {
-      const maxBatch = await tx.ticketLine.aggregate({ where: { ticketId: existing.id }, _max: { addOnBatch: true } })
-      const nextBatch = (maxBatch._max.addOnBatch ?? 0) + 1
-      await tx.ticketLine.create({ data: { tenantId: order.tenantId, ticketId: existing.id, orderLineId: line.id, quantity: line.quantity, addOnBatch: nextBatch } })
-      await tx.ticketEvent.create({ data: { tenantId: order.tenantId, ticketId: existing.id, type: 'add_on_fired' } })
-      return
-    }
-
-    const ticket = await tx.ticket.create({ data: { tenantId: order.tenantId, outletId: order.outletId, orderId: order.id, stationId } })
-    await tx.ticketLine.create({ data: { tenantId: order.tenantId, ticketId: ticket.id, orderLineId: line.id, quantity: line.quantity, addOnBatch: 0 } })
+    return lines.length
   }
 
   // -- actions (CAP-2/CAP-4, no actor attribution) --------------------------
@@ -208,6 +228,9 @@ export class KitchenTicketsService {
       const ticket = await loadTicket(tx, staff.tenantId, ticketId)
       if (ticket.status !== 'bumped') {
         throw new ConflictException({ code: 'conflict', message: 'Only a bumped ticket can be recalled' })
+      }
+      if (ticket.bumpedAt && Date.now() - ticket.bumpedAt.getTime() > BUMPED_WINDOW_MS) {
+        throw new ConflictException({ code: 'conflict', message: 'This ticket is too old to reopen' })
       }
       const updated = await tx.ticket.update({
         where: { id: ticketId },
@@ -256,7 +279,7 @@ export class KitchenTicketsService {
       await setTenantContext(tx, staff.tenantId)
       await loadOutlet(tx, staff.tenantId, outletId)
       const stationId = await resolveStationParam(tx, staff.tenantId, outletId, stationIdParam)
-      const tickets = await tx.ticket.findMany({ where: { tenantId: staff.tenantId, outletId, stationId, status: 'queued' }, orderBy: { firedAt: 'asc' } })
+      const tickets = await tx.ticket.findMany({ where: { tenantId: staff.tenantId, outletId, stationId, status: 'queued', firedAt: { gte: liveSince() } }, orderBy: { firedAt: 'asc' } })
       return Promise.all(tickets.map((t) => buildTicketView(tx, t)))
     })
   }
@@ -268,11 +291,22 @@ export class KitchenTicketsService {
       await setTenantContext(tx, staff.tenantId)
       await loadOutlet(tx, staff.tenantId, outletId)
 
-      // Expo cares about every order still in flight to the kitchen - "sent"
-      // covers it exactly (an order leaves expo only once closed, matching
-      // the SPEC's "plates leave together" framing rather than vanishing the
-      // moment the last station bumps).
-      const orders = await tx.order.findMany({ where: { tenantId: staff.tenantId, outletId, status: 'sent' }, include: { table: true }, orderBy: { createdAt: 'asc' } })
+      // Expo cares about every order still in flight to the kitchen: a "sent"
+      // order stays until closed (the SPEC's "plates leave together"), and
+      // SE-17: an order already paid and closed (pay-first counter/QSR, or a
+      // QR table that settled early) stays while any ticket is still queued.
+      // CU-20: only orders with a ticket fired inside the live window.
+      const since = liveSince()
+      const orders = await tx.order.findMany({
+        where: {
+          tenantId: staff.tenantId,
+          outletId,
+          tickets: { some: { firedAt: { gte: since } } },
+          OR: [{ status: 'sent' }, { tickets: { some: { status: 'queued' } } }],
+        },
+        include: { table: true },
+        orderBy: { createdAt: 'asc' },
+      })
 
       const result: ExpoOrderView[] = []
       for (const order of orders) {
@@ -302,13 +336,17 @@ export class KitchenTicketsService {
     })
   }
 
-  /** CAP-4: bumped tickets, most-recently-bumped first, each with its full recall history. */
+  /** CAP-4: bumped tickets in the last 12 hours, most-recently-bumped first, capped at 200. Each with its full recall history. */
   async bumped(staff: PosPrincipal, outletId: string): Promise<BumpedTicketView[]> {
     const plane = this.plane()
     return plane.$transaction(async (tx) => {
       await setTenantContext(tx, staff.tenantId)
       await loadOutlet(tx, staff.tenantId, outletId)
-      const tickets = await tx.ticket.findMany({ where: { tenantId: staff.tenantId, outletId, status: 'bumped' }, orderBy: { bumpedAt: 'desc' } })
+      const tickets = await tx.ticket.findMany({
+        where: { tenantId: staff.tenantId, outletId, status: 'bumped', bumpedAt: { gte: new Date(Date.now() - BUMPED_WINDOW_MS) } },
+        orderBy: { bumpedAt: 'desc' },
+        take: BUMPED_MAX,
+      })
       return Promise.all(
         tickets.map(async (ticket) => {
           const [view, events] = await Promise.all([
@@ -328,7 +366,7 @@ export class KitchenTicketsService {
       await setTenantContext(tx, staff.tenantId)
       await loadOutlet(tx, staff.tenantId, outletId)
       const lines = await tx.ticketLine.findMany({
-        where: { tenantId: staff.tenantId, voided: false, ticket: { outletId, status: 'queued' } },
+        where: { tenantId: staff.tenantId, voided: false, ticket: { outletId, status: 'queued', firedAt: { gte: liveSince() } } },
         include: { orderLine: { include: { item: true } } },
       })
       const totals = new Map<string, AllDaySummaryEntryView>()

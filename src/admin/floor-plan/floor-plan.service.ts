@@ -90,7 +90,7 @@ async function loadPrinter(tx: Tx, tenantId: string, outletId: string, printerId
 
 async function loadStation(tx: Tx, tenantId: string, outletId: string, stationId: string) {
   const station = await tx.station.findUnique({ where: { id: stationId } })
-  if (!station || station.tenantId !== tenantId || station.outletId !== outletId) {
+  if (!station || station.tenantId !== tenantId || station.outletId !== outletId || station.deletedAt) {
     throw new NotFoundException({ code: 'not_found', message: 'No such station' })
   }
   return station
@@ -319,6 +319,21 @@ export class FloorPlanService {
         },
       })
       return toStationView(station)
+    })
+  }
+
+  /**
+   * Removes a station: its menu items go back to "no station" (the go-live
+   * checklist lists them), past tickets keep it. The row is soft-deleted and its
+   * name freed, because (outlet, name) is unique and the owner may want it back.
+   */
+  async deleteStation(owner: AdminPrincipal, outletId: string, stationId: string): Promise<void> {
+    const plane = this.registry.planeFor(this.registry.homeRegion())
+    await plane.$transaction(async (tx) => {
+      await setTenantContext(tx, owner.tenantId)
+      const existing = await loadStation(tx, owner.tenantId, outletId, stationId)
+      await tx.menuItem.updateMany({ where: { tenantId: owner.tenantId, stationId }, data: { stationId: null } })
+      await tx.station.update({ where: { id: stationId }, data: { deletedAt: new Date(), name: `${existing.name} (removed ${stationId.slice(-6)})` } })
     })
   }
 

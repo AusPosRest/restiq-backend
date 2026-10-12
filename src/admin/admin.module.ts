@@ -22,6 +22,7 @@ import { AdminMenuCategoriesController } from './menu/categories.controller'
 import { CategoriesService } from './menu/categories.service'
 import { AdminMenuCombosController } from './menu/combos.controller'
 import { CombosService } from './menu/combos.service'
+import { AdminMenuDirectoryController } from './menu/directory.controller'
 import { AdminMenuItemsController } from './menu/items.controller'
 import { ItemsService } from './menu/items.service'
 import { AdminMenuModifierGroupsController } from './menu/modifier-groups.controller'
@@ -36,6 +37,7 @@ import { ReportsService } from './reports/reports.service'
 import { AdminRolesController } from './staff/roles.controller'
 import { AdminStaffController } from './staff/staff.controller'
 import { StaffService } from './staff/staff.service'
+import { AdminTenantController } from './tenant.controller'
 
 @Module({
   imports: [PlatformModule, OpsModule],
@@ -49,6 +51,7 @@ import { StaffService } from './staff/staff.service'
     AdminMenuModifierGroupsController,
     AdminMenuAllergensController,
     AdminMenuCombosController,
+    AdminMenuDirectoryController,
     AdminOutletsController,
     AdminBrandingController,
     AdminFloorPlanController,
@@ -58,6 +61,7 @@ import { StaffService } from './staff/staff.service'
     AdminReportsController,
     AdminTaxController,
     AdminAgreementController,
+    AdminTenantController,
   ],
   providers: [
     AdminAuthService,

@@ -106,4 +106,10 @@ export class AdminFloorPlanController {
   ): Promise<StationView> {
     return this.floorPlan.updateStation(owner, outletId, stationId, dto)
   }
+
+  @Delete('stations/:stationId')
+  @HttpCode(204)
+  deleteStation(@CurrentOwner() owner: AdminPrincipal, @Param('outletId') outletId: string, @Param('stationId') stationId: string): Promise<void> {
+    return this.floorPlan.deleteStation(owner, outletId, stationId)
+  }
 }

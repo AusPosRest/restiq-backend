@@ -13,7 +13,7 @@
 // barrel; the guest realm never imports pos-internal, non-exported
 // functions), not a second, drifting reimplementation of the business rule.
 import { BadRequestException, ConflictException, ForbiddenException, GoneException, Injectable, NotFoundException } from '@nestjs/common'
-import { resolveComboSelection, resolveCurrentPrice } from '../../admin'
+import { assertItemAvailable, resolveComboSelection, resolveCurrentPrice } from '../../admin'
 import type { CartLine, Prisma, PriceChannel, TableSession } from '../../generated/prisma/client'
 import { GuestPrincipal, RegionRegistryService } from '../../platform'
 import { isSessionInactive } from '../sessions/sessions.service'
@@ -58,7 +58,7 @@ type CartLineWithRelations = Prisma.CartLineGetPayload<{ include: typeof LINE_IN
 
 async function loadItemForCartLine(tx: Tx, tenantId: string, itemId: string): Promise<ItemForCartLine> {
   const item = await tx.menuItem.findUnique({ where: { id: itemId }, include: ITEM_INCLUDE })
-  if (!item || item.tenantId !== tenantId) {
+  if (!item || item.tenantId !== tenantId || item.archivedAt) {
     throw new BadRequestException({ code: 'validation_failed', message: 'No such menu item' })
   }
   return item
@@ -94,23 +94,6 @@ function assertModifierSelectionValid(item: ItemForCartLine, modifierIds: string
         message: `"${group.name}" requires between ${group.minSelections} and ${group.maxSelections} selection(s), got ${selectedCount}`,
       })
     }
-  }
-}
-
-/**
- * CAP-2 success criterion: "an 86'd item shows unavailable and cannot be
- * added" - checks the tenant-wide toggle (MenuItem.available) AND this
- * outlet's override (ItemOutletOverride), the same two availability sources
- * Tenant Admin's items.service.ts writes (admin/menu/items.service.ts's
- * setAvailability/setOutletAvailability). Never a guest-side copy of either.
- */
-async function assertItemAvailable(tx: Tx, outletId: string, item: ItemForCartLine): Promise<void> {
-  if (!item.available) {
-    throw new BadRequestException({ code: 'item_unavailable', message: 'This item is currently unavailable' })
-  }
-  const override = await tx.itemOutletOverride.findUnique({ where: { itemId_outletId: { itemId: item.id, outletId } } })
-  if (override && !override.available) {
-    throw new BadRequestException({ code: 'item_unavailable', message: 'This item is currently unavailable' })
   }
 }
 

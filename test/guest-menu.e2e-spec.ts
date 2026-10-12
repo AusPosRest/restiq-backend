@@ -49,6 +49,10 @@ interface ErrorBody {
 async function wipe(prisma: PrismaClient): Promise<void> {
   await prisma.creditNote.deleteMany()
   await prisma.orderLineModifier.deleteMany()
+  // Kitchen tickets another suite left behind hold order lines/orders (RESTRICT) - cleared first.
+  await prisma.ticketLine.deleteMany()
+  await prisma.ticketEvent.deleteMany()
+  await prisma.ticket.deleteMany()
   await prisma.orderLine.deleteMany()
   await prisma.invoice.deleteMany()
   await prisma.subscription.deleteMany()
@@ -72,6 +76,7 @@ async function wipe(prisma: PrismaClient): Promise<void> {
   await prisma.menuCategory.deleteMany()
   await prisma.billShare.deleteMany()
   await prisma.tender.deleteMany()
+  await prisma.paymentIntent.deleteMany()
   await prisma.bill.deleteMany()
   await prisma.billNumberCounter.deleteMany()
   await prisma.tokenNumberCounter.deleteMany()
@@ -169,7 +174,7 @@ describe('/guest/v1/menu (e2e)', () => {
   it('rejects a pos-realm token on the guest menu route', async () => {
     const tenantId = await createTenant(prisma)
     const outletId = await createOutlet(prisma, tenantId)
-    const posToken = signPosToken({ id: uuidv7(), tenantId, outletId, name: 'Server' })
+    const posToken = signPosToken({ sessionVersion: 0, id: uuidv7(), tenantId, outletId, name: 'Server' })
     const res = await request(httpServer).get('/guest/v1/menu').set('Authorization', `Bearer ${posToken}`)
     expect(res.status).toBe(401)
   })
@@ -281,7 +286,8 @@ describe('/guest/v1/menu (e2e)', () => {
     const outletA = await createOutlet(prisma, tenantA)
     const tableA = await createTable(prisma, tenantA, outletA)
     const categoryA = await prisma.menuCategory.create({ data: { tenantId: tenantA, name: 'A Mains', sortOrder: 0 } })
-    await prisma.menuItem.create({ data: { tenantId: tenantA, categoryId: categoryA.id, name: 'A Item', shortName: 'AI' } })
+    const itemA = await prisma.menuItem.create({ data: { tenantId: tenantA, categoryId: categoryA.id, name: 'A Item', shortName: 'AI' } })
+    await prisma.itemPrice.create({ data: { tenantId: tenantA, itemId: itemA.id, priceMinor: 10000n, currency: 'INR' } })
 
     const tenantB = await createTenant(prisma, 'Tenant B')
     await createOutlet(prisma, tenantB)
@@ -294,6 +300,26 @@ describe('/guest/v1/menu (e2e)', () => {
     expect(body.categories).toHaveLength(1)
     expect(body.categories[0].name).toBe('A Mains')
     expect(body.categories[0].items.map((i) => i.name)).toEqual(['A Item'])
+  })
+
+  it('leaves off items and variants with no price, as the till does (CU-23)', async () => {
+    const tenantId = await createTenant(prisma)
+    const outletId = await createOutlet(prisma, tenantId)
+    const tableId = await createTable(prisma, tenantId, outletId)
+    const category = await prisma.menuCategory.create({ data: { tenantId, name: 'Salads', sortOrder: 0 } })
+    await prisma.menuItem.create({ data: { tenantId, categoryId: category.id, name: 'Unpriced', shortName: 'U' } })
+    const salad = await prisma.menuItem.create({ data: { tenantId, categoryId: category.id, name: 'Garden Salad', shortName: 'GS' } })
+    await prisma.itemVariant.create({ data: { tenantId, itemId: salad.id, name: 'Half', sortOrder: 0 } })
+    const full = await prisma.itemVariant.create({ data: { tenantId, itemId: salad.id, name: 'Full', sortOrder: 1 } })
+    await prisma.itemPrice.create({ data: { tenantId, itemId: salad.id, variantId: full.id, priceMinor: 22000n, currency: 'INR' } })
+    const curry = await prisma.menuItem.create({ data: { tenantId, categoryId: category.id, name: 'House Curry', shortName: 'HC' } })
+    await prisma.itemVariant.create({ data: { tenantId, itemId: curry.id, name: 'Half', sortOrder: 0 } })
+
+    const { token } = guestTokenFor(tenantId, outletId, tableId)
+    const res = await request(httpServer).get('/guest/v1/menu').set('Authorization', `Bearer ${token}`)
+    const items = (res.body as GuestMenuBody).categories[0].items
+    expect(items.map((i) => i.name)).toEqual(['Garden Salad'])
+    expect(items[0].variants.map((v) => v.name)).toEqual(['Full'])
   })
 
   it('GET /guest/v1/menu/items/:itemId returns one item detail, scoped the same way', async () => {
@@ -361,5 +387,24 @@ describe('/guest/v1/menu (e2e)', () => {
     expect(singleItem.photoUrl).toBe('https://cdn.example.com/paneer.jpg')
     expect(singleItem.nameHindi).toBe('पनीर टिक्का')
     expect(singleItem.vegMarker).toBe('veg')
+  })
+
+  it('nulls photoUrl on the menu and item detail when the outlet turns menu_photos off (#148)', async () => {
+    const tenantId = await createTenant(prisma)
+    const outletId = await createOutlet(prisma, tenantId)
+    const tableId = await createTable(prisma, tenantId, outletId)
+    const category = await prisma.menuCategory.create({ data: { tenantId, name: 'Starters', sortOrder: 0 } })
+    const item = await prisma.menuItem.create({
+      data: { tenantId, categoryId: category.id, name: 'Masala Dosa', shortName: 'MD', photoUrl: 'https://cdn.example.com/dosa.jpg' },
+    })
+    await prisma.itemPrice.create({ data: { tenantId, itemId: item.id, priceMinor: 12000n, currency: 'INR' } })
+    await prisma.outletCapability.create({ data: { tenantId, outletId, key: 'menu_photos', enabled: false } })
+
+    const { token } = guestTokenFor(tenantId, outletId, tableId)
+    const menuRes = await request(httpServer).get('/guest/v1/menu').set('Authorization', `Bearer ${token}`)
+    expect((menuRes.body as GuestMenuBody).categories[0].items[0].photoUrl).toBeNull()
+
+    const itemRes = await request(httpServer).get(`/guest/v1/menu/items/${item.id}`).set('Authorization', `Bearer ${token}`)
+    expect((itemRes.body as MenuItemBody).photoUrl).toBeNull()
   })
 })

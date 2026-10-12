@@ -13,10 +13,11 @@
 import { INestApplication } from '@nestjs/common'
 import { Test } from '@nestjs/testing'
 import request from 'supertest'
-import { afterAll, beforeAll, beforeEach, describe, expect, it } from 'vitest'
+import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it } from 'vitest'
 import { AppModule } from '../src/app.module'
 import { createPrismaClient, PrismaClient } from '../src/db/client'
 import { signPosToken, uuidv7 } from '../src/platform'
+import { confirmIntent } from '../src/pos'
 
 interface ErrorBody {
   error: { code: string; message: string }
@@ -96,6 +97,8 @@ async function wipe(prisma: PrismaClient): Promise<void> {
   await prisma.ticket.deleteMany()
   await prisma.order.deleteMany()
   await prisma.clockEvent.deleteMany()
+  await prisma.cashMovement.deleteMany()
+  await prisma.shift.deleteMany()
   await prisma.staffUser.deleteMany()
   await prisma.role.deleteMany()
   await prisma.outletCapability.deleteMany()
@@ -155,9 +158,14 @@ async function createTable(prisma: PrismaClient, tenantId: string, outletId: str
 }
 
 async function createStaff(prisma: PrismaClient, tenantId: string, outletId: string, name: string): Promise<{ id: string; token: string }> {
-  const role = await prisma.role.create({ data: { tenantId, name: `Role-${uuidv7()}`, isSystem: false, isManager: false } })
+  const role = await prisma.role.upsert({ where: { tenantId_name: { tenantId, name: 'Cashier' } }, update: {}, create: { tenantId, name: 'Cashier', isSystem: true, isManager: false } })
   const staff = await prisma.staffUser.create({ data: { tenantId, roleId: role.id, name } })
-  const token = signPosToken({ id: staff.id, tenantId, outletId, name })
+  // restiq-backend#208 (PE-17): cash needs an open shift at the outlet - the
+  // first staff member created for an outlet opens one.
+  if (!(await prisma.shift.findFirst({ where: { outletId, closedAt: null } }))) {
+    await prisma.shift.create({ data: { tenantId, outletId, openedByStaffId: staff.id, floatMinor: 0n } })
+  }
+  const token = signPosToken({ sessionVersion: 0, id: staff.id, tenantId, outletId, name })
   return { id: staff.id, token }
 }
 
@@ -210,6 +218,10 @@ describe('/pos/v1 payment intents - simulated card terminal (e2e)', () => {
     await authed(request(httpServer).patch(`/pos/v1/orders/${orderId}/status`), owner.token).send({ status: 'sent' })
     const created = await authed(request(httpServer).post(`/pos/v1/orders/${orderId}/bill`), owner.token).send()
     expect(created.status).toBe(201)
+    // restiq-backend#210: an intent needs a terminal to go to - one outlet-wide terminal.
+    await prisma.device.create({
+      data: { id: uuidv7(), tenantId, outletId, label: 'Counter terminal', type: 'terminal', hardwareKeyFingerprint: `fp-${uuidv7()}`, enrolledAt: new Date() },
+    })
     return { tenantId, outletId, billId: (created.body as BillBody).id, token: owner.token }
   }
 
@@ -251,6 +263,34 @@ describe('/pos/v1 payment intents - simulated card terminal (e2e)', () => {
       expect((second.body as ErrorBody).error.code).toBe('intent_active')
 
       expect(await prisma.paymentIntent.count({ where: { billId } })).toBe(1)
+    })
+
+    it('refuses with no_terminal, in plain words, when no terminal would ever pick it up (PE-22)', async () => {
+      const { tenantId, outletId, billId, token } = await setUpOpenBill()
+      await prisma.device.deleteMany({ where: { tenantId, type: 'terminal' } })
+
+      const none = await sendToTerminal(billId, token, 100)
+      expect(none.status).toBe(409)
+      expect((none.body as ErrorBody).error.code).toBe('no_terminal')
+      expect((none.body as ErrorBody).error.message).toContain('No card terminal is set up')
+
+      // A terminal linked to a different till does not serve this one either.
+      const otherPos = await prisma.device.create({
+        data: { id: uuidv7(), tenantId, outletId, label: 'Till 2', type: 'pos', hardwareKeyFingerprint: `fp-${uuidv7()}`, enrolledAt: new Date() },
+      })
+      await prisma.device.create({
+        data: { id: uuidv7(), tenantId, outletId, label: 'Till 2 terminal', type: 'terminal', hardwareKeyFingerprint: `fp-${uuidv7()}`, enrolledAt: new Date(), pairedPosId: otherPos.id },
+      })
+      expect((await sendToTerminal(billId, token, 100)).status).toBe(409)
+      expect(await prisma.paymentIntent.count({ where: { billId } })).toBe(0)
+    })
+
+    it('says a payment is already waiting without leaking its id (PE-22)', async () => {
+      const { billId, token } = await setUpOpenBill()
+      const first = await sendToTerminal(billId, token, 100)
+      const second = await sendToTerminal(billId, token, 100)
+      expect(second.status).toBe(409)
+      expect((second.body as ErrorBody).error.message).not.toContain((first.body as IntentBody).id)
     })
 
     it('never asks the terminal for more than what is still due', async () => {
@@ -401,6 +441,26 @@ describe('/pos/v1 payment intents - simulated card terminal (e2e)', () => {
     })
   })
 
+  describe('a late capture on a bill already settled another way (restiq-backend#208, SE-28)', () => {
+    it('writes no second tender on the finalised bill and flags the capture for a refund', async () => {
+      const { billId, token } = await setUpOpenBill()
+      const intent = (await sendToTerminal(billId, token, 21000)).body as IntentBody
+      await prisma.paymentIntent.update({ where: { id: intent.id }, data: { expiresAt: new Date(Date.now() - 1000) } })
+      expect(((await authed(request(httpServer).get(`/pos/v1/payment-intents/${intent.id}`), token)).body as IntentBody).status).toBe('expired')
+
+      const cash = await authed(request(httpServer).post(`/pos/v1/bills/${billId}/finalize`), token).send({ tenders: [{ method: 'cash', amountMinor: 21000 }] })
+      expect(cash.status).toBe(200)
+
+      const late = await authed(request(httpServer).post(`/pos/v1/payment-intents/${intent.id}/simulate`), token).send({ outcome: 'success' })
+      expect(late.status).toBe(200)
+      expect(late.body as IntentBody).toMatchObject({ status: 'succeeded', tenderId: null, failureReason: 'late_capture_refund_due' })
+
+      const tenders = await prisma.tender.findMany({ where: { billId } })
+      expect(tenders.map((t) => [t.method, Number(t.amountMinor)])).toEqual([['cash', 21000]])
+      expect(await prisma.auditEvent.count({ where: { action: 'payment.late_capture_refund_due' } })).toBe(1)
+    })
+  })
+
   describe('finalising on the terminal alone', () => {
     it('finalises with an empty cashier tender list when the terminal covered the whole bill', async () => {
       const { billId, token } = await setUpOpenBill()
@@ -449,6 +509,90 @@ describe('/pos/v1 payment intents - simulated card terminal (e2e)', () => {
       expect((await heartbeat(uuidv7())).status).toBe(404)
       const elsewhere = await device(tenantId, await createOutlet(prisma, tenantId, 'Koramangala'), 'terminal')
       expect((await heartbeat(elsewhere.id)).status).toBe(404)
+    })
+  })
+
+  describe('with the simulator off (#170)', () => {
+    afterEach(() => {
+      process.env.PAYMENTS_SIMULATOR = 'on'
+    })
+
+    it('refuses a new card intent but still settles cash + external-terminal payments', async () => {
+      const { billId, token } = await setUpOpenBill()
+      process.env.PAYMENTS_SIMULATOR = 'off'
+      const sent = await sendToTerminal(billId, token, 21000)
+      expect(sent.status).toBe(409)
+      expect((sent.body as ErrorBody).error.code).toBe('provider_unavailable')
+      expect(await prisma.paymentIntent.count({ where: { billId } })).toBe(0)
+
+      const finalized = await authed(request(httpServer).post(`/pos/v1/bills/${billId}/finalize`), token).send({
+        tenders: [
+          { method: 'cash', amountMinor: 1000 },
+          { method: 'external', amountMinor: 20000, reference: 'EFTPOS 004512' },
+        ],
+      })
+      expect(finalized.status).toBe(200)
+      expect((finalized.body as BillBody).status).toBe('finalized')
+    })
+
+    it('an intent created while it was on can no longer be approved - not via the route, not via confirmIntent', async () => {
+      const { tenantId, billId, token } = await setUpOpenBill()
+      const intent = (await sendToTerminal(billId, token, 21000)).body as IntentBody
+      process.env.PAYMENTS_SIMULATOR = 'off'
+
+      const approve = await authed(request(httpServer).post(`/pos/v1/payment-intents/${intent.id}/simulate`), token).send({ outcome: 'success' })
+      expect(approve.status).toBe(404)
+      await expect(prisma.$transaction((tx) => confirmIntent(tx, { tenantId, intentId: intent.id }))).rejects.toMatchObject({ response: { code: 'simulator_disabled' } })
+      expect(await prisma.tender.count({ where: { billId } })).toBe(0)
+      expect((await prisma.paymentIntent.findUniqueOrThrow({ where: { id: intent.id } })).status).toBe('pending')
+    })
+
+    it('a simulated tender recorded while it was on cannot settle the bill once it is off', async () => {
+      const { billId, token } = await setUpOpenBill()
+      const intent = (await sendToTerminal(billId, token, 21000)).body as IntentBody
+      await authed(request(httpServer).post(`/pos/v1/payment-intents/${intent.id}/simulate`), token).send({ outcome: 'success' })
+      process.env.PAYMENTS_SIMULATOR = 'off'
+
+      const finalized = await authed(request(httpServer).post(`/pos/v1/bills/${billId}/finalize`), token).send({ tenders: [] })
+      expect(finalized.status).toBe(409)
+      expect((finalized.body as ErrorBody).error.code).toBe('simulated_tender')
+      expect((await prisma.bill.findUniqueOrThrow({ where: { id: billId } })).status).toBe('open')
+    })
+
+    // #213: a Test-mode tenant keeps the simulated terminal with the server switch off; a Live one never gets it.
+    it('a Test-mode tenant still gets simulated card payments end to end, and its invoice says so', async () => {
+      const { tenantId, billId, token } = await setUpOpenBill()
+      await prisma.tenant.update({ where: { id: tenantId }, data: { liveSince: null } })
+      process.env.PAYMENTS_SIMULATOR = 'off'
+      // The POS / KDS header reads the mode for its TEST badge.
+      expect(((await authed(request(httpServer).get('/pos/v1/tenant'), token)).body as { testMode: boolean }).testMode).toBe(true)
+
+      const sent = await sendToTerminal(billId, token, 21000)
+      expect(sent.status).toBe(201)
+      const intent = sent.body as IntentBody
+      const approve = await authed(request(httpServer).post(`/pos/v1/payment-intents/${intent.id}/simulate`), token).send({ outcome: 'success' })
+      expect(approve.status).toBe(200)
+      const finalized = await authed(request(httpServer).post(`/pos/v1/bills/${billId}/finalize`), token).send({ tenders: [] })
+      expect(finalized.status).toBe(200)
+      const invoice = await authed(request(httpServer).get(`/pos/v1/bills/${billId}/invoice`), token)
+      expect((invoice.body as { testMode: boolean }).testMode).toBe(true)
+
+      // Once Live, the same tenant's simulated payments stop - and that old test invoice stays a test one.
+      await prisma.tenant.update({ where: { id: tenantId }, data: { liveSince: new Date() } })
+      expect(((await authed(request(httpServer).get(`/pos/v1/bills/${billId}/invoice`), token)).body as { testMode: boolean }).testMode).toBe(true)
+      const { billId: liveBill, token: liveToken } = await setUpOpenBill()
+      expect((await sendToTerminal(liveBill, liveToken, 21000)).status).toBe(409)
+      expect(((await authed(request(httpServer).get(`/pos/v1/bills/${liveBill}/invoice`), liveToken)).body as { testMode: boolean }).testMode).toBe(false)
+    })
+
+    it('anything but the exact value "on" is off', async () => {
+      const { billId, token } = await setUpOpenBill()
+      for (const value of ['', 'true', 'ON', '1']) {
+        process.env.PAYMENTS_SIMULATOR = value
+        expect((await sendToTerminal(billId, token, 21000)).status).toBe(409)
+      }
+      delete process.env.PAYMENTS_SIMULATOR
+      expect((await sendToTerminal(billId, token, 21000)).status).toBe(409)
     })
   })
 

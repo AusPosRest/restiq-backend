@@ -11,7 +11,7 @@ import { afterAll, beforeAll, beforeEach, describe, expect, it } from 'vitest'
 import { AppModule } from '../src/app.module'
 import { createPrismaClient, PrismaClient } from '../src/db/client'
 import { ENROLL_RATE_LIMIT_ATTEMPTS } from '../src/device/enroll/enroll-rate-limit.guard'
-import { signOpsToken, uuidv7 } from '../src/platform'
+import { hashDeviceSecret, signOpsToken, uuidv7 } from '../src/platform'
 
 const EMAIL = 'device-enroll-operator@restiq.example'
 
@@ -58,6 +58,7 @@ async function wipe(prisma: PrismaClient): Promise<void> {
   await prisma.menuCategory.deleteMany()
   await prisma.billShare.deleteMany()
   await prisma.tender.deleteMany()
+  await prisma.paymentIntent.deleteMany()
   await prisma.bill.deleteMany()
   await prisma.billNumberCounter.deleteMany()
   await prisma.tokenNumberCounter.deleteMany()
@@ -180,10 +181,16 @@ describe('/device/v1/enroll (e2e)', () => {
     expect(res.status).toBe(201)
     const body = deviceOf(res)
     expect(body).toMatchObject({ tenantId, outletId, type: 'pos', role: 'terminal', status: 'active', label: 'Kitchen Terminal' })
+    // issue #187: the names ride along so the device never shows raw ids.
+    expect(res.body).toMatchObject({ tenantName: 'Spice Route Hospitality', outletName: 'Indiranagar' })
 
     const deviceRow = await prisma.device.findUnique({ where: { id: body.id } })
     expect(deviceRow?.status).toBe('active')
     expect(deviceRow?.hardwareKeyFingerprint).toBe('device-stub-fingerprint-1')
+    // #209 (SE-12): the device gets its secret once; only a hash of it is kept.
+    const { deviceSecret } = res.body as { deviceSecret: string }
+    expect(deviceSecret).toMatch(/^dvs_[0-9a-f]{64}$/)
+    expect(deviceRow?.secretHash).toBe(hashDeviceSecret(deviceSecret))
 
     expect((await prisma.enrolmentCode.findFirst({ where: { tenantId } }))?.usedAt).not.toBeNull()
 
@@ -191,6 +198,12 @@ describe('/device/v1/enroll (e2e)', () => {
     expect(audit).toHaveLength(1)
     expect(audit[0]?.actorId).toBeNull()
     expect(audit[0]?.actorEmail).toBe('device:device-stub-')
+  })
+
+  it('names an unlabelled device in plain words - Till 1, Till 2 - never an id fragment (PE-19)', async () => {
+    const first = deviceOf(await deviceEnroll(codeOf(await generateCode()), { hardwareKeyFingerprint: 'fp-a' }))
+    const second = deviceOf(await deviceEnroll(codeOf(await generateCode()), { hardwareKeyFingerprint: 'fp-b' }))
+    expect([first.label, second.label]).toEqual(['Till 1', 'Till 2'])
   })
 
   it('rejects an unknown code with 400 code_invalid', async () => {
@@ -249,12 +262,20 @@ describe('/device/v1/enroll (e2e)', () => {
   })
 
   describe('rate limiting (issue #95)', () => {
-    // Each test uses its own X-Forwarded-For IP so it can't be affected by
-    // - or affect - attempts made by any other test in this file.
+    // #209 (SE-32): the client address comes from the web proxy's header, believed only with the shared secret.
+    const SECRET = 'e2e-enroll-proxy-secret'
+    beforeAll(() => {
+      process.env.PROXY_SHARED_SECRET = SECRET
+    })
+    afterAll(() => {
+      delete process.env.PROXY_SHARED_SECRET
+    })
+
     async function attempt(ip: string, code = 'ZZZ-ZZZ') {
       return request(httpServer)
         .post('/device/v1/enroll')
-        .set('X-Forwarded-For', ip)
+        .set('X-Restiq-Client-Ip', ip)
+        .set('X-Restiq-Proxy-Secret', SECRET)
         .send({ code, hardwareKeyFingerprint: 'rate-limit-probe' })
     }
 
@@ -281,13 +302,26 @@ describe('/device/v1/enroll (e2e)', () => {
       expect(errorCodeOf(res)).toBe('code_invalid')
     })
 
+    it('ignores a caller-written X-Forwarded-For, and a forwarded address without the proxy secret (restiq-backend#209, SE-32)', async () => {
+      for (let i = 0; i <= ENROLL_RATE_LIMIT_ATTEMPTS; i++) {
+        const res = await request(httpServer)
+          .post('/device/v1/enroll')
+          .set('X-Forwarded-For', `203.0.113.${i + 1}`)
+          .set('X-Restiq-Client-Ip', `198.51.100.${i + 1}`)
+          .set('X-Restiq-Proxy-Secret', 'not-the-secret')
+          .send({ code: 'ZZZ-ZZZ', hardwareKeyFingerprint: 'rate-limit-probe' })
+        expect(res.status).toBe(i < ENROLL_RATE_LIMIT_ATTEMPTS ? 400 : 429)
+      }
+    })
+
     it('still redeems a valid code within the limit', async () => {
       const ip = '10.0.1.4'
       const code = codeOf(await generateCode())
       for (let i = 0; i < ENROLL_RATE_LIMIT_ATTEMPTS - 1; i++) await attempt(ip)
       const res = await request(httpServer)
         .post('/device/v1/enroll')
-        .set('X-Forwarded-For', ip)
+        .set('X-Restiq-Client-Ip', ip)
+        .set('X-Restiq-Proxy-Secret', SECRET)
         .send({ code, hardwareKeyFingerprint: 'rate-limit-probe-valid' })
       expect(res.status).toBe(201)
     })

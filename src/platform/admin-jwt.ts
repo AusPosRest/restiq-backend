@@ -11,6 +11,8 @@ export interface AdminPrincipal {
   id: string
   tenantId: string
   email: string
+  /** Matches OwnerUser.sessionVersion; a reset moves it on and ends every older token. Tokens issued before #181 carry none. */
+  sessionVersion?: number
 }
 
 function adminJwtSecret(): string {
@@ -22,7 +24,7 @@ function adminJwtSecret(): string {
 }
 
 export function signAdminToken(principal: AdminPrincipal): string {
-  return jwt.sign({ email: principal.email, tenantId: principal.tenantId }, adminJwtSecret(), {
+  return jwt.sign({ email: principal.email, tenantId: principal.tenantId, ...(principal.sessionVersion === undefined ? {} : { sv: principal.sessionVersion }) }, adminJwtSecret(), {
     subject: principal.id,
     audience: ADMIN_JWT_AUDIENCE,
     expiresIn: ADMIN_SESSION_TTL_SECONDS,
@@ -37,7 +39,8 @@ export function verifyAdminToken(token: string): AdminPrincipal | null {
     const email: unknown = payload.email
     const tenantId: unknown = payload.tenantId
     if (typeof email !== 'string' || typeof tenantId !== 'string') return null
-    return { id: payload.sub, tenantId, email }
+    const sv: unknown = payload.sv
+    return { id: payload.sub, tenantId, email, ...(typeof sv === 'number' ? { sessionVersion: sv } : {}) }
   } catch {
     return null
   }

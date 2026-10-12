@@ -17,7 +17,7 @@
 import { INestApplication } from '@nestjs/common'
 import { Test } from '@nestjs/testing'
 import request from 'supertest'
-import { afterAll, beforeAll, beforeEach, describe, expect, it } from 'vitest'
+import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it } from 'vitest'
 import { AppModule } from '../src/app.module'
 import { createPrismaClient, PrismaClient } from '../src/db/client'
 import { signPosToken, uuidv7 } from '../src/platform'
@@ -86,6 +86,7 @@ async function wipe(prisma: PrismaClient): Promise<void> {
   await prisma.orderLine.deleteMany()
   await prisma.billShare.deleteMany()
   await prisma.tender.deleteMany()
+  await prisma.paymentIntent.deleteMany()
   await prisma.bill.deleteMany()
   await prisma.billNumberCounter.deleteMany()
   await prisma.tokenNumberCounter.deleteMany()
@@ -199,9 +200,9 @@ async function enableQrOrdering(prisma: PrismaClient, tenantId: string, outletId
 }
 
 async function createStaff(prisma: PrismaClient, tenantId: string, outletId: string, name: string): Promise<string> {
-  const role = await prisma.role.create({ data: { tenantId, name: `Waiter-${uuidv7()}`, isSystem: false } })
+  const role = await prisma.role.upsert({ where: { tenantId_name: { tenantId, name: 'Cashier' } }, update: {}, create: { tenantId, name: 'Cashier', isSystem: true, isManager: false } })
   const staff = await prisma.staffUser.create({ data: { tenantId, roleId: role.id, name } })
-  return signPosToken({ id: staff.id, tenantId, outletId, name })
+  return signPosToken({ sessionVersion: 0, id: staff.id, tenantId, outletId, name })
 }
 
 async function createItemWithPrice(prisma: PrismaClient, tenantId: string, priceMinor: number): Promise<string> {
@@ -389,6 +390,85 @@ describe('/guest/v1 checkout and split payment, simulated (e2e)', () => {
     })
   })
 
+  describe('simulated guest payments are off in production (restiq-backend#208, SE-14)', () => {
+    afterEach(() => {
+      process.env.PAYMENTS_SIMULATOR = 'on'
+    })
+
+    it('refuses a guest share or whole-bill payment and writes no tender when the simulator is off', async () => {
+      const tenantId = await createTenant(prisma)
+      const outletId = await createOutlet(prisma, tenantId)
+      const tableId = await createTable(prisma, tenantId, outletId)
+      await enableQrOrdering(prisma, tenantId, outletId)
+      const itemId = await createItemWithPrice(prisma, tenantId, 10000)
+      const { tokens, sessionId, orderId } = await placeOrderForGuests(outletId, tableId, itemId, 10000, 2)
+      const bill = (await authed(request(httpServer).post(`/guest/v1/orders/${orderId}/bill`), tokens[0]).send()).body as BillBody
+      process.env.PAYMENTS_SIMULATOR = 'off'
+
+      const share = await authed(request(httpServer).post(`/guest/v1/bills/${bill.id}/shares/${bill.shares[0].guestId}/pay`), tokens[0]).send({ simulatedOutcome: 'success' })
+      expect(share.status).toBe(409)
+      expect((share.body as ErrorBody).error.code).toBe('provider_unavailable')
+      const all = await authed(request(httpServer).post(`/guest/v1/bills/${bill.id}/pay-all`), tokens[0]).send({ simulatedOutcome: 'success' })
+      expect(all.status).toBe(409)
+      expect((all.body as ErrorBody).error.code).toBe('provider_unavailable')
+
+      expect(await prisma.tender.count({ where: { billId: bill.id } })).toBe(0)
+      expect((await prisma.bill.findUniqueOrThrow({ where: { id: bill.id } })).status).toBe('open')
+      expect((await prisma.tableSession.findUniqueOrThrow({ where: { id: sessionId } })).status).toBe('open')
+    })
+  })
+
+  describe('lines staff add to a guest order (restiq-backend#208, SE-15)', () => {
+    async function addStaffLine(tenantId: string, orderId: string, itemId: string, priceMinor: number): Promise<void> {
+      await prisma.orderLine.create({ data: { tenantId, orderId, itemId, quantity: 1, unitPriceMinor: BigInt(priceMinor) } })
+    }
+
+    it('spreads a staff-added line across the guest shares so they sum to the total and the last guest can pay', async () => {
+      const tenantId = await createTenant(prisma)
+      const outletId = await createOutlet(prisma, tenantId)
+      const tableId = await createTable(prisma, tenantId, outletId)
+      await enableQrOrdering(prisma, tenantId, outletId)
+      const itemId = await createItemWithPrice(prisma, tenantId, 10000)
+      const { tokens, orderId } = await placeOrderForGuests(outletId, tableId, itemId, 10000, 2)
+      await addStaffLine(tenantId, orderId, itemId, 10000)
+
+      const bill = (await authed(request(httpServer).post(`/guest/v1/orders/${orderId}/bill`), tokens[0]).send()).body as BillBody
+      expect(bill.totalMinor).toBe(31500)
+      expect(bill.shares.map((s) => s.amountMinor)).toEqual([15750, 15750])
+
+      for (const [i, share] of bill.shares.entries()) {
+        const res = await authed(request(httpServer).post(`/guest/v1/bills/${bill.id}/shares/${share.guestId}/pay`), tokens[i]).send({ simulatedOutcome: 'success' })
+        expect(res.status).toBe(200)
+      }
+      const final = await prisma.bill.findUniqueOrThrow({ where: { id: bill.id }, include: { tenders: true } })
+      expect(final.status).toBe('finalized')
+      expect(final.tenders.reduce((sum, t) => sum + t.amountMinor, 0n)).toBe(31500n)
+    })
+
+    it('a line added after the bill was raised moves onto the shares still outstanding', async () => {
+      const tenantId = await createTenant(prisma)
+      const outletId = await createOutlet(prisma, tenantId)
+      const tableId = await createTable(prisma, tenantId, outletId)
+      await enableQrOrdering(prisma, tenantId, outletId)
+      const itemId = await createItemWithPrice(prisma, tenantId, 10000)
+      const { tokens, orderId } = await placeOrderForGuests(outletId, tableId, itemId, 10000, 2)
+      const bill = (await authed(request(httpServer).post(`/guest/v1/orders/${orderId}/bill`), tokens[0]).send()).body as BillBody
+      expect(bill.shares.map((s) => s.amountMinor)).toEqual([10500, 10500])
+
+      const first = await authed(request(httpServer).post(`/guest/v1/bills/${bill.id}/shares/${bill.shares[0].guestId}/pay`), tokens[0]).send({ simulatedOutcome: 'success' })
+      expect(first.status).toBe(200)
+      await addStaffLine(tenantId, orderId, itemId, 10000)
+
+      const refreshed = (await authed(request(httpServer).get(`/guest/v1/orders/${orderId}/bill`), tokens[1])).body as BillBody
+      expect(refreshed.totalMinor).toBe(31500)
+      expect(refreshed.shares.map((s) => s.amountMinor)).toEqual([10500, 21000])
+
+      const last = await authed(request(httpServer).post(`/guest/v1/bills/${bill.id}/shares/${bill.shares[1].guestId}/pay`), tokens[1]).send({ simulatedOutcome: 'success' })
+      expect(last.status).toBe(200)
+      expect((last.body as BillBody).status).toBe('finalized')
+    })
+  })
+
   describe('one-payment mode', () => {
     it('settles the whole bill with a single Tender for the total', async () => {
       const tenantId = await createTenant(prisma)
@@ -476,7 +556,7 @@ describe('/guest/v1 checkout and split payment, simulated (e2e)', () => {
       expect(res.status).toBe(200)
       const invoice = res.body as InvoiceBody
       expect(invoice.invoiceNumber).toBe(String((paid.body as BillBody).billNumber))
-      expect(invoice.title).toBe('Invoice')
+      expect(invoice.title).toBe('Tax Invoice')
       expect(invoice.footerMessage).toBeNull()
       expect(invoice.seller.phone).toBe('+91 90000 00000')
       expect(invoice.seller.email).toBe('contact@test.example')

@@ -12,7 +12,7 @@
 // handler (B6) calls the same confirmIntent.
 import { BadRequestException, ConflictException, ForbiddenException, Injectable, NotFoundException } from '@nestjs/common'
 import type { Prisma } from '../../generated/prisma/client'
-import { PosPrincipal, RegionRegistryService, uuidv7 } from '../../platform'
+import { paymentsSimulatorFor, PosPrincipal, RegionRegistryService, uuidv7 } from '../../platform'
 import { isUniqueViolation, loadBill, refreshOpenBillTotals, toBillView } from '../bills'
 import { setTenantContext } from '../tenant-context'
 import { linkedPeripheral, queueFor } from '../device-routing'
@@ -53,6 +53,14 @@ export class PaymentIntentsService {
     const plane = this.plane()
     return plane.$transaction(async (tx) => {
       await setTenantContext(tx, staff.tenantId)
+      // #170: the simulator is the only card provider so far - with it off there is nothing to send to.
+      // #213: a tenant in Test mode always has it.
+      if (!(await paymentsSimulatorFor(tx, staff.tenantId))) {
+        throw new ConflictException({
+          code: 'provider_unavailable',
+          message: 'Card terminal payments are not connected yet - take the card on your own terminal and record it as an external payment',
+        })
+      }
       const bill = await refreshOpenBillTotals(tx, await loadBill(tx, staff.tenantId, billId))
       if (bill.status === 'finalized') {
         throw new ConflictException({ code: 'already_finalized', message: 'This bill has already been finalised' })
@@ -79,7 +87,22 @@ export class PaymentIntentsService {
       // partial unique index is free for the new one.
       const active = await tx.paymentIntent.findFirst({ where: { billId, shareId: null, status: { in: [...ACTIVE_INTENT_STATUSES] } }, include: INTENT_INCLUDE })
       if (active && isIntentActive(await expireIfDue(tx, active))) {
-        throw new ConflictException({ code: 'intent_active', message: `A payment is already waiting on the terminal (${active.id})` })
+        // restiq-backend#210 (PE-22): staff-facing copy, no ids.
+        throw new ConflictException({ code: 'intent_active', message: 'A card payment for this bill is already waiting on the terminal - cancel it there or wait for it to finish' })
+      }
+
+      // restiq-backend#210 (PE-22): never queue a payment no terminal will
+      // pick up. It goes to this till's linked terminal, else the outlet-wide
+      // queue - which only an active terminal not linked to another till drains.
+      const targetDeviceId = await linkedPeripheral(tx, staff.tenantId, dto.deviceId, 'terminal')
+      if (!targetDeviceId) {
+        const outletTerminals = await tx.device.count({ where: { tenantId: staff.tenantId, outletId: bill.outletId, type: 'terminal', status: 'active', pairedPosId: null } })
+        if (outletTerminals === 0) {
+          throw new ConflictException({
+            code: 'no_terminal',
+            message: 'No card terminal is set up for this till. Take the card on your own machine and record it as External, or choose Cash or UPI.',
+          })
+        }
       }
 
       const tenant = await tx.tenant.findUniqueOrThrow({ where: { id: staff.tenantId }, select: { country: true } })
@@ -100,14 +123,14 @@ export class PaymentIntentsService {
             expiresAt: new Date(Date.now() + INTENT_TTL_MS),
             createdByStaffId: staff.id,
             // Issue #134: a POS with a linked terminal charges only there.
-            targetDeviceId: await linkedPeripheral(tx, staff.tenantId, dto.deviceId, 'terminal'),
+            targetDeviceId,
           },
           include: INTENT_INCLUDE,
         })
         return { view: toPaymentIntentView(intent), created: true }
       } catch (error) {
         if (isUniqueViolation(error)) {
-          throw new ConflictException({ code: 'intent_active', message: 'A payment is already waiting on the terminal' })
+          throw new ConflictException({ code: 'intent_active', message: 'A card payment for this bill is already waiting on the terminal - cancel it there or wait for it to finish' })
         }
         throw error
       }
@@ -174,7 +197,8 @@ export class PaymentIntentsService {
     return plane.$transaction(async (tx) => {
       await setTenantContext(tx, staff.tenantId)
       const intent = await loadIntent(tx, staff.tenantId, intentId)
-      if (intent.provider !== 'simulated') {
+      // #170: with the simulator off the webhook does not exist, for old intents too.
+      if (intent.provider !== 'simulated' || !(await paymentsSimulatorFor(tx, staff.tenantId))) {
         throw new NotFoundException({ code: 'not_found', message: 'No such payment intent' })
       }
 

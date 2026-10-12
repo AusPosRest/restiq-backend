@@ -1,5 +1,5 @@
 import { Controller, HttpCode, Param, ParseUUIDPipe, Post } from '@nestjs/common'
-import { CurrentStaff, PosPrincipal } from '../../platform'
+import { AnyStaff, CurrentStaff, PosPrincipal } from '../../platform'
 import { PosDevicesService } from './devices.service'
 
 @Controller('pos/v1')
@@ -8,6 +8,7 @@ export class PosDevicesController {
 
   // Issue #134: POS / printer / terminal tabs call this every 30 s.
   @Post('devices/:id/heartbeat')
+  @AnyStaff()
   @HttpCode(204)
   async heartbeat(@CurrentStaff() staff: PosPrincipal, @Param('id', ParseUUIDPipe) id: string): Promise<void> {
     await this.devices.heartbeat(staff, id)

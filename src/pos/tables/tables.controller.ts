@@ -6,13 +6,14 @@
 // the realm boundary.
 import { Controller, HttpCode, Param, Post } from '@nestjs/common'
 import { GuestSessionsService } from '../../guest'
-import { CurrentStaff, PosPrincipal } from '../../platform'
+import { CurrentStaff, PosPrincipal, RequirePermission } from '../../platform'
 
 @Controller('pos/v1/tables')
 export class PosTablesController {
   constructor(private readonly guestSessions: GuestSessionsService) {}
 
   @Post(':tableId/close-session')
+  @RequirePermission('settle_bills')
   @HttpCode(200)
   closeSession(@CurrentStaff() staff: PosPrincipal, @Param('tableId') tableId: string): Promise<{ closed: true }> {
     return this.guestSessions.closeSessionForStaff(staff.tenantId, staff.outletId, tableId).then(() => ({ closed: true as const }))

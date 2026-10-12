@@ -7,7 +7,7 @@
 import { BadRequestException, ConflictException, ForbiddenException, Injectable, NotFoundException } from '@nestjs/common'
 import type { Order, Prisma } from '../../generated/prisma/client'
 import { KitchenTicketsService } from '../../kitchen'
-import { PosPrincipal, RegionRegistryService, uuidv7 } from '../../platform'
+import { PosPrincipal, RegionRegistryService, reserveTokenNumber, uuidv7 } from '../../platform'
 import { OrderLineView, OrderView, TableMapEntry, TransferOrderDto, UpdateOrderStatusDto } from './orders.dtos'
 
 export type Tx = Prisma.TransactionClient
@@ -63,10 +63,13 @@ export async function loadOrder(tx: Tx, tenantId: string, orderId: string): Prom
 export async function assertOwner(tx: Tx, order: Order, staff: PosPrincipal): Promise<void> {
   if (order.ownerId === null || order.ownerId === staff.id) return
   const owner = await tx.staffUser.findUnique({ where: { id: order.ownerId } })
-  const ownerName = owner?.name ?? order.ownerId
+  // restiq-backend#210 (SE-22): staff-facing copy - this message is shown on
+  // the till as-is, so it names the person and the action, never an id or
+  // an endpoint.
+  const ownerName = owner?.name ?? 'another staff member'
   throw new ForbiddenException({
     code: 'not_owner',
-    message: `This order is owned by ${ownerName} - use the transfer endpoint to take it over`,
+    message: `This order belongs to ${ownerName}. Take it over first to make changes.`,
     ownerId: order.ownerId,
   })
 }
@@ -74,11 +77,14 @@ export async function assertOwner(tx: Tx, order: Order, staff: PosPrincipal): Pr
 const ORDER_LINE_INCLUDE = {
   modifiers: { include: { modifier: true } },
   combo: { select: { name: true } },
+  addedByStaff: { select: { name: true } },
+  // restiq-backend#210: only "has it been ticketed at all" is needed.
+  ticketLines: { select: { id: true }, take: 1 },
 } satisfies Prisma.OrderLineInclude
 
 type OrderLineWithModifiers = Prisma.OrderLineGetPayload<{ include: typeof ORDER_LINE_INCLUDE }>
 
-function toOrderLineView(line: OrderLineWithModifiers): OrderLineView {
+function toOrderLineView(line: OrderLineWithModifiers, sentToKitchen: boolean): OrderLineView {
   return {
     id: line.id,
     orderId: line.orderId,
@@ -91,6 +97,9 @@ function toOrderLineView(line: OrderLineWithModifiers): OrderLineView {
     unitPriceMinor: Number(line.unitPriceMinor),
     seatNumber: line.seatNumber,
     addedByStaffId: line.addedByStaffId,
+    addedByStaffName: line.addedByStaff?.name ?? null,
+    note: line.note,
+    sentToKitchen,
     guestId: line.guestId,
     guestName: line.guestName,
     createdAt: line.createdAt.toISOString(),
@@ -100,13 +109,18 @@ function toOrderLineView(line: OrderLineWithModifiers): OrderLineView {
 
 /** Builds the full OrderView (base fields + lines) - the shape every order read/mutation endpoint returns. */
 export async function buildOrderView(tx: Tx, order: Order): Promise<OrderView> {
-  const [lines, table] = await Promise.all([
-    tx.orderLine.findMany({ where: { orderId: order.id }, include: ORDER_LINE_INCLUDE, orderBy: { createdAt: 'asc' } }),
+  const [lines, table, owner] = await Promise.all([
+    // restiq-backend#210: a voided line is history (kept for the kitchen
+    // ticket and the audit trail), not part of the order any more.
+    tx.orderLine.findMany({ where: { orderId: order.id, voidedAt: null }, include: ORDER_LINE_INCLUDE, orderBy: { createdAt: 'asc' } }),
     // pos/CAP-9 (issue #94): resolved here, the single projection point every
     // order endpoint routes through, rather than per-caller - null for a
     // counter order (tableId null), same as the guard below reads.
     order.tableId ? tx.diningTable.findUnique({ where: { id: order.tableId }, select: { label: true } }) : Promise.resolve(null),
+    order.ownerId ? tx.staffUser.findUnique({ where: { id: order.ownerId }, select: { name: true } }) : Promise.resolve(null),
   ])
+  // A combo's parent line is never ticketed itself - its items are.
+  const firedParents = new Set(lines.filter((l) => l.parentLineId && l.ticketLines.length > 0).map((l) => l.parentLineId))
   return {
     id: order.id,
     tenantId: order.tenantId,
@@ -114,22 +128,24 @@ export async function buildOrderView(tx: Tx, order: Order): Promise<OrderView> {
     tableId: order.tableId,
     tableLabel: table?.label ?? null,
     ownerId: order.ownerId,
+    ownerName: owner?.name ?? null,
     status: order.status,
     tokenNumber: order.tokenNumber,
     source: order.source,
     sessionId: order.sessionId,
     createdAt: order.createdAt.toISOString(),
     updatedAt: order.updatedAt.toISOString(),
-    lines: lines.map(toOrderLineView),
+    lines: lines.map((l) => toOrderLineView(l, l.ticketLines.length > 0 || firedParents.has(l.id))),
   }
 }
 
-// open->sent->closed only, forward-only - no OrderLine yet so "sent" just
-// marks the order handed to the kitchen; "closed" is a placeholder ahead of
-// pos/CAP-7's Bill (finalising a Bill will be what actually closes an order).
+// open->sent only, forward-only. "closed" is never reachable through this
+// route (restiq-backend#208, SE-5): finalising the order's Bill is what
+// closes it (bill-core's commitFinalize), so an order can never end up
+// closed with no bill and no payment behind it.
 const FORWARD_TRANSITIONS: Record<Order['status'], Order['status'][]> = {
   open: ['sent'],
-  sent: ['closed'],
+  sent: [],
   closed: [],
 }
 
@@ -160,8 +176,16 @@ export class OrdersService {
       // the TODO on TableMapEntry).
       const activeOrders = await tx.order.findMany({
         where: { tenantId: staff.tenantId, outletId, status: { not: 'closed' }, tableId: { not: null } },
+        include: { owner: { select: { name: true } } },
       })
       const byTable = new Map(activeOrders.map((o) => [o.tableId as string, o]))
+      // restiq-backend#210 (CU-26): a QR guest session still open on a table -
+      // with no order, staff may need to reset it for the next guests.
+      const openSessions = await tx.tableSession.findMany({
+        where: { tenantId: staff.tenantId, status: 'open', tableId: { in: tables.map((t) => t.id) } },
+        select: { tableId: true },
+      })
+      const sessionTables = new Set(openSessions.map((session) => session.tableId))
 
       return tables.map((t) => {
         const order = byTable.get(t.id)
@@ -174,6 +198,8 @@ export class OrdersService {
           status: order ? 'occupied' : 'empty',
           orderId: order?.id ?? null,
           ownerId: order?.ownerId ?? null,
+          ownerName: order?.owner?.name ?? null,
+          guestSessionOpen: sessionTables.has(t.id),
         } satisfies TableMapEntry
       })
     })
@@ -244,14 +270,10 @@ export class OrdersService {
       // failure never touches the counter, and if anything below still
       // fails, the whole transaction (counter increment included) rolls
       // back with it. Either way, no gap.
-      const counter = await tx.tokenNumberCounter.upsert({
-        where: { outletId },
-        create: { id: uuidv7(), tenantId: staff.tenantId, outletId, lastNumber: 1 },
-        update: { lastNumber: { increment: 1 } },
-      })
+      const tokenNumber = await reserveTokenNumber(tx, staff.tenantId, outletId)
 
       const created = await tx.order.create({
-        data: { tenantId: staff.tenantId, outletId, tableId: null, ownerId: staff.id, status: 'open', tokenNumber: counter.lastNumber },
+        data: { tenantId: staff.tenantId, outletId, tableId: null, ownerId: staff.id, status: 'open', tokenNumber },
       })
       return buildOrderView(tx, created)
     })
@@ -301,6 +323,16 @@ export class OrdersService {
       const order = await loadOrder(tx, staff.tenantId, orderId)
       await assertOwner(tx, order, staff)
 
+      // restiq-backend#210 (CU-15): items added after the first send wait on
+      // the till until staff press Send to kitchen again - sent->sent fires
+      // just those. Nothing waiting is the same invalid move as before.
+      if (order.status === 'sent' && dto.status === 'sent') {
+        if ((await this.tickets.fireOnSend(tx, order)) === 0) {
+          throw new ConflictException({ code: 'invalid_transition', message: 'Everything on this order is already with the kitchen' })
+        }
+        return buildOrderView(tx, order)
+      }
+
       if (!FORWARD_TRANSITIONS[order.status].includes(dto.status)) {
         throw new ConflictException({ code: 'invalid_transition', message: `Cannot move an order from "${order.status}" to "${dto.status}"` })
       }
@@ -320,6 +352,46 @@ export class OrdersService {
       }
 
       return buildOrderView(tx, updated)
+    })
+  }
+
+  /**
+   * restiq-backend#210 (PE-16/CU-14/CU-27): throws away an order nobody
+   * ordered anything on - a table tapped by mistake, a counter sale abandoned
+   * before the first item. Owner-only like every other order mutation. An
+   * order with no lines at all is deleted outright (its empty open bill with
+   * it); one whose every line was voided after reaching the kitchen is closed
+   * instead, so the kitchen ticket and void audit keep their order. Refused
+   * once anything is still on it, or any money has touched its bill.
+   */
+  async discard(staff: PosPrincipal, orderId: string): Promise<void> {
+    const plane = this.plane()
+    await plane.$transaction(async (tx) => {
+      await setTenantContext(tx, staff.tenantId)
+      const order = await loadOrder(tx, staff.tenantId, orderId)
+      await assertOwner(tx, order, staff)
+      if (order.status === 'closed') {
+        throw new ConflictException({ code: 'conflict', message: 'This order is already closed' })
+      }
+
+      const lines = await tx.orderLine.findMany({ where: { orderId }, select: { voidedAt: true } })
+      if (lines.some((line) => line.voidedAt === null)) {
+        throw new ConflictException({ code: 'order_not_empty', message: 'Remove every item before discarding this order' })
+      }
+      const bill = await tx.bill.findUnique({ where: { orderId }, include: { _count: { select: { tenders: true, paymentIntents: true, shares: true } } } })
+      if (bill && (bill.status !== 'open' || bill._count.tenders + bill._count.paymentIntents + bill._count.shares > 0)) {
+        throw new ConflictException({ code: 'has_payments', message: 'A payment was already started on this order, so it cannot be discarded' })
+      }
+
+      // Print jobs cascade with the bill.
+      if (bill) await tx.bill.delete({ where: { id: bill.id } })
+      if (lines.length === 0) await tx.order.delete({ where: { id: orderId } })
+      else await tx.order.update({ where: { id: orderId }, data: { status: 'closed' } })
+
+      const what = order.tokenNumber !== null ? `token ${order.tokenNumber}` : order.tableId ? 'table order' : 'order'
+      await tx.auditEvent.create({
+        data: { tenantId: staff.tenantId, actorId: staff.id, actorEmail: staff.name, action: 'order.discarded', reason: `Discarded empty ${what} ${orderId}`, occurredAt: new Date() },
+      })
     })
   }
 

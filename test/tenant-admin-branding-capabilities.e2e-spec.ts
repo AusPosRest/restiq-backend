@@ -72,6 +72,7 @@ async function wipe(prisma: PrismaClient): Promise<void> {
   await prisma.menuCategory.deleteMany()
   await prisma.billShare.deleteMany()
   await prisma.tender.deleteMany()
+  await prisma.paymentIntent.deleteMany()
   await prisma.bill.deleteMany()
   await prisma.billNumberCounter.deleteMany()
   await prisma.tokenNumberCounter.deleteMany()
@@ -159,6 +160,19 @@ describe('/admin/v1/outlets, /admin/v1/branding (e2e)', () => {
     return req.set('Authorization', `Bearer ${token}`)
   }
 
+  // restiq-backend#213: the console header's tenant name and TEST badge.
+  describe('GET /admin/v1/tenant', () => {
+    it('returns the owner tenant name, country and Test mode', async () => {
+      const { tenantId, token } = await createOwner(prisma, 'Mode Cafe')
+      const live = await authed(request(httpServer).get('/admin/v1/tenant'), token)
+      expect(live.status).toBe(200)
+      expect(live.body).toEqual({ name: 'Mode Cafe', country: 'IN', testMode: false })
+      await prisma.tenant.update({ where: { id: tenantId }, data: { liveSince: null } })
+      expect((await authed(request(httpServer).get('/admin/v1/tenant'), token)).body).toEqual({ name: 'Mode Cafe', country: 'IN', testMode: true })
+      expect((await request(httpServer).get('/admin/v1/tenant')).status).toBe(401)
+    })
+  })
+
   describe('outlets', () => {
     it('lists outlets scoped to the signed-in tenant only', async () => {
       const { tenantId, token } = await createOwner(prisma)
@@ -168,7 +182,7 @@ describe('/admin/v1/outlets, /admin/v1/branding (e2e)', () => {
       expect(res.status).toBe(200)
       const body = res.body as OutletBody[]
       expect(body).toHaveLength(1)
-      expect(body[0]).toEqual({ id: outletId, name: 'Indiranagar', address: 'A1', type: 'dine_in', timezone: 'Asia/Kolkata' })
+      expect(body[0]).toEqual({ id: outletId, name: 'Indiranagar', address: 'A1', type: 'dine_in', timezone: 'Asia/Kolkata', currency: 'INR' })
     })
 
     it('never returns another tenant’s outlets (cross-tenant isolation, NFR-8)', async () => {
@@ -187,6 +201,58 @@ describe('/admin/v1/outlets, /admin/v1/branding (e2e)', () => {
 
     it('rejects a request with no admin session', async () => {
       const res = await request(httpServer).get('/admin/v1/outlets')
+      expect(res.status).toBe(401)
+    })
+
+    it('updates name, address and timezone, and the list reflects the change', async () => {
+      const { tenantId, token } = await createOwner(prisma)
+      const outletId = await createOutlet(prisma, tenantId, 'Indiranagar')
+
+      const patchRes = await authed(request(httpServer).patch(`/admin/v1/outlets/${outletId}`), token).send({
+        name: 'Indiranagar Main',
+        address: 'A2',
+        timezone: 'Asia/Kolkata',
+      })
+      expect(patchRes.status).toBe(200)
+      expect(patchRes.body).toEqual({ id: outletId, name: 'Indiranagar Main', address: 'A2', type: 'dine_in', timezone: 'Asia/Kolkata', currency: 'INR' })
+
+      const getRes = await authed(request(httpServer).get('/admin/v1/outlets'), token)
+      const body = getRes.body as OutletBody[]
+      expect(body).toEqual([{ id: outletId, name: 'Indiranagar Main', address: 'A2', type: 'dine_in', timezone: 'Asia/Kolkata', currency: 'INR' }])
+    })
+
+    it('rejects an invalid IANA timezone (400)', async () => {
+      const { tenantId, token } = await createOwner(prisma)
+      const outletId = await createOutlet(prisma, tenantId)
+
+      const res = await authed(request(httpServer).patch(`/admin/v1/outlets/${outletId}`), token).send({ timezone: 'Not/AZone' })
+      expect(res.status).toBe(400)
+      expect((res.body as ErrorBody).error.code).toBe('validation_failed')
+    })
+
+    it('PE-9: rejects a timezone outside the tenant\'s country (400)', async () => {
+      const { tenantId, token } = await createOwner(prisma)
+      const outletId = await createOutlet(prisma, tenantId)
+
+      const res = await authed(request(httpServer).patch(`/admin/v1/outlets/${outletId}`), token).send({ timezone: 'Australia/Sydney' })
+      expect(res.status).toBe(400)
+      expect((res.body as ErrorBody).error.code).toBe('validation_failed')
+    })
+
+    it('rejects updating another tenant’s outlet (404, not leaked as 403)', async () => {
+      const owner = await createOwner(prisma, 'Spice Route Hospitality')
+      const other = await createOwner(prisma, 'Curry Leaf Kitchens')
+      const otherOutletId = await createOutlet(prisma, other.tenantId, 'Koramangala')
+
+      const res = await authed(request(httpServer).patch(`/admin/v1/outlets/${otherOutletId}`), owner.token).send({ name: 'Hijacked' })
+      expect(res.status).toBe(404)
+    })
+
+    it('rejects an update with no admin session', async () => {
+      const { tenantId } = await createOwner(prisma)
+      const outletId = await createOutlet(prisma, tenantId)
+
+      const res = await request(httpServer).patch(`/admin/v1/outlets/${outletId}`).send({ name: 'Hijacked' })
       expect(res.status).toBe(401)
     })
   })

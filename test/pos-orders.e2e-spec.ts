@@ -73,6 +73,7 @@ async function wipe(prisma: PrismaClient): Promise<void> {
   await prisma.menuCategory.deleteMany()
   await prisma.billShare.deleteMany()
   await prisma.tender.deleteMany()
+  await prisma.paymentIntent.deleteMany()
   await prisma.bill.deleteMany()
   await prisma.billNumberCounter.deleteMany()
   await prisma.tokenNumberCounter.deleteMany()
@@ -142,10 +143,10 @@ async function createTable(prisma: PrismaClient, tenantId: string, outletId: str
 }
 
 async function createStaff(prisma: PrismaClient, tenantId: string, name: string): Promise<{ id: string; token: string }> {
-  const role = await prisma.role.create({ data: { tenantId, name: `Waiter-${uuidv7()}`, isSystem: false } })
+  const role = await prisma.role.upsert({ where: { tenantId_name: { tenantId, name: 'Cashier' } }, update: {}, create: { tenantId, name: 'Cashier', isSystem: true, isManager: false } })
   const staff = await prisma.staffUser.create({ data: { tenantId, roleId: role.id, name } })
   const outlets = await prisma.outlet.findMany({ where: { tenantId } })
-  const token = signPosToken({ id: staff.id, tenantId, outletId: outlets[0]?.id ?? uuidv7(), name })
+  const token = signPosToken({ sessionVersion: 0, id: staff.id, tenantId, outletId: outlets[0]?.id ?? uuidv7(), name })
   return { id: staff.id, token }
 }
 
@@ -186,7 +187,7 @@ describe('/pos/v1 table map and order ownership (e2e)', () => {
       expect(res.status).toBe(200)
       const map = res.body as TableMapEntryBody[]
       expect(map).toEqual([
-        { tableId, floorId: expect.any(String) as string, floorName: 'Ground Floor', label: 'T1', seatCapacity: 4, status: 'empty', orderId: null, ownerId: null },
+        { tableId, floorId: expect.any(String) as string, floorName: 'Ground Floor', label: 'T1', seatCapacity: 4, status: 'empty', orderId: null, ownerId: null, ownerName: null, guestSessionOpen: false },
       ])
     })
 
@@ -205,11 +206,25 @@ describe('/pos/v1 table map and order ownership (e2e)', () => {
       expect(occupiedMap[0]).toMatchObject({ tableId, status: 'occupied', orderId: order.id, ownerId: waiter.id })
 
       await authed(request(httpServer).patch(`/pos/v1/orders/${order.id}/status`), waiter.token).send({ status: 'sent' })
-      const closeRes = await authed(request(httpServer).patch(`/pos/v1/orders/${order.id}/status`), waiter.token).send({ status: 'closed' })
-      expect(closeRes.status).toBe(200)
+      // Only finalising a bill closes an order (restiq-backend#208, SE-5) - closed directly here.
+      await prisma.order.update({ where: { id: order.id }, data: { status: 'closed' } })
 
       const emptyAgainMap = (await authed(request(httpServer).get(`/pos/v1/outlets/${outletId}/table-map`), waiter.token)).body as TableMapEntryBody[]
       expect(emptyAgainMap[0]).toMatchObject({ tableId, status: 'empty', orderId: null, ownerId: null })
+    })
+
+    it('refuses to close a sent order through the status route - only a finalised bill closes it (restiq-backend#208, SE-5)', async () => {
+      const tenantId = await createTenant(prisma)
+      const outletId = await createOutlet(prisma, tenantId)
+      const tableId = await createTable(prisma, tenantId, outletId)
+      const waiter = await createStaff(prisma, tenantId, 'Asha')
+      const order = (await authed(request(httpServer).post(`/pos/v1/outlets/${outletId}/tables/${tableId}/order`), waiter.token).send()).body as OrderBody
+      await authed(request(httpServer).patch(`/pos/v1/orders/${order.id}/status`), waiter.token).send({ status: 'sent' })
+
+      const res = await authed(request(httpServer).patch(`/pos/v1/orders/${order.id}/status`), waiter.token).send({ status: 'closed' })
+      expect(res.status).toBe(409)
+      expect((res.body as ErrorBody).error.code).toBe('invalid_transition')
+      expect((await prisma.order.findUniqueOrThrow({ where: { id: order.id } })).status).toBe('sent')
     })
 
     it('rejects an invalid forward transition (open straight to closed)', async () => {

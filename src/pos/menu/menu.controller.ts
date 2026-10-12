@@ -1,5 +1,5 @@
 import { Controller, Get } from '@nestjs/common'
-import { CurrentStaff, PosPrincipal } from '../../platform'
+import { AnyStaff, CurrentStaff, PosPrincipal } from '../../platform'
 import { MenuView } from './menu.dtos'
 import { MenuService } from './menu.service'
 
@@ -12,6 +12,7 @@ export class PosMenuController {
   // calling staff's own outlet (PosPrincipal.outletId), same
   // single-outlet-per-device posture every other pos/* read already assumes.
   @Get('menu')
+  @AnyStaff()
   getMenu(@CurrentStaff() staff: PosPrincipal): Promise<MenuView> {
     return this.menu.getMenu(staff)
   }

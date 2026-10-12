@@ -1,12 +1,21 @@
 import { Body, Controller, HttpCode, Post } from '@nestjs/common'
-import { Public } from '../platform'
-import { AcceptInviteDto } from './accept-invite.dto'
-import { AcceptInviteResult, AdminAuthService, OwnerSessionResult } from './auth.service'
+import { AdminPrincipal, ClientIp, CurrentOwner, Public } from '../platform'
+import { AcceptInviteDto, InviteDetailsDto } from './accept-invite.dto'
+import { AcceptInviteResult, AdminAuthService, InviteDetails, OwnerSessionResult } from './auth.service'
 import { LoginDto } from './login.dto'
+import { ForgotPasswordDto, ResetPasswordDto } from './password-reset.dto'
 
 @Controller('admin/v1/auth')
 export class AdminAuthController {
   constructor(private readonly auth: AdminAuthService) {}
+
+  // issue #193: who the invite is for. POST so the token never sits in a URL or access log.
+  @Public()
+  @Post('invite-details')
+  @HttpCode(200)
+  inviteDetails(@Body() dto: InviteDetailsDto): Promise<InviteDetails> {
+    return this.auth.inviteDetails(dto.token)
+  }
 
   @Public()
   @Post('accept-invite')
@@ -18,7 +27,29 @@ export class AdminAuthController {
   @Public()
   @Post('login')
   @HttpCode(200)
-  login(@Body() dto: LoginDto): Promise<OwnerSessionResult> {
-    return this.auth.login(dto.email, dto.password)
+  login(@Body() dto: LoginDto, @ClientIp() ip: string): Promise<OwnerSessionResult> {
+    return this.auth.login(dto.email, dto.password, ip)
+  }
+
+  // Always 202: it never says whether the email is registered.
+  @Public()
+  @Post('forgot-password')
+  @HttpCode(202)
+  forgotPassword(@Body() dto: ForgotPasswordDto, @ClientIp() ip: string): Promise<{ accepted: true }> {
+    return this.auth.forgotPassword(dto.email, ip)
+  }
+
+  @Public()
+  @Post('reset-password')
+  @HttpCode(204)
+  resetPassword(@Body() dto: ResetPasswordDto): Promise<void> {
+    return this.auth.resetPassword(dto.token, dto.password)
+  }
+
+  // restiq-backend#209: ends every session this owner holds (all browsers), same as operator logout (#203).
+  @Post('logout')
+  @HttpCode(204)
+  logout(@CurrentOwner() owner: AdminPrincipal): Promise<void> {
+    return this.auth.logout(owner)
   }
 }

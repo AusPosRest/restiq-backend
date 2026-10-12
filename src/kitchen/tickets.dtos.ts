@@ -37,6 +37,8 @@ export interface TicketLineView {
   modifiers: TicketLineModifierView[]
   addOnBatch: number
   voided: boolean
+  // restiq-backend#210: special instructions typed on the till, or null.
+  note: string | null
 }
 
 export interface TicketView {

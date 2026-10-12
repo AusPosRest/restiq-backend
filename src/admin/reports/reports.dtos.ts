@@ -62,6 +62,8 @@ export interface PaymentTenderRow {
 export interface PaymentCreditNoteRow {
   id: string
   amountMinor: number
+  // How the money went back; null on a note issued before this was recorded.
+  method: string | null
   reason: string
   createdAt: string
 }
@@ -73,7 +75,7 @@ export interface PaymentRow {
   outletId: string
   outletName: string
   orderId: string
-  source: 'pos' | 'qr'
+  source: 'pos' | 'qr' | 'kiosk'
   tableLabel: string | null
   tokenNumber: number | null
   cashierName: string | null
@@ -98,9 +100,14 @@ export interface PaymentsTotals {
   totalMinor: number
   tenderedMinor: number
   refundedMinor: number
+  // PE-33: totalMinor - refundedMinor, the one "sales" figure the owner
+  // dashboard shows too.
+  netMinor: number
 }
 
 export interface PaymentsListResult {
+  // The tenant's currency (INR/AUD) - every amount below is in it.
+  currency: string
   items: PaymentRow[]
   nextCursor: string | null
   totals: PaymentsTotals

@@ -14,11 +14,13 @@ datasource db {
 // with the stories that need them.
 
 model OperatorUser {
-  id           String   @id @default(uuid(7)) @db.Uuid
-  email        String   @unique
-  passwordHash String   @map("password_hash")
-  createdAt    DateTime @default(now()) @map("created_at") @db.Timestamptz(6)
-  updatedAt    DateTime @updatedAt @map("updated_at") @db.Timestamptz(6)
+  id             String   @id @default(uuid(7)) @db.Uuid
+  email          String   @unique
+  passwordHash   String   @map("password_hash")
+  // Bumped by logout; ops tokens carry it and are refused once it moves on (#203).
+  sessionVersion Int      @default(0) @map("session_version")
+  createdAt      DateTime @default(now()) @map("created_at") @db.Timestamptz(6)
+  updatedAt      DateTime @updatedAt @map("updated_at") @db.Timestamptz(6)
 
   @@map("operator_users")
 }
@@ -108,6 +110,8 @@ enum BillingPeriod {
 model Tenant {
   id                String           @id @db.Uuid
   name              String
+  // The tenant's subdomain (D14, #183): <slug>.<BASE_DOMAIN>. Set at creation, never changed.
+  slug              String?          @unique
   registeredAddress String           @map("registered_address")
   contactName       String           @map("contact_name")
   contactEmail      String           @map("contact_email")
@@ -121,6 +125,8 @@ model Tenant {
   // Flat map of design-token overrides (logo URL, accent color, ...) applied
   // to the tenant's guest-facing surfaces.
   brandingTokens    Json             @default("{}") @map("branding_tokens")
+  // #213 Test / Live mode: when the tenant last went Live; null = Test mode (see platform/tenant-mode.ts).
+  liveSince         DateTime?        @default(now()) @map("live_since") @db.Timestamptz(6)
   createdAt         DateTime         @default(now()) @map("created_at") @db.Timestamptz(6)
   updatedAt         DateTime         @updatedAt @map("updated_at") @db.Timestamptz(6)
   deletedAt         DateTime?        @map("deleted_at") @db.Timestamptz(6)
@@ -144,6 +150,7 @@ model Tenant {
   itemOutletOverrides ItemOutletOverride[]
   menuImportDrafts    MenuImportDraft[]
   ownerInvites        OwnerInvite[]
+  ownerPasswordResets OwnerPasswordReset[]
   ownerUsers          OwnerUser[]
   agreementSignatures AgreementSignature[]
   capabilities        TenantCapability[]
@@ -367,6 +374,9 @@ model MenuItem {
   // the outlet's designated default/expo station at fire time, not here.
   stationId  String?    @map("station_id") @db.Uuid
   createdAt  DateTime   @default(now()) @map("created_at") @db.Timestamptz(6)
+  // restiq-web#248: set when the owner deletes the item. The row stays (order
+  // and cart lines reference it); every menu read filters archivedAt: null.
+  archivedAt DateTime?  @map("archived_at") @db.Timestamptz(6)
 
   tenant          Tenant               @relation(fields: [tenantId], references: [id])
   category        MenuCategory         @relation(fields: [categoryId], references: [id])
@@ -380,9 +390,10 @@ model MenuItem {
   orderLines      OrderLine[]
   cartLines       CartLine[]
 
-  // No two items in the same category may share a name (also the natural
-  // forced-failure anchor for the menu-import commit atomicity test).
-  @@unique([tenantId, categoryId, name])
+  // No two LIVE items in the same category may share a name: a partial unique
+  // index (menu_items_live_name_per_category, WHERE archived_at IS NULL) in
+  // 20260916120000_menu_item_archive/migration.sql, so a deleted item's name
+  // can be reused. Prisma's schema DSL has no partial-index syntax.
   @@map("menu_items")
 }
 
@@ -667,19 +678,40 @@ model OwnerInvite {
 // invite acceptance. A separate model from OperatorUser by design (AD-3's
 // disjoint-realm rule extends to AD-10) - no shared identity table.
 model OwnerUser {
-  id           String   @id @default(uuid(7)) @db.Uuid
-  tenantId     String   @map("tenant_id") @db.Uuid
-  email        String
-  firstName    String   @map("first_name")
-  lastName     String   @map("last_name")
-  passwordHash String   @map("password_hash")
-  createdAt    DateTime @default(now()) @map("created_at") @db.Timestamptz(6)
-  updatedAt    DateTime @updatedAt @map("updated_at") @db.Timestamptz(6)
+  id             String   @id @default(uuid(7)) @db.Uuid
+  tenantId       String   @map("tenant_id") @db.Uuid
+  email          String
+  firstName      String   @map("first_name")
+  lastName       String   @map("last_name")
+  passwordHash   String   @map("password_hash")
+  // Bumped by a password reset; owner tokens carry it and are refused once it moves on (#181).
+  sessionVersion Int      @default(0) @map("session_version")
+  createdAt      DateTime @default(now()) @map("created_at") @db.Timestamptz(6)
+  updatedAt      DateTime @updatedAt @map("updated_at") @db.Timestamptz(6)
 
-  tenant Tenant @relation(fields: [tenantId], references: [id])
+  tenant         Tenant               @relation(fields: [tenantId], references: [id])
+  passwordResets OwnerPasswordReset[]
 
   @@unique([tenantId, email])
   @@map("owner_users")
+}
+
+// Owner password reset (#181): one single-use, one-hour token per request; only its hash is stored.
+model OwnerPasswordReset {
+  id        String    @id @default(uuid(7)) @db.Uuid
+  tenantId  String    @map("tenant_id") @db.Uuid
+  ownerId   String    @map("owner_id") @db.Uuid
+  tokenHash String    @unique @map("token_hash")
+  expiresAt DateTime  @map("expires_at") @db.Timestamptz(6)
+  usedAt    DateTime? @map("used_at") @db.Timestamptz(6)
+  createdAt DateTime  @default(now()) @map("created_at") @db.Timestamptz(6)
+
+  tenant Tenant    @relation(fields: [tenantId], references: [id])
+  owner  OwnerUser @relation(fields: [ownerId], references: [id], onDelete: Cascade)
+
+  @@index([tenantId])
+  @@index([ownerId])
+  @@map("owner_password_resets")
 }
 
 // CAP-2 go-live checklist: one row per tenant, a completion timestamp per
@@ -713,16 +745,19 @@ model ChecklistProgress {
 // owner_users.password_hash); pinRevokedAt marks a PIN inactive without
 // erasing the issuance history.
 model StaffUser {
-  id           String    @id @default(uuid(7)) @db.Uuid
-  tenantId     String    @map("tenant_id") @db.Uuid
-  roleId       String    @map("role_id") @db.Uuid
-  name         String
-  email        String?
-  pinHash      String?   @map("pin_hash")
-  pinIssuedAt  DateTime? @map("pin_issued_at") @db.Timestamptz(6)
-  pinRevokedAt DateTime? @map("pin_revoked_at") @db.Timestamptz(6)
-  createdAt    DateTime  @default(now()) @map("created_at") @db.Timestamptz(6)
-  updatedAt    DateTime  @updatedAt @map("updated_at") @db.Timestamptz(6)
+  id             String    @id @default(uuid(7)) @db.Uuid
+  tenantId       String    @map("tenant_id") @db.Uuid
+  roleId         String    @map("role_id") @db.Uuid
+  name           String
+  email          String?
+  pinHash        String?   @map("pin_hash")
+  pinIssuedAt    DateTime? @map("pin_issued_at") @db.Timestamptz(6)
+  pinRevokedAt   DateTime? @map("pin_revoked_at") @db.Timestamptz(6)
+  // #197: the outlets this person may sign in at; empty = every outlet.
+  outletIds      String[]  @default([]) @map("outlet_ids") @db.Uuid
+  sessionVersion Int       @default(0) @map("session_version")
+  createdAt      DateTime  @default(now()) @map("created_at") @db.Timestamptz(6)
+  updatedAt      DateTime  @updatedAt @map("updated_at") @db.Timestamptz(6)
 
   tenant                Tenant          @relation(fields: [tenantId], references: [id])
   role                  Role            @relation(fields: [roleId], references: [id])
@@ -852,7 +887,9 @@ model TableSession {
   id                  String             @id @default(uuid(7)) @db.Uuid
   tenantId            String             @map("tenant_id") @db.Uuid
   outletId            String             @map("outlet_id") @db.Uuid
-  tableId             String             @map("table_id") @db.Uuid
+  // Nullable since issue #138: a kiosk session has no table - the order it
+  // places gets a token number instead (see Order.tokenNumber).
+  tableId             String?            @map("table_id") @db.Uuid
   status              TableSessionStatus @default(open)
   // 4-digit PIN gating who can join this table's shared cart - deliberately
   // NOT credential-grade (SPEC qr-self-order Constraints; AD-17). It protects
@@ -872,9 +909,9 @@ model TableSession {
   // silently renewed.
   expiresAt           DateTime           @map("expires_at") @db.Timestamptz(6)
 
-  tenant    Tenant      @relation(fields: [tenantId], references: [id])
-  outlet    Outlet      @relation(fields: [outletId], references: [id])
-  table     DiningTable @relation(fields: [tableId], references: [id])
+  tenant    Tenant       @relation(fields: [tenantId], references: [id])
+  outlet    Outlet       @relation(fields: [outletId], references: [id])
+  table     DiningTable? @relation(fields: [tableId], references: [id])
   guests    Guest[]
   cartLines CartLine[]
   // qr-self-order/CAP-4 (issue #77): the real Order(s) placed from this
@@ -1095,6 +1132,10 @@ model Device {
   role                   DeviceRole   @default(terminal)
   status                 DeviceStatus @default(active)
   hardwareKeyFingerprint String       @map("hardware_key_fingerprint")
+  // restiq-backend#209 (SE-12): sha256 of the secret handed to the device once at enrolment. A PIN sign-in
+  // presenting it gets the device's own throttle allowance; a bare device id is not proof of being that device.
+  // Null for devices enrolled before #209 - they sign in as untrusted browsers until re-enrolled.
+  secretHash             String?      @map("secret_hash")
   enrolledAt             DateTime     @map("enrolled_at") @db.Timestamptz(6)
   revokedAt              DateTime?    @map("revoked_at") @db.Timestamptz(6)
   // Device topology (issue #134): a printer/terminal linked to one POS
@@ -1243,6 +1284,8 @@ enum OrderStatus {
 enum OrderSource {
   pos
   qr
+  // Issue #138: placed from a self-service kiosk (a table-less guest session).
+  kiosk
 }
 
 model Order {
@@ -1347,6 +1390,16 @@ model OrderLine {
   // render a label.
   guestId        String?  @map("guest_id") @db.Uuid
   guestName      String?  @map("guest_name")
+  // restiq-backend#210: the till's "special instructions" ("less spicy") -
+  // shown on the order and the kitchen ticket. Null when none was typed.
+  note           String?
+  // restiq-backend#210: a line already sent to the kitchen is never deleted -
+  // a manager-approved void stamps it here instead (audited via
+  // ManagerAuthService 'void_after_fire'). Voided lines drop out of the
+  // order view, bill totals and invoice; the kitchen ticket shows them struck
+  // through (TicketLine.voided).
+  voidedAt       DateTime? @map("voided_at") @db.Timestamptz(6)
+  voidReason     String?   @map("void_reason")
   createdAt      DateTime @default(now()) @map("created_at") @db.Timestamptz(6)
 
   tenant          Tenant              @relation(fields: [tenantId], references: [id])
@@ -1824,6 +1877,9 @@ model CreditNote {
   // never-persisted-derived-total convention as BillView.totalMinor.
   subtotalMinor     BigInt   @map("subtotal_minor")
   taxMinor          BigInt   @map("tax_minor")
+  // restiq-backend#221: how the money went back. Null only on notes issued
+  // before this column existed - shift close treats those as cash first.
+  method            TenderMethod?
   createdAt         DateTime @default(now()) @map("created_at") @db.Timestamptz(6)
 
   tenant          Tenant           @relation(fields: [tenantId], references: [id])
@@ -1997,8 +2053,13 @@ model AgreementVersion {
   id          String   @id @default(uuid(7)) @db.Uuid
   version     Int      @unique
   title       String
-  body        String
-  bodySha256  String   @map("body_sha256")
+  // Legacy text of versions published before the PDF rework (#179); null from then on and never returned by the API.
+  body        String?
+  // SHA-256 of the PDF bytes (of the legacy text for a version with no file).
+  fileSha256  String   @map("file_sha256")
+  pdf         Bytes?
+  fileName    String?  @map("file_name")
+  sizeBytes   Int?     @map("size_bytes")
   publishedBy String   @map("published_by")
   publishedAt DateTime @default(now()) @map("published_at") @db.Timestamptz(6)
 
@@ -2014,7 +2075,7 @@ model AgreementSignature {
   signerOwnerId      String   @map("signer_owner_id") @db.Uuid
   signerName         String   @map("signer_name")
   signerEmail        String   @map("signer_email")
-  // sha256 over body hash + tenant + signer + signedAt: tamper-evident
+  // sha256 over file hash + tenant + signer + signedAt: tamper-evident
   // record of exactly what was accepted, by whom, when.
   evidenceSha256     String   @map("evidence_sha256")
   signedAt           DateTime @map("signed_at") @db.Timestamptz(6)
@@ -2025,4 +2086,67 @@ model AgreementSignature {
   @@unique([tenantId, agreementVersionId])
   @@index([tenantId])
   @@map("agreement_signatures")
+}
+
+// restiq-backend#171: shared failed sign-in counters - see
+// src/platform/attempt-limiter.ts. Written only through raw atomic SQL there.
+model AuthAttempt {
+  key             String   @id
+  attempts        Int
+  windowStartedAt DateTime @map("window_started_at") @db.Timestamptz(6)
+
+  @@index([windowStartedAt])
+  @@map("auth_attempts")
+}
+
+// Product directory (issue #153): a platform-wide library operators curate
+// and tenants copy from. No tenant_id, no RLS - every tenant browses the
+// same rows (same shape as agreement_versions). An import is a copy into
+// menu_items/item_prices; nothing links back, so tenant edits never touch
+// the directory and directory edits never touch a tenant.
+model CatalogProduct {
+  id                  String     @id @default(uuid(7)) @db.Uuid
+  name                String
+  shortName           String     @map("short_name")
+  nameHindi           String?    @map("name_hindi")
+  vegMarker           VegMarker? @map("veg_marker")
+  photoUrl            String?    @map("photo_url")
+  category            String
+  suggestedPriceMinor BigInt     @map("suggested_price_minor")
+  // ponytail: the currency doubles as the market (INR = India, AUD =
+  // Australia); a tenant only sees products priced in its own currency.
+  currency            String     @db.Char(3)
+  tags                String[]   @default([])
+  createdAt           DateTime   @default(now()) @map("created_at") @db.Timestamptz(6)
+  updatedAt           DateTime   @updatedAt @map("updated_at") @db.Timestamptz(6)
+
+  @@index([currency])
+  @@map("catalog_products")
+}
+
+// #198: MAIL_PROVIDER=simulator keeps every outgoing email here for the dev inbox (GET /ops/v1/dev-inbox)
+// instead of sending it. Production refuses any provider but mailjet (production-config.ts).
+model SimulatedMessage {
+  id        String   @id @default(uuid(7)) @db.Uuid
+  to        String
+  subject   String
+  text      String
+  html      String?
+  createdAt DateTime @default(now()) @map("created_at") @db.Timestamptz(6)
+
+  @@index([createdAt])
+  @@map("simulated_messages")
+}
+
+// #201: plan list prices per country, edited by operators in the Platform Console (Plans).
+// monthlyPriceMinor null = "on quote". Read by the onboarding wizard.
+model PlanPrice {
+  country               Country
+  plan                  SubscriptionPlan
+  monthlyPriceMinor     BigInt?          @map("monthly_price_minor")
+  annualDiscountPercent Int              @default(20) @map("annual_discount_percent")
+  updatedAt             DateTime         @default(now()) @updatedAt @map("updated_at") @db.Timestamptz(6)
+
+  @@id([country, plan])
+  @@map("plan_prices")
 }

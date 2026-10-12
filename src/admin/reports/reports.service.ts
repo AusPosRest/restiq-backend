@@ -132,7 +132,7 @@ function paymentsWhere(tenantId: string, filter: PaymentsFilterDto): Prisma.Bill
 }
 
 const PAYMENTS_INCLUDE = {
-  outlet: { select: { name: true } },
+  outlet: { select: { name: true, timezone: true } },
   order: { select: { source: true, tokenNumber: true, table: { select: { label: true } } } },
   finalizedByStaff: { select: { name: true } },
   tenders: { orderBy: { createdAt: 'asc' as const } },
@@ -159,12 +159,21 @@ function readTaxBreakdownLines(taxBreakdown: Prisma.JsonValue | null): TaxBreakd
   return stored?.lines ?? []
 }
 
+/** PE-23: "2026-10-11T18:35:03+05:30" - the outlet's own wall-clock time, still unambiguous for a spreadsheet. */
+export function localIsoWithOffset(instant: Date, timeZone: string): string {
+  const wall = instant.toLocaleString('sv-SE', { timeZone, hour12: false }).replace(' ', 'T')
+  const offsetMinutes = Math.round((Date.parse(`${wall}Z`) - Math.floor(instant.getTime() / 1000) * 1000) / 60_000)
+  const sign = offsetMinutes < 0 ? '-' : '+'
+  const abs = Math.abs(offsetMinutes)
+  return `${wall}${sign}${String(Math.floor(abs / 60)).padStart(2, '0')}:${String(abs % 60).padStart(2, '0')}`
+}
+
 function toCreditNoteRow(note: BillWithPaymentsInclude['creditNotes'][number], pricesIncludeTax: boolean): PaymentCreditNoteRow {
   // CreditNote has no single amountMinor column, and pricesIncludeTax comes
   // from the originating Bill, not CreditNote itself - same formula as
   // bill-core.ts's buildInvoiceView and bills.service.ts's toCreditNoteView.
   const amountMinor = pricesIncludeTax ? note.subtotalMinor : note.subtotalMinor + note.taxMinor
-  return { id: note.id, amountMinor: Number(amountMinor), reason: note.reason, createdAt: note.createdAt.toISOString() }
+  return { id: note.id, amountMinor: Number(amountMinor), method: note.method, reason: note.reason, createdAt: note.createdAt.toISOString() }
 }
 
 function toPaymentRow(bill: BillWithPaymentsInclude): PaymentRow {
@@ -297,6 +306,7 @@ export class ReportsService {
     }
 
     return {
+      netMinor: Number(totalMinor - refundedMinor),
       count: bills.length,
       subtotalMinor: Number(subtotalMinor),
       discountMinor: Number(discountMinor),
@@ -328,16 +338,17 @@ export class ReportsService {
         ? { ...where, OR: [{ finalizedAt: { lt: new Date(cursor.finalizedAt) } }, { finalizedAt: new Date(cursor.finalizedAt), id: { lt: cursor.id } }] }
         : where
 
-      const [rows, totals] = await Promise.all([
+      const [rows, totals, tenant] = await Promise.all([
         tx.bill.findMany({ where: pageWhere, orderBy: [{ finalizedAt: 'desc' }, { id: 'desc' }], take: limit + 1, include: PAYMENTS_INCLUDE }),
         this.totalsFor(tx, where),
+        tx.tenant.findUniqueOrThrow({ where: { id: owner.tenantId }, select: { country: true } }),
       ])
 
       const page = rows.slice(0, limit)
       const last = page[page.length - 1]
       const nextCursor = rows.length > limit && last?.finalizedAt ? encodePaymentsCursor({ finalizedAt: last.finalizedAt.toISOString(), id: last.id }) : null
 
-      return { items: page.map(toPaymentRow), nextCursor, totals }
+      return { currency: tenant.country === 'IN' ? 'INR' : 'AUD', items: page.map(toPaymentRow), nextCursor, totals }
     })
   }
 
@@ -359,7 +370,7 @@ export class ReportsService {
         const creditNotes = row.creditNotes.map((c) => `${c.reason}=${formatMinor(BigInt(c.amountMinor))}`).join(';')
         return [
           row.billNumber.toString(),
-          row.finalizedAt,
+          localIsoWithOffset(bill.finalizedAt as Date, bill.outlet.timezone),
           row.outletName,
           row.source,
           row.tableLabel ?? '',

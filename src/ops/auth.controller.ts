@@ -1,5 +1,5 @@
 import { Body, Controller, Get, HttpCode, Post } from '@nestjs/common'
-import { CurrentOperator, OpsPrincipal, Public } from '../platform'
+import { ClientIp, CurrentOperator, OpsPrincipal, Public } from '../platform'
 import { LoginResult, OpsAuthService } from './auth.service'
 import { LoginDto } from './login.dto'
 
@@ -10,13 +10,13 @@ export class OpsAuthController {
   @Public()
   @Post('login')
   @HttpCode(200)
-  login(@Body() dto: LoginDto): Promise<LoginResult> {
-    return this.auth.login(dto.email, dto.password)
+  login(@Body() dto: LoginDto, @ClientIp() ip: string): Promise<LoginResult> {
+    return this.auth.login(dto.email, dto.password, ip)
   }
 
   @Get('session')
-  session(@CurrentOperator() operator: OpsPrincipal): { operator: OpsPrincipal } {
-    return { operator }
+  session(@CurrentOperator() operator: OpsPrincipal): { operator: { id: string; email: string } } {
+    return { operator: { id: operator.id, email: operator.email } }
   }
 
   @Post('logout')

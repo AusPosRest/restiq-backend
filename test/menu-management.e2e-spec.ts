@@ -17,6 +17,7 @@ interface VariantBody {
   id: string
   name: string
   sortOrder: number
+  priceMinor: number | null
 }
 interface ModifierBody {
   id: string
@@ -44,6 +45,8 @@ interface ItemBody {
   vegMarker: string | null
   available: boolean
   stationId: string | null
+  priceMinor: number | null
+  currency: string | null
   variants: VariantBody[]
   modifierGroups: ModifierGroupBody[]
   allergens: AllergenBody[]
@@ -114,6 +117,7 @@ async function wipe(prisma: PrismaClient): Promise<void> {
   await prisma.menuCategory.deleteMany()
   await prisma.billShare.deleteMany()
   await prisma.tender.deleteMany()
+  await prisma.paymentIntent.deleteMany()
   await prisma.bill.deleteMany()
   await prisma.billNumberCounter.deleteMany()
   await prisma.tokenNumberCounter.deleteMany()
@@ -333,6 +337,26 @@ describe('/admin/v1/menu (e2e)', () => {
       expect(res.status).toBe(404)
     })
 
+    it('accepts an uploaded data:image photo, clears it with null, and rejects other schemes (issue #142)', async () => {
+      const { token } = await createOwner(prisma)
+      const category = await createCategory(token)
+      const item = await createItem(token, category.id)
+      const photo = `data:image/jpeg;base64,${'A'.repeat(4000)}`
+
+      const set = await authed(request(httpServer).patch(`/admin/v1/menu/items/${item.id}`), token).send({ photoUrl: photo })
+      expect(set.status).toBe(200)
+      expect((set.body as ItemBody).photoUrl).toBe(photo)
+
+      const cleared = await authed(request(httpServer).patch(`/admin/v1/menu/items/${item.id}`), token).send({ photoUrl: null })
+      expect(cleared.status).toBe(200)
+      expect((cleared.body as ItemBody).photoUrl).toBeNull()
+
+      for (const bad of ['javascript:alert(1)', 'http://cdn.example.com/a.jpg', 'data:text/html;base64,PGgxPg==']) {
+        const res = await authed(request(httpServer).patch(`/admin/v1/menu/items/${item.id}`), token).send({ photoUrl: bad })
+        expect(res.status).toBe(400)
+      }
+    })
+
     it('creates an item with photoUrl, nameHindi, and vegMarker, and reads them back', async () => {
       const { token } = await createOwner(prisma)
       const category = await createCategory(token)
@@ -378,6 +402,20 @@ describe('/admin/v1/menu (e2e)', () => {
       expect((fetched.body as ItemBody).vegMarker).toBe('veg')
     })
 
+    it('rejects a blank or over-long item/category name (SE-19)', async () => {
+      const { token } = await createOwner(prisma)
+      const category = await createCategory(token)
+      const blank = await authed(request(httpServer).post('/admin/v1/menu/items'), token).send({ categoryId: category.id, name: '   ', shortName: ' ' })
+      expect(blank.status).toBe(400)
+      const long = await authed(request(httpServer).post('/admin/v1/menu/items'), token).send({ categoryId: category.id, name: 'x'.repeat(121), shortName: 'X' })
+      expect(long.status).toBe(400)
+      const blankCategory = await authed(request(httpServer).post('/admin/v1/menu/categories'), token).send({ name: '  ' })
+      expect(blankCategory.status).toBe(400)
+      const longCategory = await authed(request(httpServer).post('/admin/v1/menu/categories'), token).send({ name: 'x'.repeat(81) })
+      expect(longCategory.status).toBe(400)
+      expect((longCategory.body as ErrorBody).error.code).toBe('validation_failed')
+    })
+
     it('rejects an invalid vegMarker on create', async () => {
       const { token } = await createOwner(prisma)
       const category = await createCategory(token)
@@ -389,6 +427,50 @@ describe('/admin/v1/menu (e2e)', () => {
       })
       expect(res.status).toBe(400)
       expect((res.body as ErrorBody).error.code).toBe('validation_failed')
+    })
+
+    describe('delete (archive) - restiq-web#248', () => {
+      it('archives the item: gone from list and GET, audited, row kept, category count drops, name reusable', async () => {
+        const { tenantId, token } = await createOwner(prisma)
+        const category = await createCategory(token)
+        const item = await createItem(token, category.id)
+
+        const res = await authed(request(httpServer).delete(`/admin/v1/menu/items/${item.id}`), token)
+        expect(res.status).toBe(204)
+
+        const list = await authed(request(httpServer).get('/admin/v1/menu/items'), token)
+        expect((list.body as ItemBody[]).map((i) => i.id)).not.toContain(item.id)
+        expect((await authed(request(httpServer).get(`/admin/v1/menu/items/${item.id}`), token)).status).toBe(404)
+        expect((await prisma.menuItem.findUnique({ where: { id: item.id } }))?.archivedAt).toBeInstanceOf(Date)
+        expect(await prisma.auditEvent.count({ where: { tenantId, action: 'menu.item_archived' } })).toBe(1)
+
+        const categories = await authed(request(httpServer).get('/admin/v1/menu/categories'), token)
+        expect((categories.body as CategoryBody[])[0]?.itemCount).toBe(0)
+
+        const again = await authed(request(httpServer).post('/admin/v1/menu/items'), token).send({ categoryId: category.id, name: 'Butter Chicken', shortName: 'Btr Chkn' })
+        expect(again.status).toBe(201)
+      })
+
+      it('refuses to delete a category whose only items are deleted ones, with its own code', async () => {
+        const { token } = await createOwner(prisma)
+        const category = await createCategory(token)
+        const item = await createItem(token, category.id)
+        await authed(request(httpServer).delete(`/admin/v1/menu/items/${item.id}`), token)
+
+        const res = await authed(request(httpServer).delete(`/admin/v1/menu/categories/${category.id}`), token)
+        expect(res.status).toBe(409)
+        expect((res.body as ErrorBody).error.code).toBe('category_has_history')
+      })
+
+      it('404s when another tenant tries to delete the item', async () => {
+        const owner1 = await createOwner(prisma)
+        const owner2 = await createOwner(prisma)
+        const category = await createCategory(owner1.token)
+        const item = await createItem(owner1.token, category.id)
+
+        const res = await authed(request(httpServer).delete(`/admin/v1/menu/items/${item.id}`), owner2.token)
+        expect(res.status).toBe(404)
+      })
     })
 
     describe('allergen tags CRUD on an item', () => {
@@ -501,6 +583,18 @@ describe('/admin/v1/menu (e2e)', () => {
       expect(res.status).toBe(400)
     })
 
+    it('rejects a negative modifier price (SE-7)', async () => {
+      const { token } = await createOwner(prisma)
+      const res = await authed(request(httpServer).post('/admin/v1/menu/modifier-groups'), token).send({
+        name: 'Add-ons',
+        minSelections: 0,
+        maxSelections: 3,
+        modifiers: [{ name: 'Sneaky discount', priceMinor: -50000 }],
+      })
+      expect(res.status).toBe(400)
+      expect(await prisma.modifier.count()).toBe(0)
+    })
+
     it('adds a modifier to an existing group', async () => {
       const { token } = await createOwner(prisma)
       const created = await authed(request(httpServer).post('/admin/v1/menu/modifier-groups'), token).send({ name: 'Spice Level', minSelections: 1, maxSelections: 1 })
@@ -556,6 +650,42 @@ describe('/admin/v1/menu (e2e)', () => {
       expect(rows[1]?.priceMinor).toBe(21000n)
     })
 
+    it('a price with no channel prices every channel, including ones that already had their own price', async () => {
+      const { tenantId, token } = await createOwner(prisma)
+      const category = await createCategory(token)
+      const item = await createItem(token, category.id, {})
+      const post = (body: Record<string, unknown>) =>
+        authed(request(httpServer).post(`/admin/v1/menu/items/${item.id}/prices`), token).send({ currency: 'INR', reason: 'Set price', ...body })
+      const current = async (channel: string) =>
+        ((await authed(request(httpServer).get(`/admin/v1/menu/items/${item.id}/price?channel=${channel}`), token)).body as { priceMinor?: number }).priceMinor ?? null
+
+      // Old data: a dine-in price set on its own, which would shadow a newer unscoped one.
+      await post({ channel: 'dine_in', priceMinor: 19000 }).expect(201)
+      expect(await current('qr')).toBeNull()
+
+      const res = await post({ priceMinor: 21000 })
+      expect(res.status).toBe(201)
+      expect((res.body as ItemPriceBody).channel).toBeNull()
+      for (const channel of ['dine_in', 'qr', 'takeaway', 'aggregator', 'delivery']) expect(await current(channel)).toBe(21000)
+      // One unscoped row plus one for the channel that had its own price - and a single audit entry.
+      expect(await prisma.itemPrice.count({ where: { itemId: item.id } })).toBe(3)
+      expect(await prisma.auditEvent.count({ where: { tenantId, action: 'menu.item.price_changed' } })).toBe(2)
+    })
+
+    it('PE-10: rejects a price in a currency other than the tenant\'s own', async () => {
+      const { token } = await createOwner(prisma)
+      const { item, variantId } = await itemWithVariant(token)
+      const res = await authed(request(httpServer).post(`/admin/v1/menu/items/${item.id}/prices`), token).send({
+        variantId,
+        channel: 'dine_in',
+        priceMinor: 1900,
+        currency: 'AUD',
+        reason: 'Wrong market',
+      })
+      expect(res.status).toBe(400)
+      expect((res.body as { error: { code: string } }).error.code).toBe('validation_failed')
+    })
+
     it('requires a reason (price change is security-relevant) and audits it', async () => {
       const { tenantId, token } = await createOwner(prisma)
       const { item, variantId } = await itemWithVariant(token)
@@ -579,6 +709,19 @@ describe('/admin/v1/menu (e2e)', () => {
       const audit = await prisma.auditEvent.findMany({ where: { tenantId, action: 'menu.item.price_changed' } })
       expect(audit).toHaveLength(1)
       expect(audit[0]?.reason).toBe('Initial price')
+    })
+
+    it('refuses a price in a currency other than the tenant\'s own (restiq-backend#208, SE-8)', async () => {
+      const { token } = await createOwner(prisma)
+      const { item } = await itemWithVariant(token)
+      const res = await authed(request(httpServer).post(`/admin/v1/menu/items/${item.id}/prices`), token).send({
+        channel: 'aggregator',
+        priceMinor: 100,
+        currency: 'USD',
+        reason: 'Wrong currency',
+      })
+      expect(res.status).toBe(400)
+      expect(await prisma.itemPrice.count({ where: { itemId: item.id, currency: 'USD' } })).toBe(0)
     })
 
     it('current-price read resolves the immediate price and ignores a future-scheduled one', async () => {
@@ -681,6 +824,62 @@ describe('/admin/v1/menu (e2e)', () => {
         reason: 'Attempted cross-tenant write',
       })
       expect(res.status).toBe(404)
+    })
+  })
+
+  describe('variants keep the item sellable (PE-15, CU-23, SE-20)', () => {
+    async function pricedItem(token: string, priceMinor: number): Promise<ItemBody> {
+      const category = await createCategory(token)
+      const item = await createItem(token, category.id, { name: 'Paneer Butter Masala', shortName: 'PBM' })
+      await authed(request(httpServer).post(`/admin/v1/menu/items/${item.id}/prices`), token).send({ priceMinor, currency: 'INR', reason: 'Initial price' })
+      return item
+    }
+
+    it("adding the first variant keeps the base portion on sale as its own variant, at the old price", async () => {
+      const { token } = await createOwner(prisma)
+      const item = await pricedItem(token, 28950)
+
+      const res = await authed(request(httpServer).post(`/admin/v1/menu/items/${item.id}/variants`), token).send({ name: 'Half', priceMinor: 16900, currency: 'INR', basePortionName: 'Full' })
+      expect(res.status).toBe(201)
+      const body = res.body as ItemBody
+      expect(body.variants.map((v) => [v.name, v.priceMinor])).toEqual([
+        ['Full', 28950],
+        ['Half', 16900],
+      ])
+      const full = body.variants[0]
+      const current = await authed(request(httpServer).get(`/admin/v1/menu/items/${item.id}/price?channel=qr&variantId=${full.id}`), token)
+      expect((current.body as CurrentPriceBody).priceMinor).toBe(28950)
+    })
+
+    it('names the kept portion "Regular" by default and only on the first variant', async () => {
+      const { token } = await createOwner(prisma)
+      const item = await pricedItem(token, 30000)
+      await authed(request(httpServer).post(`/admin/v1/menu/items/${item.id}/variants`), token).send({ name: 'Half', priceMinor: 18000, currency: 'INR' })
+      const res = await authed(request(httpServer).post(`/admin/v1/menu/items/${item.id}/variants`), token).send({ name: 'Family', priceMinor: 55000, currency: 'INR' })
+      expect((res.body as ItemBody).variants.map((v) => v.name)).toEqual(['Regular', 'Half', 'Family'])
+    })
+
+    it('rejects a variant price without a currency', async () => {
+      const { token } = await createOwner(prisma)
+      const item = await pricedItem(token, 30000)
+      const res = await authed(request(httpServer).post(`/admin/v1/menu/items/${item.id}/variants`), token).send({ name: 'Half', priceMinor: 18000 })
+      expect(res.status).toBe(400)
+      expect(await prisma.itemVariant.count()).toBe(0)
+    })
+
+    it('the item list carries current prices inline, null where an item or variant has none', async () => {
+      const { token } = await createOwner(prisma)
+      const priced = await pricedItem(token, 28950)
+      const category = await createCategory(token, 'Salads')
+      const unpriced = await createItem(token, category.id, { name: 'Garden Salad', shortName: 'Salad', variants: [{ name: 'Half' }] })
+
+      const res = await authed(request(httpServer).get('/admin/v1/menu/items'), token)
+      const items = res.body as ItemBody[]
+      const p = items.find((i) => i.id === priced.id)
+      expect([p?.priceMinor, p?.currency]).toEqual([28950, 'INR'])
+      const u = items.find((i) => i.id === unpriced.id)
+      expect(u?.priceMinor).toBeNull()
+      expect(u?.variants[0]?.priceMinor).toBeNull()
     })
   })
 

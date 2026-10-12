@@ -70,6 +70,10 @@ async function wipe(prisma: PrismaClient): Promise<void> {
   await prisma.cartLineModifier.deleteMany()
   await prisma.cartLine.deleteMany()
   await prisma.orderLineModifier.deleteMany()
+  // Kitchen tickets another suite left behind hold order lines/orders (RESTRICT) - cleared first.
+  await prisma.ticketLine.deleteMany()
+  await prisma.ticketEvent.deleteMany()
+  await prisma.ticket.deleteMany()
   await prisma.orderLine.deleteMany()
   await prisma.invoice.deleteMany()
   await prisma.subscription.deleteMany()
@@ -93,6 +97,7 @@ async function wipe(prisma: PrismaClient): Promise<void> {
   await prisma.menuCategory.deleteMany()
   await prisma.billShare.deleteMany()
   await prisma.tender.deleteMany()
+  await prisma.paymentIntent.deleteMany()
   await prisma.bill.deleteMany()
   await prisma.billNumberCounter.deleteMany()
   await prisma.tokenNumberCounter.deleteMany()
@@ -396,6 +401,21 @@ describe('/guest/v1/cart shared group cart (e2e)', () => {
       expect((res.body as ErrorBody).error.code).toBe('modifier_selection_invalid')
     })
 
+    it('rejects an absurd quantity with 400, not a 500 (SE-13)', async () => {
+      const tenantId = await createTenant(prisma)
+      const outletId = await createOutlet(prisma, tenantId)
+      const tableId = await createTable(prisma, tenantId, outletId)
+      await enableQrOrdering(prisma, tenantId, outletId)
+      const { tokenA } = await startAndJoin(prisma, outletId, tableId)
+      const { itemId } = await createItemWithPrice(prisma, tenantId, 19000)
+
+      for (const quantity of [2000000, 3000000000]) {
+        const res = await authed(request(httpServer).post('/guest/v1/cart/lines'), tokenA).send({ itemId, quantity })
+        expect(res.status).toBe(400)
+      }
+      expect(await prisma.cartLine.count()).toBe(0)
+    })
+
     it('re-validates min/max on PATCH re-selection', async () => {
       const tenantId = await createTenant(prisma)
       const outletId = await createOutlet(prisma, tenantId)
@@ -456,9 +476,9 @@ describe('/guest/v1/cart shared group cart (e2e)', () => {
       const added = await authed(request(httpServer).post('/guest/v1/cart/lines'), tokenA).send({ itemId, quantity: 1 })
       const lineId = (added.body as TableCartBody).guests[0]?.lines[0]?.id
 
-      const role = await prisma.role.create({ data: { tenantId, name: `Waiter-${uuidv7()}`, isSystem: false } })
+      const role = await prisma.role.upsert({ where: { tenantId_name: { tenantId, name: 'Cashier' } }, update: {}, create: { tenantId, name: 'Cashier', isSystem: true, isManager: false } })
       const staff = await prisma.staffUser.create({ data: { tenantId, roleId: role.id, name: 'Server Priya' } })
-      const posToken = signPosToken({ id: staff.id, tenantId, outletId, name: staff.name })
+      const posToken = signPosToken({ sessionVersion: 0, id: staff.id, tenantId, outletId, name: staff.name })
       const closeRes = await authed(request(httpServer).post(`/pos/v1/tables/${tableId}/close-session`), posToken)
       expect(closeRes.status).toBe(200)
 
@@ -489,9 +509,9 @@ describe('/guest/v1/cart shared group cart (e2e)', () => {
     it('rejects a pos-realm token on the guest cart routes', async () => {
       const tenantId = await createTenant(prisma)
       const outletId = await createOutlet(prisma, tenantId)
-      const role = await prisma.role.create({ data: { tenantId, name: `Waiter-${uuidv7()}`, isSystem: false } })
+      const role = await prisma.role.upsert({ where: { tenantId_name: { tenantId, name: 'Cashier' } }, update: {}, create: { tenantId, name: 'Cashier', isSystem: true, isManager: false } })
       const staff = await prisma.staffUser.create({ data: { tenantId, roleId: role.id, name: 'Server Priya' } })
-      const posToken = signPosToken({ id: staff.id, tenantId, outletId, name: staff.name })
+      const posToken = signPosToken({ sessionVersion: 0, id: staff.id, tenantId, outletId, name: staff.name })
 
       const res = await authed(request(httpServer).get('/guest/v1/cart'), posToken)
       expect(res.status).toBe(401)

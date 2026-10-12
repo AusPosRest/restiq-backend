@@ -1,4 +1,4 @@
-import { IsNotEmpty, IsString, IsUUID, Matches } from 'class-validator'
+import { IsNotEmpty, IsOptional, IsString, IsUUID, Matches, MaxLength } from 'class-validator'
 import type { ClockEventType } from '../../generated/prisma/client'
 
 // 4-digit PIN per SPEC CAP-1 and staff.service.ts's PIN_LENGTH convention.
@@ -10,6 +10,16 @@ export class PosLoginDto {
 
   @Matches(PIN_PATTERN, { message: 'pin must be exactly 4 digits' })
   pin!: string
+
+  // restiq-backend#171: the enrolled device this login comes from (the tab's
+  // ?device= binding). Only trusted if it is an active device of this tenant;
+  // otherwise the attempt is throttled by IP like any unbound browser.
+  @IsOptional() @IsUUID()
+  deviceId?: string
+
+  // restiq-backend#209 (SE-12): the secret this device got at enrolment - only with it does deviceId earn the till's own throttle allowance.
+  @IsOptional() @IsString() @MaxLength(200)
+  deviceSecret?: string
 }
 
 export class SelectOutletDto {

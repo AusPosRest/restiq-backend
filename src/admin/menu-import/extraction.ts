@@ -1,12 +1,10 @@
 // CAP-3: turns an uploaded file into a draft list of menu items with a
 // confidence score per field. CSV and XLSX are actually parsed - real
 // structure in, real (high-confidence) values out. No vision/OCR service is
-// wired up anywhere in this codebase yet, so image and PDF sources return a
-// fixed, lower-confidence sample draft instead of failing the upload: this
-// keeps the review-before-commit flow (the point of CAP-3) buildable and
-// testable today. `scanStub` below is the integration point for a real
-// vision-language extraction call later - same input, same DraftItem[] shape
-// out, nothing else in this module or its callers would need to change.
+// wired up yet, so image and PDF uploads are refused with a clear 422 instead
+// of the fixed sample draft they used to get - owners committed that sample as
+// if it were their own menu (restiq-web#246).
+import { UnprocessableEntityException } from '@nestjs/common'
 import ExcelJS from 'exceljs'
 import { uuidv7 } from '../../platform'
 
@@ -184,29 +182,12 @@ async function parseXlsx(buffer: Buffer): Promise<string[][]> {
   return rows.filter((cells) => cells.some((cell) => cell.trim().length > 0))
 }
 
-// Fixed sample draft standing in for a real vision/OCR extraction service
-// (none exists yet). Confidence is deliberately mid-range and uneven across
-// fields - the pattern a real scan produces: the item name usually segments
-// cleanly, price and category are what a human reviewer most often corrects.
-function scanStub(currency: string): DraftItem[] {
-  const sample: ReadonlyArray<{ name: string; shortName: string; category: string; priceMajor: number }> = [
-    { name: 'Butter Chicken', shortName: 'Butter Chkn', category: 'Mains', priceMajor: 320 },
-    { name: 'Paneer Tikka', shortName: 'Paneer Tikka', category: 'Starters', priceMajor: 220 },
-    { name: 'Masala Chai', shortName: 'Chai', category: 'Beverages', priceMajor: 60 },
-  ]
-  return sample.map((item) => ({
-    id: uuidv7(),
-    name: item.name,
-    shortName: item.shortName,
-    category: item.category,
-    priceMinor: Math.round(item.priceMajor * 100),
-    currency,
-    confidence: { name: 0.72, shortName: 0.65, category: 0.6, price: 0.55, overall: 0.63 },
-  }))
-}
-
 export async function extractDraftItems(sourceType: MenuImportSourceType, buffer: Buffer, currency: string): Promise<DraftItem[]> {
   if (sourceType === 'csv') return rowsToDraftItems(parseCsv(buffer.toString('utf8')), currency)
   if (sourceType === 'xlsx') return rowsToDraftItems(await parseXlsx(buffer), currency)
-  return scanStub(currency)
+  // ponytail: photo/PDF reading needs a vision model (and its API key); it plugs in here, same DraftItem[] out.
+  throw new UnprocessableEntityException({
+    code: 'extraction_unavailable',
+    message: "Reading menus from photos and PDFs isn't available yet. Download the sample spreadsheet, fill it in and upload it as CSV or XLSX.",
+  })
 }

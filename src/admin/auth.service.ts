@@ -1,12 +1,17 @@
 // CAP-1: an invited owner accepts their invite, sets a password, and lands
 // with an admin-realm (aud:"admin") session in one call - no extra login step.
 // Issue #118 adds the returning-owner counterpart: password login.
-import { BadRequestException, ConflictException, HttpException, Injectable, UnauthorizedException } from '@nestjs/common'
+import { BadRequestException, ConflictException, Injectable, Logger, UnauthorizedException } from '@nestjs/common'
 import * as argon2 from 'argon2'
-import { createHash } from 'node:crypto'
+import { createHash, randomBytes } from 'node:crypto'
 import type { Prisma } from '../generated/prisma/client'
-import { AdminPrincipal, RegionRegistryService, signAdminToken } from '../platform'
-import { clearAttempts, isLockedOut, recordFailedAttempt } from './login-lockout'
+import { AdminPrincipal, AttemptLimiter, AttemptRule, MailService, RegionRegistryService, signAdminToken, webLink } from '../platform'
+
+export interface InviteDetails {
+  restaurantName: string
+  email: string
+  firstName: string
+}
 
 export interface AcceptInviteResult {
   token: string
@@ -29,22 +34,59 @@ async function setOwnerLoginContext(tx: Prisma.TransactionClient): Promise<void>
   await tx.$executeRaw`SELECT set_config('app.owner_login_context', 'login', true)`
 }
 
+// restiq-backend#171: per account (5 per 15 minutes) and per client IP (30
+// per 15 minutes, so one address can't walk through many accounts), shared
+// across instances - see platform/attempt-limiter.ts.
+function ownerLoginRules(email: string, ip: string): AttemptRule[] {
+  return [
+    { key: `owner-login:email:${email}`, max: 5, windowSeconds: 15 * 60 },
+    { key: `owner-login:ip:${ip}`, max: 30, windowSeconds: 15 * 60 },
+  ]
+}
+
+// Password reset (#181): asking and using the link both start with no tenant known (an email, or a
+// token), so each runs under its own narrow row-level-security context - see reset_flow.
+async function setPasswordResetContext(tx: Prisma.TransactionClient): Promise<void> {
+  await tx.$executeRaw`SELECT set_config('app.password_reset_context', 'reset', true)`
+}
+
+const RESET_TOKEN_TTL_MS = 60 * 60 * 1000
+
+function resetRequestRules(email: string, ip: string): AttemptRule[] {
+  return [
+    { key: `owner-reset:email:${email}`, max: 3, windowSeconds: 15 * 60 },
+    { key: `owner-reset:ip:${ip}`, max: 10, windowSeconds: 15 * 60 },
+  ]
+}
+
+function resetEmail(link: string): { subject: string; text: string; html: string } {
+  return {
+    subject: 'Reset your RESTIQ password',
+    text: `Someone asked to reset the password for your RESTIQ owner account.\n\nOpen this link within one hour to choose a new password:\n${link}\n\nIf this was not you, ignore this email - your password stays as it is.`,
+    html: `<p>Someone asked to reset the password for your RESTIQ owner account.</p><p><a href="${link}">Choose a new password</a> (the link works for one hour).</p><p>If this was not you, ignore this email - your password stays as it is.</p>`,
+  }
+}
+
 @Injectable()
 export class AdminAuthService {
+  private readonly logger = new Logger(AdminAuthService.name)
+
   // Verified when the email matches no OwnerUser (or matches more than one -
   // see ambiguous_owner below) so every failure path costs one argon2 verify,
   // no owner-existence enumeration via response timing (same reasoning as
   // OpsAuthService.dummyHash).
   private dummyHash?: Promise<string>
 
-  constructor(private readonly registry: RegionRegistryService) {}
+  constructor(
+    private readonly registry: RegionRegistryService,
+    private readonly limiter: AttemptLimiter,
+    private readonly mail: MailService,
+  ) {}
 
-  async login(email: string, password: string): Promise<OwnerSessionResult> {
+  async login(email: string, password: string, ip: string): Promise<OwnerSessionResult> {
     const normalized = email.trim().toLowerCase()
-
-    if (isLockedOut(normalized)) {
-      throw new HttpException({ code: 'locked_out', message: 'Too many incorrect attempts - try again shortly' }, 429)
-    }
+    const rules = ownerLoginRules(normalized, ip)
+    await this.limiter.consume(rules)
 
     const plane = this.registry.planeFor(this.registry.homeRegion())
     const candidates = await plane.$transaction(async (tx) => {
@@ -64,17 +106,106 @@ export class AdminAuthService {
     const verified = await argon2.verify(hash, password)
 
     if (!owner || !verified) {
-      recordFailedAttempt(normalized)
       // Generic on purpose: never reveal which of email/password was wrong.
       throw new UnauthorizedException({ code: 'invalid_credentials', message: 'Email or password is incorrect' })
     }
-    clearAttempts(normalized)
+    await this.limiter.refund(rules)
 
-    const principal: AdminPrincipal = { id: owner.id, tenantId: owner.tenantId, email: owner.email }
+    const principal: AdminPrincipal = { id: owner.id, tenantId: owner.tenantId, email: owner.email, sessionVersion: owner.sessionVersion }
     return {
       token: signAdminToken(principal),
       owner: { id: owner.id, tenantId: owner.tenantId, email: owner.email, firstName: owner.firstName, lastName: owner.lastName },
     }
+  }
+
+  /**
+   * Always answers the same, whether or not the email belongs to an owner, so it cannot be used to find
+   * accounts. The email goes out in the background for the same reason (no timing difference).
+   */
+  async forgotPassword(email: string, ip: string): Promise<{ accepted: true }> {
+    const normalized = email.trim().toLowerCase()
+    await this.limiter.consume(resetRequestRules(normalized, ip))
+
+    const plane = this.registry.planeFor(this.registry.homeRegion())
+    const links = await plane.$transaction(async (tx) => {
+      await setOwnerLoginContext(tx)
+      await setPasswordResetContext(tx)
+      const owners = await tx.ownerUser.findMany({ where: { email: normalized } })
+      const issued: Array<{ link: string; tenantId: string }> = []
+      for (const owner of owners) {
+        // A new request ends any link still open for this owner.
+        await tx.ownerPasswordReset.updateMany({ where: { ownerId: owner.id, usedAt: null }, data: { usedAt: new Date() } })
+        const raw = `rst_${randomBytes(32).toString('hex')}`
+        await tx.ownerPasswordReset.create({
+          data: { tenantId: owner.tenantId, ownerId: owner.id, tokenHash: createHash('sha256').update(raw).digest('hex'), expiresAt: new Date(Date.now() + RESET_TOKEN_TTL_MS) },
+        })
+        issued.push({ link: webLink(`/admin/reset-password?token=${raw}`), tenantId: owner.tenantId })
+      }
+      return issued
+    })
+    for (const { link, tenantId } of links) {
+      void this.mail.send({ to: normalized, ...resetEmail(link) }, { tenantId }).catch((error: unknown) => this.logger.error(`Password reset email failed: ${String(error)}`))
+    }
+    return { accepted: true }
+  }
+
+  /** Sets the new password, ends every session the owner already has, and uses the link up. */
+  async resetPassword(token: string, password: string): Promise<void> {
+    const tokenHash = createHash('sha256').update(token).digest('hex')
+    const passwordHash = await argon2.hash(password)
+    const plane = this.registry.planeFor(this.registry.homeRegion())
+    await plane.$transaction(async (tx) => {
+      await setPasswordResetContext(tx)
+      const reset = await tx.ownerPasswordReset.findUnique({ where: { tokenHash } })
+      if (!reset || reset.usedAt) throw new BadRequestException({ code: 'reset_invalid', message: 'This reset link is not valid' })
+      if (reset.expiresAt.getTime() <= Date.now()) throw new BadRequestException({ code: 'reset_expired', message: 'This reset link has expired' })
+
+      // Atomic use: two requests with the same link cannot both succeed.
+      const used = await tx.ownerPasswordReset.updateMany({ where: { id: reset.id, usedAt: null }, data: { usedAt: new Date() } })
+      if (used.count === 0) throw new BadRequestException({ code: 'reset_invalid', message: 'This reset link is not valid' })
+      await tx.ownerPasswordReset.updateMany({ where: { ownerId: reset.ownerId, usedAt: null }, data: { usedAt: new Date() } })
+
+      await tx.$executeRaw`SELECT set_config('app.tenant_id', ${reset.tenantId}, true)`
+      const owner = await tx.ownerUser.update({ where: { id: reset.ownerId }, data: { passwordHash, sessionVersion: { increment: 1 } } })
+      await tx.auditEvent.create({
+        data: {
+          tenantId: reset.tenantId,
+          actorId: owner.id,
+          actorEmail: owner.email,
+          action: 'owner.password_reset',
+          reason: 'Owner reset their password from an emailed link; every earlier session was ended',
+          occurredAt: new Date(),
+        },
+      })
+    })
+  }
+
+  /** restiq-backend#209: moves the owner's sessionVersion on, so this token and every other one they hold stops working. */
+  async logout(owner: AdminPrincipal): Promise<void> {
+    const plane = this.registry.planeFor(this.registry.homeRegion())
+    await plane.$transaction(async (tx) => {
+      await tx.$executeRaw`SELECT set_config('app.tenant_id', ${owner.tenantId}, true)`
+      await tx.ownerUser.update({ where: { id: owner.id }, data: { sessionVersion: { increment: 1 } } })
+      await tx.auditEvent.create({
+        data: { tenantId: owner.tenantId, actorId: owner.id, actorEmail: owner.email, action: 'owner.logout', reason: 'Owner signed out; every session was ended', occurredAt: new Date() },
+      })
+    })
+  }
+
+  /** Who an unused, unexpired invite is for (issue #193) - reads only, consumes nothing. */
+  async inviteDetails(token: string): Promise<InviteDetails> {
+    const tokenHash = createHash('sha256').update(token).digest('hex')
+    const plane = this.registry.planeFor(this.registry.homeRegion())
+    return plane.$transaction(async (tx) => {
+      await setInviteAcceptContext(tx)
+      const invite = await tx.ownerInvite.findUnique({ where: { tokenHash } })
+      if (!invite) throw new BadRequestException({ code: 'invite_invalid', message: 'This invite link is not valid' })
+      if (invite.usedAt) throw new ConflictException({ code: 'invite_already_used', message: 'This invite has already been used' })
+      if (invite.expiresAt.getTime() <= Date.now()) throw new BadRequestException({ code: 'invite_expired', message: 'This invite has expired' })
+      await tx.$executeRaw`SELECT set_config('app.tenant_id', ${invite.tenantId}, true)`
+      const tenant = await tx.tenant.findUnique({ where: { id: invite.tenantId }, select: { name: true } })
+      return { restaurantName: tenant?.name ?? '', email: invite.email, firstName: invite.firstName }
+    })
   }
 
   async acceptInvite(token: string, password: string): Promise<AcceptInviteResult> {
@@ -135,7 +266,7 @@ export class AdminAuthService {
       return owner
     })
 
-    const principal: AdminPrincipal = { id: result.id, tenantId: result.tenantId, email: result.email }
+    const principal: AdminPrincipal = { id: result.id, tenantId: result.tenantId, email: result.email, sessionVersion: result.sessionVersion }
     return {
       token: signAdminToken(principal),
       owner: { id: result.id, tenantId: result.tenantId, email: result.email, firstName: result.firstName, lastName: result.lastName },

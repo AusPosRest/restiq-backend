@@ -6,7 +6,7 @@ import { Test } from '@nestjs/testing'
 import * as argon2 from 'argon2'
 import { createHash } from 'node:crypto'
 import request from 'supertest'
-import { afterAll, beforeAll, describe, expect, it } from 'vitest'
+import { afterAll, beforeAll, describe, expect, it, vi } from 'vitest'
 import { AppModule } from '../src/app.module'
 import { createPrismaClient, PrismaClient } from '../src/db/client'
 import { signOpsToken, uuidv7 } from '../src/platform'
@@ -22,6 +22,7 @@ interface ListBody {
     plan: string
     outletCount: number
     health: string
+    testMode: boolean
     createdAt: string
   }>
   nextCursor: string | null
@@ -67,6 +68,7 @@ async function wipe(prisma: PrismaClient): Promise<void> {
   await prisma.menuCategory.deleteMany()
   await prisma.billShare.deleteMany()
   await prisma.tender.deleteMany()
+  await prisma.paymentIntent.deleteMany()
   await prisma.bill.deleteMany()
   await prisma.billNumberCounter.deleteMany()
   await prisma.tokenNumberCounter.deleteMany()
@@ -171,7 +173,10 @@ describe('/ops/v1/tenants directory (e2e)', () => {
         expiresAt: new Date(now + day),
       },
     })
-    await prisma.tenantCapability.create({ data: { tenantId: ids.alpha, key: 'reservations', enabled: true } })
+    // issue #191: the outlet switches are the real ones; the old tenant row is ignored.
+    await prisma.tenantCapability.create({ data: { tenantId: ids.alpha, key: 'self_order_qr', enabled: false } })
+    const alphaOutlet = await prisma.outlet.findFirstOrThrow({ where: { tenantId: ids.alpha } })
+    await prisma.outletCapability.create({ data: { tenantId: ids.alpha, outletId: alphaOutlet.id, key: 'qr_ordering', enabled: true } })
 
     const moduleRef = await Test.createTestingModule({ imports: [AppModule] }).compile()
     app = moduleRef.createNestApplication()
@@ -197,7 +202,7 @@ describe('/ops/v1/tenants directory (e2e)', () => {
       expect(body.nextCursor).toBeNull()
       expect(body.tenants.map((t) => t.name)).toEqual(['Charlie Chaat', 'Bravo Bistro', 'Alpha Cafe'])
       const bravo = body.tenants.find((t) => t.id === ids.bravo)
-      expect(bravo).toMatchObject({ country: 'AU', status: 'active', plan: 'enterprise', outletCount: 2, health: 'unknown' })
+      expect(bravo).toMatchObject({ country: 'AU', status: 'active', plan: 'enterprise', outletCount: 2, health: 'unknown', testMode: false })
       expect(Date.parse(body.tenants[0].createdAt)).not.toBeNaN()
     })
 
@@ -216,12 +221,35 @@ describe('/ops/v1/tenants directory (e2e)', () => {
       expect(byQuery.tenants.map((t) => t.id)).toEqual([ids.charlie])
     })
 
-    it('treats every tenant as health unknown until telemetry exists', async () => {
+    it('treats a tenant with no devices as health unknown', async () => {
       const unknown = (await authed(request(httpServer).get('/ops/v1/tenants?health=unknown'))).body as ListBody
       expect(unknown.total).toBe(3)
       const silent = (await authed(request(httpServer).get('/ops/v1/tenants?health=silent'))).body as ListBody
       expect(silent.tenants).toEqual([])
       expect(silent.total).toBe(0)
+    })
+
+    // PE-2: health is the worst device severity, by Sync Health's own rule, and the filter matches it.
+    it('derives health from the tenant devices and filters on it', async () => {
+      const hour = 60 * 60 * 1000
+      const device = async (tenantId: string, lastContactAt: Date | null, enrolledAt = new Date()) => {
+        const outlet = await prisma.outlet.findFirstOrThrow({ where: { tenantId } })
+        await prisma.device.create({ data: { tenantId, outletId: outlet.id, label: 'Health', type: 'pos', hardwareKeyFingerprint: `fp-${Math.random()}`, enrolledAt, lastContactAt } })
+      }
+      await device(ids.alpha, new Date())
+      await device(ids.bravo, new Date())
+      await device(ids.bravo, new Date(Date.now() - 2 * hour))
+      try {
+        const all = (await authed(request(httpServer).get('/ops/v1/tenants'))).body as ListBody
+        expect(Object.fromEntries(all.tenants.map((t) => [t.id, t.health]))).toEqual({ [ids.alpha]: 'healthy', [ids.bravo]: 'lagging', [ids.charlie]: 'unknown' })
+        const lagging = (await authed(request(httpServer).get('/ops/v1/tenants?health=lagging'))).body as ListBody
+        expect(lagging.tenants.map((t) => t.id)).toEqual([ids.bravo])
+        expect(lagging.total).toBe(1)
+        const unknown = (await authed(request(httpServer).get('/ops/v1/tenants?health=unknown'))).body as ListBody
+        expect(unknown.tenants.map((t) => t.id)).toEqual([ids.charlie])
+      } finally {
+        await prisma.device.deleteMany({ where: { label: 'Health' } })
+      }
     })
 
     it('paginates with a cursor and no overlap', async () => {
@@ -260,7 +288,6 @@ describe('/ops/v1/tenants directory (e2e)', () => {
         outlets: Array<Record<string, unknown>>
         rolesCount: number
         ownerInvite: Record<string, unknown> | null
-        capabilities: Array<{ key: string; enabled: boolean }>
       }
       expect(body.tenant).toMatchObject({
         id: ids.alpha,
@@ -278,12 +305,9 @@ describe('/ops/v1/tenants directory (e2e)', () => {
       expect(body.outlets[0]).toMatchObject({ name: 'Alpha One', brandName: 'Alpha Brand', type: 'dine_in' })
       expect(body.rolesCount).toBe(2)
       expect(body.ownerInvite).toMatchObject({ email: 'owner@alpha.example', status: 'pending' })
-      // Every known capability key appears; the stored override wins.
-      const byKey = new Map(body.capabilities.map((c) => [c.key, c.enabled]))
-      expect(byKey.get('reservations')).toBe(true)
-      expect(byKey.get('tables_floor_plan')).toBe(true)
-      expect(byKey.get('self_order_qr')).toBe(false)
-      expect(byKey.size).toBeGreaterThanOrEqual(6)
+      // issue #191: each outlet carries the switches guests actually hit; no tenant-level list.
+      expect(body.outlets[0].capabilities).toEqual([{ key: 'qr_ordering', enabled: true }])
+      expect(body).not.toHaveProperty('capabilities')
     })
 
     it('404s for an unknown tenant', async () => {
@@ -318,50 +342,9 @@ describe('/ops/v1/tenants directory (e2e)', () => {
       ).toBe(400)
     })
 
-    it('toggles a capability, audited with the key', async () => {
-      const res = await authed(request(httpServer).put(`/ops/v1/tenants/${ids.alpha}/capabilities/self_order_qr`)).send({
-        enabled: true,
-        reason: 'Tenant requested QR ordering pilot',
-      })
-      expect(res.status).toBe(200)
-      const row = await prisma.tenantCapability.findUnique({
-        where: { tenantId_key: { tenantId: ids.alpha, key: 'self_order_qr' } },
-      })
-      expect(row?.enabled).toBe(true)
-      const audit = await prisma.auditEvent.findMany({
-        where: { tenantId: ids.alpha, action: 'tenant.capability.self_order_qr.enabled' },
-      })
-      expect(audit).toHaveLength(1)
-      expect(audit[0]?.reason).toBe('Tenant requested QR ordering pilot')
-
-      // Toggling back off updates the same row and audits again.
-      const off = await authed(request(httpServer).put(`/ops/v1/tenants/${ids.alpha}/capabilities/self_order_qr`)).send({
-        enabled: false,
-        reason: 'Pilot ended',
-      })
-      expect(off.status).toBe(200)
-      expect(
-        (await prisma.tenantCapability.findUnique({ where: { tenantId_key: { tenantId: ids.alpha, key: 'self_order_qr' } } }))
-          ?.enabled,
-      ).toBe(false)
-      expect(
-        await prisma.auditEvent.count({ where: { tenantId: ids.alpha, action: 'tenant.capability.self_order_qr.disabled' } }),
-      ).toBe(1)
-    })
-
-    it('rejects a capability toggle without a reason or with an unknown key', async () => {
-      expect(
-        (await authed(request(httpServer).put(`/ops/v1/tenants/${ids.alpha}/capabilities/self_order_qr`)).send({ enabled: true }))
-          .status,
-      ).toBe(400)
-      expect(
-        (
-          await authed(request(httpServer).put(`/ops/v1/tenants/${ids.alpha}/capabilities/time_travel`)).send({
-            enabled: true,
-            reason: 'x',
-          })
-        ).status,
-      ).toBe(400)
+    it('has no tenant-level capability toggle any more (issue #191)', async () => {
+      const res = await authed(request(httpServer).put(`/ops/v1/tenants/${ids.alpha}/capabilities/self_order_qr`)).send({ enabled: true, reason: 'x' })
+      expect(res.status).toBe(404)
     })
 
     it('updates branding tokens, audited', async () => {
@@ -390,6 +373,8 @@ describe('/ops/v1/tenants directory (e2e)', () => {
     })
 
     it('regenerates the owner invite, invalidating the old token', async () => {
+      vi.stubEnv('MAIL_PROVIDER', 'simulator')
+      await prisma.simulatedMessage.deleteMany({ where: { to: 'owner@alpha.example' } })
       const res = await authed(request(httpServer).post(`/ops/v1/tenants/${ids.alpha}/owner-invite/regenerate`)).send({
         reason: 'Original invite email bounced',
       })
@@ -408,6 +393,15 @@ describe('/ops/v1/tenants directory (e2e)', () => {
       expect(invites[0]?.tokenHash).not.toBe(INVITE_TOKEN_HASH)
       expect(invites[0]?.tokenHash).toBe(createHash('sha256').update(body.inviteToken).digest('hex'))
       expect(await prisma.auditEvent.count({ where: { tenantId: ids.alpha, action: 'tenant.owner_invite_regenerated' } })).toBe(1)
+
+      // #198: the new link is emailed to the owner too (sent in the background).
+      const mail = await vi.waitFor(async () => {
+        const row = await prisma.simulatedMessage.findFirst({ where: { to: 'owner@alpha.example' } })
+        if (!row) throw new Error('no invite email yet')
+        return row
+      })
+      expect(mail.text).toContain(`/admin/invite/${body.inviteToken}`)
+      vi.unstubAllEnvs()
     })
 
     it('404s regenerating when the tenant has no invite', async () => {
@@ -431,6 +425,53 @@ describe('/ops/v1/tenants directory (e2e)', () => {
       expect(again.status).toBe(409)
     })
 
+    // #213: per-tenant Test / Live mode, audited; a tenant with real sales never goes back to Test.
+    it('switches a tenant to Test and back to Live, audited, and shows the mode', async () => {
+      const toTest = await authed(request(httpServer).post(`/ops/v1/tenants/${ids.bravo}/mode`)).send({ mode: 'test', reason: 'Demo account' })
+      expect(toTest.status).toBe(200)
+      expect(toTest.body).toEqual({ tenant: { id: ids.bravo, testMode: true, liveSince: null } })
+      const detail = (await authed(request(httpServer).get(`/ops/v1/tenants/${ids.bravo}`))).body as { tenant: { testMode: boolean; liveSince: string | null } }
+      expect(detail.tenant).toMatchObject({ testMode: true, liveSince: null })
+      const list = (await authed(request(httpServer).get('/ops/v1/tenants'))).body as ListBody
+      expect(list.tenants.find((t) => t.id === ids.bravo)?.testMode).toBe(true)
+
+      const again = await authed(request(httpServer).post(`/ops/v1/tenants/${ids.bravo}/mode`)).send({ mode: 'test', reason: 'x' })
+      expect(again.status).toBe(409)
+
+      const toLive = await authed(request(httpServer).post(`/ops/v1/tenants/${ids.bravo}/mode`)).send({ mode: 'live', reason: 'Signed up' })
+      expect(toLive.status).toBe(200)
+      expect((toLive.body as { tenant: { testMode: boolean; liveSince: string } }).tenant.testMode).toBe(false)
+
+      const audit = await prisma.auditEvent.findMany({ where: { tenantId: ids.bravo, action: { startsWith: 'tenant.switched_to_' } }, orderBy: { occurredAt: 'asc' } })
+      expect(audit.map((a) => [a.action, a.reason, a.actorEmail])).toEqual([
+        ['tenant.switched_to_test', 'Demo account', EMAIL],
+        ['tenant.switched_to_live', 'Signed up', EMAIL],
+      ])
+    })
+
+    it('rejects a mode change without a reason or with an unknown mode', async () => {
+      expect((await authed(request(httpServer).post(`/ops/v1/tenants/${ids.bravo}/mode`)).send({ mode: 'test' })).status).toBe(400)
+      expect((await authed(request(httpServer).post(`/ops/v1/tenants/${ids.bravo}/mode`)).send({ mode: 'demo', reason: 'x' })).status).toBe(400)
+    })
+
+    it('refuses to put a tenant with real sales back into Test mode', async () => {
+      const outlet = await prisma.outlet.findFirstOrThrow({ where: { tenantId: ids.alpha } })
+      const order = await prisma.order.create({ data: { tenantId: ids.alpha, outletId: outlet.id, status: 'closed' } })
+      await prisma.bill.create({
+        data: { tenantId: ids.alpha, outletId: outlet.id, orderId: order.id, billNumber: 1, subtotalMinor: 100n, taxMinor: 0n, status: 'finalized', finalizedAt: new Date() },
+      })
+      try {
+        const res = await authed(request(httpServer).post(`/ops/v1/tenants/${ids.alpha}/mode`)).send({ mode: 'test', reason: 'Oops' })
+        expect(res.status).toBe(409)
+        expect((res.body as { error: { code: string } }).error.code).toBe('tenant_has_live_sales')
+        expect((await prisma.tenant.findUniqueOrThrow({ where: { id: ids.alpha } })).liveSince).not.toBeNull()
+        expect(await prisma.auditEvent.count({ where: { tenantId: ids.alpha, action: 'tenant.switched_to_test' } })).toBe(0)
+      } finally {
+        await prisma.bill.deleteMany({ where: { orderId: order.id } })
+        await prisma.order.delete({ where: { id: order.id } })
+      }
+    })
+
     it('rejects mutations without an ops token', async () => {
       expect((await request(httpServer).patch(`/ops/v1/tenants/${ids.alpha}`).send({ reason: 'x' })).status).toBe(401)
     })
@@ -448,6 +489,44 @@ describe('/ops/v1/tenants directory (e2e)', () => {
 
       expect(((await authed(request(httpServer).get('/ops/v1/dashboard/kpis/devices_online'))).body as { value: number }).value).toBe(0)
       expect(((await authed(request(httpServer).get('/ops/v1/dashboard/kpis/open_dlq'))).body as { value: number }).value).toBe(0)
+    })
+
+    it('counts devices heard from within the hour and unresolved dead letters (issue #189)', async () => {
+      const tenant = await prisma.tenant.findFirstOrThrow({ where: { deletedAt: null } })
+      const outlet = await prisma.outlet.findFirstOrThrow({ where: { tenantId: tenant.id } })
+      const device = (lastContactAt: Date | null) =>
+        prisma.device.create({ data: { tenantId: tenant.id, outletId: outlet.id, label: 'Till', type: 'pos', hardwareKeyFingerprint: `fp-${Math.random()}`, enrolledAt: new Date(), lastContactAt } })
+      const fresh = await device(new Date())
+      await device(new Date(Date.now() - 2 * 60 * 60 * 1000))
+      await device(null)
+      await prisma.syncDeadLetter.create({ data: { tenantId: tenant.id, deviceId: fresh.id, opId: uuidv7(), reasonCode: 'stale', reasonText: 'x' } })
+      await prisma.syncDeadLetter.create({ data: { tenantId: tenant.id, deviceId: fresh.id, opId: uuidv7(), reasonCode: 'stale', reasonText: 'x', resolvedAt: new Date() } })
+
+      expect(((await authed(request(httpServer).get('/ops/v1/dashboard/kpis/devices_online'))).body as { value: number }).value).toBe(1)
+      expect(((await authed(request(httpServer).get('/ops/v1/dashboard/kpis/open_dlq'))).body as { value: number }).value).toBe(1)
+
+      await prisma.syncDeadLetter.deleteMany({ where: { deviceId: fresh.id } })
+      await prisma.device.deleteMany({ where: { label: 'Till', tenantId: tenant.id } })
+    })
+
+    // #213: a Test-mode tenant is not a customer - it drops out of every tile.
+    it('leaves Test-mode tenants out of the KPIs', async () => {
+      const value = async (key: string) => ((await authed(request(httpServer).get(`/ops/v1/dashboard/kpis/${key}`))).body as { value: number }).value
+      const outlet = await prisma.outlet.findFirstOrThrow({ where: { tenantId: ids.bravo } })
+      const device = await prisma.device.create({ data: { tenantId: ids.bravo, outletId: outlet.id, label: 'TestKpi', type: 'pos', hardwareKeyFingerprint: `fp-${Math.random()}`, enrolledAt: new Date(), lastContactAt: new Date() } })
+      await prisma.syncDeadLetter.create({ data: { tenantId: ids.bravo, deviceId: device.id, opId: uuidv7(), reasonCode: 'stale', reasonText: 'x' } })
+      try {
+        const before = { tenants: await value('active_tenants'), outlets: await value('outlets'), online: await value('devices_online'), dlq: await value('open_dlq') }
+        await prisma.tenant.update({ where: { id: ids.bravo }, data: { liveSince: null } })
+        expect(await value('active_tenants')).toBe(before.tenants - 1)
+        expect(await value('outlets')).toBe(before.outlets - 2)
+        expect(await value('devices_online')).toBe(before.online - 1)
+        expect(await value('open_dlq')).toBe(before.dlq - 1)
+      } finally {
+        await prisma.tenant.update({ where: { id: ids.bravo }, data: { liveSince: new Date() } })
+        await prisma.syncDeadLetter.deleteMany({ where: { deviceId: device.id } })
+        await prisma.device.delete({ where: { id: device.id } })
+      }
     })
 
     it('rejects an unknown KPI key', async () => {

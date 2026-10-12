@@ -93,8 +93,8 @@ describe('computeTax', () => {
     expect(withComposition.notes).toEqual([])
   })
 
-  it('rounding: IN CGST/SGST on a subtotal where the two lines round to the same figure', () => {
-    // 30 * 5% = 1.5 -> round-half-up 2; 30 * 2.5% = 0.75 -> round-half-up 1; SGST absorbs the remainder (1).
+  it('rounding: IN CGST and SGST are each rounded on their own and always equal (CU-11)', () => {
+    // 30 * 2.5% = 0.75 -> round-half-up 1 each; tax = 2.
     const result = computeTax({ country: 'IN', gstRegistered: true, taxProfile: '', compositionScheme: false, subtotalMinor: 30n })
     expect(result.taxMinor).toBe(2n)
     expect(result.breakdown).toEqual([
@@ -103,14 +103,18 @@ describe('computeTax', () => {
     ])
   })
 
-  it('rounding: IN CGST/SGST where CGST alone would round up to more than half of taxMinor, SGST still comes out non-negative', () => {
-    // 10 * 2.5% = 0.25 -> round-half-up 0; 10 * 5% = 0.5 -> round-half-up 1; SGST = 1 - 0 = 1.
-    const result = computeTax({ country: 'IN', gstRegistered: true, taxProfile: '', compositionScheme: false, subtotalMinor: 10n })
-    expect(result.taxMinor).toBe(1n)
-    expect(result.breakdown).toEqual([
-      { label: 'CGST', ratePercent: 2.5, amountMinor: 0n },
-      { label: 'SGST', ratePercent: 2.5, amountMinor: 1n },
-    ])
+  it('rounding: IN CGST/SGST never differ by a paisa - 52020 at 5% is 1301 + 1301, not 1301 + 1300 (CU-11)', () => {
+    // 52020 * 2.5% = 1300.5 -> round-half-up 1301 per half.
+    const result = computeTax({ country: 'IN', gstRegistered: true, taxProfile: '', compositionScheme: false, subtotalMinor: 52020n })
+    expect(result.breakdown.map((l) => l.amountMinor)).toEqual([1301n, 1301n])
+    expect(result.taxMinor).toBe(2602n)
+    expect(sumBreakdown(result.breakdown)).toBe(result.taxMinor)
+  })
+
+  it('rounding: a negative taxable value rounds symmetrically, not toward zero (SE-7)', () => {
+    // -25000 * 2.5% = -625 per half; IGST -25000 * 5% = -1250 (not -1249).
+    expect(computeTax({ country: 'IN', gstRegistered: true, taxProfile: '', compositionScheme: false, subtotalMinor: -25000n }).taxMinor).toBe(-1250n)
+    expect(computeTax({ country: 'IN', gstRegistered: true, taxProfile: 'IGST', compositionScheme: false, subtotalMinor: -30n }).taxMinor).toBe(-2n)
   })
 
   it('rounding: IGST rounds half up at the 5% boundary', () => {

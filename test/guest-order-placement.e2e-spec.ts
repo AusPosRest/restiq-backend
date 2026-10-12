@@ -103,6 +103,7 @@ async function wipe(prisma: PrismaClient): Promise<void> {
   await prisma.menuCategory.deleteMany()
   await prisma.billShare.deleteMany()
   await prisma.tender.deleteMany()
+  await prisma.paymentIntent.deleteMany()
   await prisma.bill.deleteMany()
   await prisma.billNumberCounter.deleteMany()
   await prisma.tokenNumberCounter.deleteMany()
@@ -181,9 +182,9 @@ async function createStation(prisma: PrismaClient, tenantId: string, outletId: s
 }
 
 async function createStaff(prisma: PrismaClient, tenantId: string, outletId: string, name: string): Promise<string> {
-  const role = await prisma.role.create({ data: { tenantId, name: `Waiter-${uuidv7()}`, isSystem: false } })
+  const role = await prisma.role.upsert({ where: { tenantId_name: { tenantId, name: 'Cashier' } }, update: {}, create: { tenantId, name: 'Cashier', isSystem: true, isManager: false } })
   const staff = await prisma.staffUser.create({ data: { tenantId, roleId: role.id, name } })
-  return signPosToken({ id: staff.id, tenantId, outletId, name })
+  return signPosToken({ sessionVersion: 0, id: staff.id, tenantId, outletId, name })
 }
 
 async function createItemWithPrice(prisma: PrismaClient, tenantId: string, priceMinor: number, opts?: { stationId?: string; shortName?: string }): Promise<string> {
@@ -338,6 +339,24 @@ describe('/guest/v1/orders order placement into the real pipeline (e2e)', () => 
       expect(res.status).toBe(400)
       expect((res.body as ErrorBody).error.code).toBe('empty_cart')
       expect(await prisma.order.count()).toBe(0)
+    })
+
+    it('409s with table_has_active_order when the table already has a live order (F-2)', async () => {
+      const tenantId = await createTenant(prisma)
+      const outletId = await createOutlet(prisma, tenantId)
+      const tableId = await createTable(prisma, tenantId, outletId)
+      await enableQrOrdering(prisma, tenantId, outletId)
+      const item = await createItemWithPrice(prisma, tenantId, 19000)
+      const { tokenA } = await startAndJoin(outletId, tableId)
+      await authed(request(httpServer).post('/guest/v1/cart/lines'), tokenA).send({ itemId: item, quantity: 1 })
+      // A server opened the table first.
+      await prisma.order.create({ data: { tenantId, outletId, tableId, ownerId: null, status: 'open' } })
+
+      const res = await authed(request(httpServer).post('/guest/v1/orders'), tokenA).send({})
+      expect(res.status).toBe(409)
+      expect((res.body as { error: { code: string } }).error.code).toBe('table_has_active_order')
+      // The cart is kept so the guests can still order once the server adds to the live order.
+      expect(await prisma.cartLine.count()).toBe(1)
     })
 
     it('410s placement once the session is closed', async () => {

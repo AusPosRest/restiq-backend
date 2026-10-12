@@ -68,8 +68,10 @@ interface PaymentsTotalsBody {
   totalMinor: number
   tenderedMinor: number
   refundedMinor: number
+  netMinor: number
 }
 interface PaymentsListBody {
+  currency: string
   items: PaymentRowBody[]
   nextCursor: string | null
   totals: PaymentsTotalsBody
@@ -85,6 +87,7 @@ async function wipe(prisma: PrismaClient): Promise<void> {
   await prisma.orderLine.deleteMany()
   await prisma.billShare.deleteMany()
   await prisma.tender.deleteMany()
+  await prisma.paymentIntent.deleteMany()
   await prisma.bill.deleteMany()
   await prisma.billNumberCounter.deleteMany()
   await prisma.tokenNumberCounter.deleteMany()
@@ -112,6 +115,8 @@ async function wipe(prisma: PrismaClient): Promise<void> {
   await prisma.ticket.deleteMany()
   await prisma.order.deleteMany()
   await prisma.clockEvent.deleteMany()
+  await prisma.cashMovement.deleteMany()
+  await prisma.shift.deleteMany()
   await prisma.staffUser.deleteMany()
   await prisma.role.deleteMany()
   await prisma.outletCapability.deleteMany()
@@ -170,15 +175,20 @@ async function createTable(prisma: PrismaClient, tenantId: string, outletId: str
   return table.id
 }
 
-async function createStaff(prisma: PrismaClient, tenantId: string, outletId: string, name: string): Promise<{ id: string; token: string }> {
-  const role = await prisma.role.create({ data: { tenantId, name: `Role-${uuidv7()}`, isSystem: false } })
+async function createStaff(prisma: PrismaClient, tenantId: string, outletId: string, name: string, roleName = 'Cashier'): Promise<{ id: string; token: string }> {
+  const role = await prisma.role.upsert({ where: { tenantId_name: { tenantId, name: roleName } }, update: {}, create: { tenantId, name: roleName, isSystem: true, isManager: false } })
   const staff = await prisma.staffUser.create({ data: { tenantId, roleId: role.id, name } })
-  const token = signPosToken({ id: staff.id, tenantId, outletId, name })
+  // restiq-backend#208 (PE-17): cash needs an open shift at the outlet - the
+  // first staff member created for an outlet opens one.
+  if (!(await prisma.shift.findFirst({ where: { outletId, closedAt: null } }))) {
+    await prisma.shift.create({ data: { tenantId, outletId, openedByStaffId: staff.id, floatMinor: 0n } })
+  }
+  const token = signPosToken({ sessionVersion: 0, id: staff.id, tenantId, outletId, name })
   return { id: staff.id, token }
 }
 
 async function createManagerPin(prisma: PrismaClient, tenantId: string, pin: string): Promise<void> {
-  const role = await prisma.role.create({ data: { tenantId, name: `Manager-${uuidv7()}`, isSystem: false, isManager: true } })
+  const role = await prisma.role.upsert({ where: { tenantId_name: { tenantId, name: 'Manager' } }, update: {}, create: { tenantId, name: 'Manager', isSystem: true, isManager: true } })
   await prisma.staffUser.create({ data: { tenantId, roleId: role.id, name: 'Manager', pinHash: await argon2.hash(pin) } })
 }
 
@@ -203,6 +213,9 @@ describe('/admin/v1/reports/payments (e2e)', () => {
   })
 
   afterAll(async () => {
+    // Leave no shifts behind (PE-17 fixtures open them): other spec files'
+    // wipe() helpers predate them and would trip their FK on staff_users.
+    await wipe(prisma)
     await app.close()
     await prisma.$disconnect()
   })
@@ -255,6 +268,7 @@ describe('/admin/v1/reports/payments (e2e)', () => {
     const cashier2 = await createStaff(prisma, tenantId, outlet2, 'Vikram')
     const managerPin = '1234'
     await createManagerPin(prisma, tenantId, managerPin)
+    const refunder = await createStaff(prisma, tenantId, outlet1, 'Meera', 'Manager') // #209: refunds need the Refunds permission
 
     const now = Date.now()
     const t1 = new Date(now - 3 * 3600_000) // oldest
@@ -268,7 +282,7 @@ describe('/admin/v1/reports/payments (e2e)', () => {
     await prisma.bill.update({ where: { id: b2.billId }, data: { finalizedAt: t2 } })
 
     const b3 = await createBill(tenantId, outlet1, table1, cashier.token, 10000, 3, { tenderMethod: 'cash' }) // subtotal 30000, tax 1500, total 31500
-    await authed(request(httpServer).post(`/pos/v1/bills/${b3.billId}/refund`), cashier.token).send({ managerPin, reason: 'Sent back' })
+    await authed(request(httpServer).post(`/pos/v1/bills/${b3.billId}/refund`), refunder.token).send({ managerPin, reason: 'Sent back' })
     await prisma.bill.update({ where: { id: b3.billId }, data: { finalizedAt: t3 } })
 
     const openBill = await createBill(tenantId, outlet1, table1, cashier.token, 10000, 1, { skipFinalize: true })
@@ -334,7 +348,10 @@ describe('/admin/v1/reports/payments (e2e)', () => {
         totalMinor: 63000,
         tenderedMinor: 63000,
         refundedMinor: 31500,
+        // PE-33: net of refunds - the same figure the dashboard calls "Sales today".
+        netMinor: 31500,
       })
+      expect(body.currency).toBe('INR')
     })
 
     it('paginates with a keyset cursor (limit=2) covering all 3 finalized bills with no gaps or repeats', async () => {
@@ -405,6 +422,8 @@ describe('/admin/v1/reports/payments (e2e)', () => {
       expect(rows).toHaveLength(4) // header + 3 finalized bills
 
       const b3Row = rows[1] // newest first
+      // PE-23: the outlet's local time with its offset, not UTC.
+      expect(b3Row[1]).toMatch(/^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\+05:30$/)
       expect(b3Row.slice(2)).toEqual(['CSV Export Main', 'pos', 'T1', '', 'Asha', '300.00', '0.00', '', '15.00', '315.00', 'cash=315.00', 'Sent back=315.00'])
     })
   })

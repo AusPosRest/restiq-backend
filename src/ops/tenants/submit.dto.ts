@@ -24,6 +24,15 @@ export const OUTLET_TYPES = ['dine_in', 'qsr', 'cloud_kitchen', 'food_court'] as
 export const PLANS = ['standard', 'enterprise'] as const
 export const BILLING_PERIODS = ['monthly', 'annual'] as const
 
+// PE-6: GET /ops/v1/tenants/tax-number-available - the wizard's step-2 check.
+export class TaxNumberQueryDto {
+  @IsIn(COUNTRIES)
+  country!: (typeof COUNTRIES)[number]
+
+  @IsString() @IsNotEmpty() @MaxLength(20)
+  number!: string
+}
+
 export class BusinessDetailsDto {
   @IsString() @IsNotEmpty() @MaxLength(200)
   companyName!: string
@@ -137,6 +146,15 @@ export class SubmitTenantDto {
   @IsDefined()
   @ValidateNested() @Type(() => OwnerInviteDto)
   ownerInvite!: OwnerInviteDto
+
+  // The tenant's subdomain (D14). Left out, one is made from the company name. Checked and kept
+  // unique in the service; it cannot be changed afterwards.
+  @IsOptional() @IsString() @MaxLength(40)
+  slug?: string
+
+  // #213: a Test-mode tenant (simulated payments and mail, kept out of the KPIs). Default: Live.
+  @IsOptional() @IsBoolean()
+  testMode?: boolean
 
   // AD-6 audit reason. The wizard does not collect one, so it defaults.
   @IsOptional() @IsString() @IsNotEmpty() @MaxLength(500)

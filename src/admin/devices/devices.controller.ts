@@ -1,8 +1,8 @@
 import { Body, Controller, Get, HttpCode, Param, ParseUUIDPipe, Patch, Post } from '@nestjs/common'
 import { AdminPrincipal, CurrentOwner } from '../../platform'
 import { DeviceListResult } from '../../ops'
-import { AdminDevicePairingDto, AdminGenerateCodeDto } from './devices.dtos'
-import { AdminDevicesService, DevicePairingView } from './devices.service'
+import { AdminDevicePairingDto, AdminGenerateCodeDto, AdminRevokeDeviceDto } from './devices.dtos'
+import { AdminDevicesService, DevicePairingView, DeviceRevokeView } from './devices.service'
 
 @Controller('admin/v1/outlets/:outletId/devices')
 export class AdminDevicesController {
@@ -32,5 +32,17 @@ export class AdminDevicesController {
     @Body() dto: AdminDevicePairingDto,
   ): Promise<DevicePairingView> {
     return this.devices.setPairing(owner, outletId, deviceId, dto.posDeviceId)
+  }
+
+  // Owner-side removal (issue #140): revoke, never delete.
+  @Post(':deviceId/revoke')
+  @HttpCode(200)
+  revoke(
+    @CurrentOwner() owner: AdminPrincipal,
+    @Param('outletId', ParseUUIDPipe) outletId: string,
+    @Param('deviceId', ParseUUIDPipe) deviceId: string,
+    @Body() dto: AdminRevokeDeviceDto,
+  ): Promise<DeviceRevokeView> {
+    return this.devices.revoke(owner, outletId, deviceId, dto.reason)
   }
 }

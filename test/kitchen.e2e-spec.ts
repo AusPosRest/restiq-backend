@@ -100,6 +100,7 @@ async function wipe(prisma: PrismaClient): Promise<void> {
   await prisma.menuCategory.deleteMany()
   await prisma.billShare.deleteMany()
   await prisma.tender.deleteMany()
+  await prisma.paymentIntent.deleteMany()
   await prisma.bill.deleteMany()
   await prisma.billNumberCounter.deleteMany()
   await prisma.tokenNumberCounter.deleteMany()
@@ -168,9 +169,9 @@ async function createTable(prisma: PrismaClient, tenantId: string, outletId: str
 }
 
 async function createStaff(prisma: PrismaClient, tenantId: string, outletId: string, name: string): Promise<{ id: string; token: string }> {
-  const role = await prisma.role.create({ data: { tenantId, name: `Waiter-${uuidv7()}`, isSystem: false } })
+  const role = await prisma.role.upsert({ where: { tenantId_name: { tenantId, name: 'Cashier' } }, update: {}, create: { tenantId, name: 'Cashier', isSystem: true, isManager: false } })
   const staff = await prisma.staffUser.create({ data: { tenantId, roleId: role.id, name } })
-  const token = signPosToken({ id: staff.id, tenantId, outletId, name })
+  const token = signPosToken({ sessionVersion: 0, id: staff.id, tenantId, outletId, name })
   return { id: staff.id, token }
 }
 
@@ -308,7 +309,10 @@ describe('/kitchen/v1 ticket domain, routing, and fire-on-send (e2e)', () => {
       await fire(orderId, waiter.token)
 
       // pos/CAP-3: adding a line remains possible after the order is "sent".
+      // restiq-backend#210: it waits on the till until Send to kitchen again.
       await addLine(orderId, item, waiter.token, 2)
+      expect(await prisma.ticketLine.count({ where: { ticket: { orderId } } })).toBe(1)
+      await fire(orderId, waiter.token)
 
       const queue = (await authed(request(httpServer).get(`/kitchen/v1/outlets/${outletId}/stations/${tandoor}/queue`), waiter.token)).body as TicketBody[]
       expect(queue).toHaveLength(1)
@@ -335,6 +339,7 @@ describe('/kitchen/v1 ticket domain, routing, and fire-on-send (e2e)', () => {
       await authed(request(httpServer).post(`/kitchen/v1/tickets/${firstTicket?.id}/bump`), waiter.token).send()
 
       await addLine(orderId, item, waiter.token, 2)
+      await fire(orderId, waiter.token)
 
       const allTickets = await prisma.ticket.findMany({ where: { orderId }, orderBy: { firedAt: 'asc' } })
       expect(allTickets).toHaveLength(2)
@@ -366,6 +371,34 @@ describe('/kitchen/v1 ticket domain, routing, and fire-on-send (e2e)', () => {
 
       const bumped = (await authed(request(httpServer).get(`/kitchen/v1/outlets/${outletId}/bumped`), waiter.token)).body as BumpedTicketBody[]
       expect(bumped.map((t) => t.id)).toEqual([ticket?.id])
+    })
+
+    it('bumped list ignores tickets bumped > 12 hours ago and prevents reopening them', async () => {
+      const tenantId = await createTenant(prisma)
+      const outletId = await createOutlet(prisma, tenantId)
+      const tableId = await createTable(prisma, tenantId, outletId)
+      const waiter = await createStaff(prisma, tenantId, outletId, 'Asha')
+      const tandoor = await createStation(prisma, tenantId, outletId, 'Tandoor')
+      const item = await createItem(prisma, tenantId, 19000, { stationId: tandoor })
+      const orderId = await openOrder(outletId, tableId, waiter.token)
+      await addLine(orderId, item, waiter.token)
+      await fire(orderId, waiter.token)
+
+      const [ticket] = (await authed(request(httpServer).get(`/kitchen/v1/outlets/${outletId}/stations/${tandoor}/queue`), waiter.token)).body as TicketBody[]
+      await authed(request(httpServer).post(`/kitchen/v1/tickets/${ticket?.id}/bump`), waiter.token).send()
+
+      const thirteenHoursAgo = new Date(Date.now() - 13 * 60 * 60 * 1000)
+      await prisma.ticket.update({
+        where: { id: ticket?.id },
+        data: { bumpedAt: thirteenHoursAgo }
+      })
+
+      const bumped = (await authed(request(httpServer).get(`/kitchen/v1/outlets/${outletId}/bumped`), waiter.token)).body as BumpedTicketBody[]
+      expect(bumped).toHaveLength(0)
+
+      const recallRes = await authed(request(httpServer).post(`/kitchen/v1/tickets/${ticket?.id}/recall`), waiter.token).send()
+      expect(recallRes.status).toBe(409)
+      expect((recallRes.body as ErrorBody).error.code).toBe('conflict')
     })
 
     it('rejects bumping an already-bumped ticket', async () => {
@@ -459,6 +492,68 @@ describe('/kitchen/v1 ticket domain, routing, and fire-on-send (e2e)', () => {
       expect(tandoorEntry?.ready).toBe(true)
       expect(grillEntry?.ready).toBe(false)
       expect(afterBump[0]?.waitingOn.map((l) => l.itemId)).toEqual([grillItem])
+    })
+  })
+
+  describe('stale and paid orders (SE-17, CU-20, PE-21)', () => {
+    it('expo keeps an order that was paid and closed while its ticket is still queued, until it is bumped (SE-17)', async () => {
+      const tenantId = await createTenant(prisma)
+      const outletId = await createOutlet(prisma, tenantId)
+      const tableId = await createTable(prisma, tenantId, outletId)
+      const waiter = await createStaff(prisma, tenantId, outletId, 'Asha')
+      const tandoor = await createStation(prisma, tenantId, outletId, 'Tandoor')
+      const item = await createItem(prisma, tenantId, 19000, { stationId: tandoor })
+      const orderId = await openOrder(outletId, tableId, waiter.token)
+      await addLine(orderId, item, waiter.token)
+      await fire(orderId, waiter.token)
+      await prisma.order.update({ where: { id: orderId }, data: { status: 'closed' } })
+
+      const expo = (await authed(request(httpServer).get(`/kitchen/v1/outlets/${outletId}/expo`), waiter.token)).body as ExpoOrderBody[]
+      expect(expo.map((o) => o.orderId)).toEqual([orderId])
+
+      const ticketId = expo[0]?.stations[0]?.tickets[0]?.id
+      await authed(request(httpServer).post(`/kitchen/v1/tickets/${ticketId}/bump`), waiter.token).send()
+      const after = (await authed(request(httpServer).get(`/kitchen/v1/outlets/${outletId}/expo`), waiter.token)).body as ExpoOrderBody[]
+      expect(after).toEqual([])
+    })
+
+    it('a ticket fired more than 12 hours ago leaves the station queue, expo and all-day counts (CU-20)', async () => {
+      const tenantId = await createTenant(prisma)
+      const outletId = await createOutlet(prisma, tenantId)
+      const tableId = await createTable(prisma, tenantId, outletId)
+      const waiter = await createStaff(prisma, tenantId, outletId, 'Asha')
+      const tandoor = await createStation(prisma, tenantId, outletId, 'Tandoor')
+      const item = await createItem(prisma, tenantId, 19000, { stationId: tandoor })
+      const orderId = await openOrder(outletId, tableId, waiter.token)
+      await addLine(orderId, item, waiter.token)
+      await fire(orderId, waiter.token)
+      await prisma.ticket.updateMany({ where: { orderId }, data: { firedAt: new Date(Date.now() - 54 * 60 * 60 * 1000) } })
+
+      const queue = (await authed(request(httpServer).get(`/kitchen/v1/outlets/${outletId}/stations/${tandoor}/queue`), waiter.token)).body as TicketBody[]
+      expect(queue).toEqual([])
+      const expo = (await authed(request(httpServer).get(`/kitchen/v1/outlets/${outletId}/expo`), waiter.token)).body as ExpoOrderBody[]
+      expect(expo).toEqual([])
+      const allDay = (await authed(request(httpServer).get(`/kitchen/v1/outlets/${outletId}/all-day-summary`), waiter.token)).body as AllDaySummaryEntryBody[]
+      expect(allDay).toEqual([])
+    })
+
+    it("routes an item to the same-named station at the order's own outlet, never another outlet's screen (PE-21)", async () => {
+      const tenantId = await createTenant(prisma)
+      const outletA = await createOutlet(prisma, tenantId, 'Indiranagar')
+      const outletB = await createOutlet(prisma, tenantId, 'Koramangala')
+      const tableB = await createTable(prisma, tenantId, outletB)
+      const waiter = await createStaff(prisma, tenantId, outletB, 'Asha')
+      const barA = await createStation(prisma, tenantId, outletA, 'Bar')
+      await createStation(prisma, tenantId, outletB, 'Hot Kitchen')
+      const barB = await createStation(prisma, tenantId, outletB, 'Bar')
+      const chai = await createItem(prisma, tenantId, 6000, { stationId: barA })
+
+      const orderId = await openOrder(outletB, tableB, waiter.token)
+      await addLine(orderId, chai, waiter.token)
+      await fire(orderId, waiter.token)
+
+      const tickets = await prisma.ticket.findMany({ where: { orderId } })
+      expect(tickets.map((t) => t.stationId)).toEqual([barB])
     })
   })
 

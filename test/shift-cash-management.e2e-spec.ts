@@ -87,12 +87,14 @@ async function wipe(prisma: PrismaClient): Promise<void> {
   await prisma.menuCategory.deleteMany()
   await prisma.billShare.deleteMany()
   await prisma.tender.deleteMany()
+  await prisma.paymentIntent.deleteMany()
   await prisma.bill.deleteMany()
   await prisma.billNumberCounter.deleteMany()
   await prisma.tokenNumberCounter.deleteMany()
   await prisma.ticketEvent.deleteMany()
   await prisma.ticket.deleteMany()
   await prisma.order.deleteMany()
+  await prisma.clockEvent.deleteMany()
   await prisma.staffUser.deleteMany()
   await prisma.role.deleteMany()
   await prisma.outletCapability.deleteMany()
@@ -156,7 +158,7 @@ async function createOutlet(prisma: PrismaClient, tenantId: string, name = 'Indi
 async function createCashier(prisma: PrismaClient, tenantId: string, name = 'Priya Nair'): Promise<{ staffId: string; token: string }> {
   const role = await prisma.role.create({ data: { tenantId, name: 'Cashier', isSystem: true } })
   const staff = await prisma.staffUser.create({ data: { tenantId, roleId: role.id, name } })
-  const token = signPosToken({ id: staff.id, tenantId, outletId: uuidv7(), name })
+  const token = signPosToken({ sessionVersion: 0, id: staff.id, tenantId, outletId: uuidv7(), name })
   return { staffId: staff.id, token }
 }
 
@@ -415,6 +417,62 @@ describe('/pos/v1/shifts (e2e)', () => {
       expect(res.status).toBe(200)
       expect((res.body as ShiftBody).expectedMinor).toBe(120000)
       expect((res.body as ShiftBody).overShortMinor).toBe(0)
+    })
+
+    it('takes cash refunds out of expected - up to the cash each refunded bill took (restiq-backend#208, SE-16)', async () => {
+      const tenantId = await createTenant(prisma)
+      const outletId = await createOutlet(prisma, tenantId)
+      const { staffId, token } = await createCashier(prisma, tenantId)
+      const shiftId = await openShift(token, outletId, 100000)
+
+      async function paidBill(billNumber: number, tenders: Array<['cash' | 'upi_manual', bigint]>) {
+        const order = await prisma.order.create({ data: { tenantId, outletId, ownerId: staffId, status: 'closed' } })
+        const bill = await prisma.bill.create({
+          data: { tenantId, outletId, orderId: order.id, billNumber, subtotalMinor: 7900n, taxMinor: 395n, status: 'finalized', createdByStaffId: staffId, finalizedByStaffId: staffId, finalizedAt: new Date() },
+        })
+        for (const [method, amountMinor] of tenders) await prisma.tender.create({ data: { tenantId, billId: bill.id, method, amountMinor } })
+        return bill.id
+      }
+      // Fully refunded cash sale: 8295 in, 8295 back out of the drawer.
+      const cashBill = await paidBill(1, [['cash', 8295n]])
+      // Split 3000 cash / 5295 UPI, fully refunded: only 3000 leaves the drawer.
+      const splitBill = await paidBill(2, [['cash', 3000n], ['upi_manual', 5295n]])
+      for (const originalBillId of [cashBill, splitBill]) {
+        await prisma.creditNote.create({ data: { tenantId, originalBillId, reason: 'Refund', approvedByStaffId: staffId, createdByStaffId: staffId, subtotalMinor: 7900n, taxMinor: 395n } })
+      }
+
+      // expected = float(100000) + cash(8295 + 3000) - cash refunds(8295 + 3000) = 100000
+      const res = await authed(request(httpServer).post(`/pos/v1/shifts/${shiftId}/close`), token).send({ countedMinor: 100000 })
+      expect(res.status).toBe(200)
+      expect((res.body as ShiftBody).expectedMinor).toBe(100000)
+      expect((res.body as ShiftBody).overShortMinor).toBe(0)
+    })
+
+    it('takes out only refunds paid back in cash once the method is recorded (restiq-backend#221)', async () => {
+      const tenantId = await createTenant(prisma)
+      const outletId = await createOutlet(prisma, tenantId)
+      const { staffId, token } = await createCashier(prisma, tenantId)
+      const shiftId = await openShift(token, outletId, 100000)
+
+      async function paidBill(billNumber: number, method: 'cash' | 'upi_manual') {
+        const order = await prisma.order.create({ data: { tenantId, outletId, ownerId: staffId, status: 'closed' } })
+        const bill = await prisma.bill.create({
+          data: { tenantId, outletId, orderId: order.id, billNumber, subtotalMinor: 7900n, taxMinor: 395n, status: 'finalized', createdByStaffId: staffId, finalizedByStaffId: staffId, finalizedAt: new Date() },
+        })
+        await prisma.tender.create({ data: { tenantId, billId: bill.id, method, amountMinor: 8295n } })
+        return bill.id
+      }
+      const refund = (originalBillId: string, method: 'cash' | 'upi_manual') =>
+        prisma.creditNote.create({ data: { tenantId, originalBillId, reason: 'Refund', approvedByStaffId: staffId, createdByStaffId: staffId, subtotalMinor: 7900n, taxMinor: 395n, method } })
+      // Cash sale refunded to the guest's UPI: nothing leaves the drawer.
+      await refund(await paidBill(1, 'cash'), 'upi_manual')
+      // UPI sale refunded in cash: 8295 leaves the drawer.
+      await refund(await paidBill(2, 'upi_manual'), 'cash')
+
+      // expected = float(100000) + cash sales(8295) - cash refunds(8295) = 100000
+      const res = await authed(request(httpServer).post(`/pos/v1/shifts/${shiftId}/close`), token).send({ countedMinor: 100000 })
+      expect(res.status).toBe(200)
+      expect((res.body as ShiftBody).expectedMinor).toBe(100000)
     })
 
     it('never folds a bill finalised before the shift opened, or at another outlet, into expected', async () => {

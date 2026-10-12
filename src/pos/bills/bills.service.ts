@@ -34,12 +34,14 @@
 // story picks 20% of the bill's subtotal, the example the spec's own memlog
 // floated ("any discount over 20%") - see DISCOUNT_THRESHOLD_FRACTION.
 import { BadRequestException, ConflictException, ForbiddenException, Injectable, NotFoundException } from '@nestjs/common'
-import { ManagerApproval, ManagerAuthService, PosPrincipal, RegionRegistryService, uuidv7 } from '../../platform'
+import { KitchenTicketsService } from '../../kitchen'
+import { ManagerApproval, ManagerAuthService, PosPrincipal, RegionRegistryService, roleHasPermission, uuidv7 } from '../../platform'
 import { setTenantContext } from '../tenant-context'
 import { linkedPeripheral, queueFor } from '../device-routing'
+import { localDateKey } from '../clock/clock.util'
 import { assertOwner, loadOrder } from '../orders/orders.service'
-import { buildInvoiceView, commitFinalize, createOrGetBillRecord, createTenderRecord, loadBill, refreshOpenBillTotals, toBillView } from './bill-core'
-import { BillView, CreditNoteLineView, CreditNoteView, FinalizeBillDto, InvoiceView, PrintJobView, RefundBillDto } from './bills.dtos'
+import { buildInvoiceView, commitFinalize, createOrGetBillRecord, createTenderRecord, currencyForCountry, loadBill, loadTenantTaxProfile, lockBill, refreshOpenBillTotals, toBillView } from './bill-core'
+import { BillView, CreditNoteLineView, CreditNoteView, FinalizeBillDto, InvoiceView, PaymentHistoryEntry, PaymentHistoryView, PaymentMethodTotal, PrintJobView, RefundBillDto } from './bills.dtos'
 import type { Prisma } from '../../generated/prisma/client'
 
 // SPEC.md's Assumptions section defers the actual discount-above-threshold
@@ -71,6 +73,7 @@ function toCreditNoteView(note: CreditNoteWithLines, pricesIncludeTax: boolean):
     subtotalMinor: Number(note.subtotalMinor),
     taxMinor: Number(note.taxMinor),
     totalMinor: pricesIncludeTax ? Number(note.subtotalMinor) : Number(note.subtotalMinor + note.taxMinor),
+    method: note.method,
     createdAt: note.createdAt.toISOString(),
     lines: note.lines.map(toCreditNoteLineView),
   }
@@ -81,6 +84,7 @@ export class BillsService {
   constructor(
     private readonly registry: RegionRegistryService,
     private readonly managerAuth: ManagerAuthService,
+    private readonly tickets: KitchenTicketsService,
   ) {}
 
   private plane() {
@@ -107,7 +111,10 @@ export class BillsService {
     return plane.$transaction(async (tx) => {
       await setTenantContext(tx, staff.tenantId)
       const order = await loadOrder(tx, staff.tenantId, orderId)
-      await assertOwner(tx, order, staff)
+      // restiq-backend#210 (SE-23): waiter takes, cashier settles. Anyone who
+      // may settle bills can open the bill for someone else's order (finalize
+      // is not owner-gated either); everyone else still needs to own it.
+      if (!roleHasPermission(staff.role, 'settle_bills')) await assertOwner(tx, order, staff)
 
       const { bill, created } = await createOrGetBillRecord(tx, {
         tenantId: staff.tenantId,
@@ -126,6 +133,81 @@ export class BillsService {
       await setTenantContext(tx, staff.tenantId)
       const bill = await refreshOpenBillTotals(tx, await loadBill(tx, staff.tenantId, billId))
       return toBillView(bill)
+    })
+  }
+
+  /**
+   * GET .../outlets/:outletId/payments (issue #158): every tender taken at
+   * this outlet today, newest first, with per-method totals. "Today" is the
+   * outlet's local calendar day - the same 48 h lookback + localDateKey rule
+   * attendance.service.ts uses, so a payment just before local midnight
+   * lands on the right day. Tenders only; refunds (credit notes) are a
+   * separate ledger and stay out of this list.
+   */
+  async listPaymentsToday(staff: PosPrincipal, outletId: string): Promise<PaymentHistoryView> {
+    const plane = this.plane()
+    return plane.$transaction(async (tx) => {
+      await setTenantContext(tx, staff.tenantId)
+      const outlet = await tx.outlet.findUnique({ where: { id: outletId }, select: { tenantId: true, timezone: true } })
+      if (!outlet || outlet.tenantId !== staff.tenantId) {
+        throw new NotFoundException({ code: 'not_found', message: 'No such outlet' })
+      }
+
+      const now = new Date()
+      const todayKey = localDateKey(now, outlet.timezone)
+      const since = new Date(now.getTime() - 48 * 60 * 60 * 1000)
+      const rows = await tx.tender.findMany({
+        where: { tenantId: staff.tenantId, createdAt: { gte: since }, bill: { outletId, status: 'finalized' } },
+        orderBy: { createdAt: 'desc' },
+        include: {
+          bill: {
+            select: {
+              id: true,
+              billNumber: true,
+              orderId: true,
+              finalizedByStaff: { select: { id: true, name: true } },
+              order: { select: { tokenNumber: true, table: { select: { label: true } } } },
+            },
+          },
+        },
+      })
+
+      const payments: PaymentHistoryEntry[] = rows
+        .filter((row) => localDateKey(row.createdAt, outlet.timezone) === todayKey)
+        .map((row) => ({
+          id: row.id,
+          billId: row.bill.id,
+          billNumber: row.bill.billNumber,
+          orderId: row.bill.orderId,
+          tableLabel: row.bill.order.table?.label ?? null,
+          tokenNumber: row.bill.order.tokenNumber,
+          method: row.method,
+          amountMinor: Number(row.amountMinor),
+          reference: row.reference,
+          takenBy: row.bill.finalizedByStaff ? { staffId: row.bill.finalizedByStaff.id, name: row.bill.finalizedByStaff.name } : null,
+          createdAt: row.createdAt.toISOString(),
+        }))
+
+      const totals = new Map<PaymentMethodTotal['method'], PaymentMethodTotal>()
+      for (const payment of payments) {
+        const total = totals.get(payment.method) ?? { method: payment.method, count: 0, amountMinor: 0 }
+        total.count += 1
+        total.amountMinor += payment.amountMinor
+        totals.set(payment.method, total)
+      }
+      const byMethod = [...totals.values()].sort((a, b) => b.amountMinor - a.amountMinor)
+
+      const { country } = await loadTenantTaxProfile(tx, staff.tenantId)
+      return {
+        outletId,
+        date: todayKey,
+        asOf: now.toISOString(),
+        currency: currencyForCountry(country),
+        totalMinor: payments.reduce((sum, p) => sum + p.amountMinor, 0),
+        count: payments.length,
+        byMethod,
+        payments,
+      }
     })
   }
 
@@ -153,7 +235,10 @@ export class BillsService {
       const job = await tx.printJob.create({
         data: { id: uuidv7(), tenantId: staff.tenantId, outletId: bill.outletId, billId, targetDeviceId, payload: payload as unknown as Prisma.InputJsonValue },
       })
-      return toPrintJobView(job)
+      // restiq-backend#210 (CU-18): the outlet-wide queue is drained only by an active printer not linked to another till.
+      const printerAvailable =
+        targetDeviceId !== null || (await tx.device.count({ where: { tenantId: staff.tenantId, outletId: bill.outletId, type: 'printer', status: 'active', pairedPosId: null } })) > 0
+      return { ...toPrintJobView(job), printerAvailable }
     })
   }
 
@@ -198,6 +283,9 @@ export class BillsService {
     const plane = this.plane()
     return plane.$transaction(async (tx) => {
       await setTenantContext(tx, staff.tenantId)
+      // SE-6: a double-tapped Finalize waits here and then gets 409
+      // already_finalized, instead of deadlocking on the tender/counter writes.
+      await lockBill(tx, billId)
       const bill = await refreshOpenBillTotals(tx, await loadBill(tx, staff.tenantId, billId))
       if (bill.status === 'finalized') {
         throw new ConflictException({ code: 'already_finalized', message: 'This bill has already been finalised' })
@@ -213,7 +301,16 @@ export class BillsService {
           if (!dto.managerPin) {
             throw new BadRequestException({ code: 'manager_pin_required', message: 'A manager PIN is required for a discount above the threshold' })
           }
-          approval = await this.managerAuth.authorize('discount_above_threshold', staff.tenantId, bill.outletId, dto.managerPin, discountReason as string)
+          approval = await this.managerAuth.authorize('discount_above_threshold', staff.tenantId, bill.outletId, dto.managerPin, discountReason as string, staff.id)
+        }
+      }
+
+      // restiq-backend#208 (PE-17): cash goes into a drawer, so it needs an
+      // open shift at this outlet - otherwise the cash-up can never reconcile it.
+      if (dto.tenders.some((t) => t.method === 'cash')) {
+        const openShift = await tx.shift.findFirst({ where: { outletId: bill.outletId, closedAt: null }, select: { id: true } })
+        if (!openShift) {
+          throw new ConflictException({ code: 'shift_not_open', message: 'Open a shift with your starting cash float before taking cash' })
         }
       }
 
@@ -227,6 +324,11 @@ export class BillsService {
           reference: tender.method === 'external' ? tender.reference?.trim() : undefined,
         })
       }
+
+      // restiq-backend#210 (CU-17): a paid order always reaches the kitchen -
+      // anything not yet sent (a counter order settled from Open orders, an
+      // item added after the first send) fires now, in the same transaction.
+      await this.tickets.fireOnSend(tx, { id: bill.orderId, tenantId: bill.tenantId, outletId: bill.outletId })
 
       const final = await commitFinalize(tx, {
         tenantId: staff.tenantId,
@@ -259,12 +361,16 @@ export class BillsService {
     const plane = this.plane()
     return plane.$transaction(async (tx) => {
       await setTenantContext(tx, staff.tenantId)
+      // SE-4: concurrent refunds of one bill are serialised on its row lock,
+      // so each one sees every earlier credit note before checking what is
+      // still refundable.
+      await lockBill(tx, billId)
       const bill = await refreshOpenBillTotals(tx, await loadBill(tx, staff.tenantId, billId))
       if (bill.status !== 'finalized') {
         throw new ConflictException({ code: 'bill_not_finalized', message: 'Only a finalized bill can be refunded' })
       }
 
-      const orderLines = await tx.orderLine.findMany({ where: { orderId: bill.orderId }, include: { modifiers: true } })
+      const orderLines = await tx.orderLine.findMany({ where: { orderId: bill.orderId, voidedAt: null }, include: { modifiers: true } })
       const orderLineById = new Map(orderLines.map((l) => [l.id, l]))
 
       // Sum every earlier credit note's lines for this bill so a line can
@@ -273,7 +379,12 @@ export class BillsService {
       // the same units.
       const priorLines = await tx.creditNoteLine.findMany({ where: { creditNote: { originalBillId: billId } } })
       const refundedSoFar = new Map<string, number>()
-      for (const l of priorLines) refundedSoFar.set(l.orderLineId, (refundedSoFar.get(l.orderLineId) ?? 0) + l.quantity)
+      let priorGrossMinor = 0n
+      for (const l of priorLines) {
+        refundedSoFar.set(l.orderLineId, (refundedSoFar.get(l.orderLineId) ?? 0) + l.quantity)
+        // Gross, not amountMinor - a line's amount is net of the discount (#221).
+        priorGrossMinor += l.unitPriceMinor * BigInt(l.quantity)
+      }
 
       const targets =
         dto.lines ??
@@ -301,7 +412,7 @@ export class BillsService {
         }
       }
 
-      let subtotalMinor = 0n
+      let grossMinor = 0n
       const lineData: { orderLineId: string; quantity: number; unitPriceMinor: bigint; amountMinor: bigint }[] = []
       for (const target of targets) {
         const line = orderLineById.get(target.orderLineId)
@@ -321,26 +432,47 @@ export class BillsService {
         const modifiersTotal = line.modifiers.reduce((sum, m) => sum + m.priceMinor, 0n)
         const unitPriceMinor = line.unitPriceMinor + modifiersTotal
         const amountMinor = unitPriceMinor * BigInt(target.quantity)
-        subtotalMinor += amountMinor
+        grossMinor += amountMinor
+        // SE-3: count this target against the line before the next one is
+        // checked, so naming the same line twice can't refund it twice.
+        refundedSoFar.set(target.orderLineId, (refundedSoFar.get(target.orderLineId) ?? 0) + target.quantity)
         lineData.push({ orderLineId: target.orderLineId, quantity: target.quantity, unitPriceMinor, amountMinor })
       }
 
-      // Correct tax reversal (CAP-9, updated for issue #103's real tax
-      // engine): proportional to the bill's own actual tax rate - taken from
-      // the bill's own subtotalMinor/taxMinor ratio rather than
-      // re-deriving a rate from the tenant's (possibly-since-changed) tax
-      // registration, the same allocation guest/bills' BillShare split
-      // already uses for the identical reason (bills.service.ts here has no
-      // sibling to that file's own comment, so it's restated: this is the
-      // correct inverse of whatever rate actually produced bill.taxMinor,
-      // composition scheme's 0% and AU's inclusive GST included, without
-      // this module needing to know which one applied).
-      const taxMinor = bill.subtotalMinor === 0n ? 0n : (subtotalMinor * bill.taxMinor) / bill.subtotalMinor
+      // SE-1: refund what was actually paid. The lines above are priced
+      // gross (before the bill discount); the credit note's subtotal is that
+      // gross pro-rated by the bill's discount, and its tax pro-rated by the
+      // bill's own stored tax (already on the discounted value - SE-2), so
+      // composition's 0% and AU's inclusive GST need no special case here.
+      // Both are allocated cumulatively - everything refunded so far,
+      // including this note, minus what earlier notes already took, each
+      // rounded down - so partial refunds never add up to more than was
+      // paid, and refunding the whole bill returns exactly what was paid.
+      const billNetMinor = bill.subtotalMinor - (bill.discountMinor ?? 0n)
+      const prorate = (cumGross: bigint, of: bigint) => (bill.subtotalMinor === 0n ? 0n : (cumGross * of) / bill.subtotalMinor)
+      const prior = await tx.creditNote.aggregate({ where: { originalBillId: billId }, _sum: { subtotalMinor: true, taxMinor: true } })
+      const cumGrossMinor = priorGrossMinor + grossMinor
+      const maxZero = (n: bigint) => (n > 0n ? n : 0n)
+      const subtotalMinor = maxZero(prorate(cumGrossMinor, billNetMinor) - (prior._sum.subtotalMinor ?? 0n))
+      const taxMinor = maxZero(prorate(cumGrossMinor, bill.taxMinor) - (prior._sum.taxMinor ?? 0n))
+
+      // restiq-backend#221: each line's amount is its share of that net
+      // subtotal (gross-weighted, rounded down), the last line taking the
+      // remainder, so the lines always add up to the note's subtotal.
+      let allocatedMinor = 0n
+      lineData.forEach((l, i) => {
+        l.amountMinor = i === lineData.length - 1 ? subtotalMinor - allocatedMinor : grossMinor === 0n ? 0n : (subtotalMinor * l.amountMinor) / grossMinor
+        allocatedMinor += l.amountMinor
+      })
+
+      // Default: the bill's main tender - its largest, earliest on a tie.
+      const mainTender = bill.tenders.reduce<(typeof bill.tenders)[number] | null>((best, t) => (!best || t.amountMinor > best.amountMinor ? t : best), null)
+      const method = dto.method ?? mainTender?.method ?? null
 
       // Refund is unconditionally gated (unlike finalize()'s above-threshold
       // discount) - validate the refund request itself first (cheap), then
       // spend a manager-PIN check only on a request that's actually valid.
-      const approval = await this.managerAuth.authorize('refund', staff.tenantId, bill.outletId, dto.managerPin, dto.reason)
+      const approval = await this.managerAuth.authorize('refund', staff.tenantId, bill.outletId, dto.managerPin, dto.reason, staff.id)
 
       const created = await tx.creditNote.create({
         data: {
@@ -352,6 +484,7 @@ export class BillsService {
           createdByStaffId: staff.id,
           subtotalMinor,
           taxMinor,
+          method,
           lines: {
             create: lineData.map((l) => ({
               id: uuidv7(),

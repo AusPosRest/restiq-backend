@@ -36,6 +36,7 @@ interface OrderBody {
   tokenNumber: number | null
   createdAt: string
   updatedAt: string
+  lines: { unitPriceMinor: number }[]
 }
 interface BillBody {
   id: string
@@ -55,6 +56,7 @@ async function wipe(prisma: PrismaClient): Promise<void> {
   await prisma.orderLine.deleteMany()
   await prisma.billShare.deleteMany()
   await prisma.tender.deleteMany()
+  await prisma.paymentIntent.deleteMany()
   await prisma.bill.deleteMany()
   await prisma.billNumberCounter.deleteMany()
   await prisma.tokenNumberCounter.deleteMany()
@@ -82,6 +84,8 @@ async function wipe(prisma: PrismaClient): Promise<void> {
   await prisma.ticket.deleteMany()
   await prisma.order.deleteMany()
   await prisma.clockEvent.deleteMany()
+  await prisma.cashMovement.deleteMany()
+  await prisma.shift.deleteMany()
   await prisma.staffUser.deleteMany()
   await prisma.role.deleteMany()
   await prisma.outletCapability.deleteMany()
@@ -136,9 +140,14 @@ async function createOutlet(prisma: PrismaClient, tenantId: string, name = 'Kora
 }
 
 async function createStaff(prisma: PrismaClient, tenantId: string, outletId: string, name = 'Ravi'): Promise<{ id: string; token: string }> {
-  const role = await prisma.role.create({ data: { tenantId, name: `Cashier-${uuidv7()}`, isSystem: false } })
+  const role = await prisma.role.upsert({ where: { tenantId_name: { tenantId, name: 'Cashier' } }, update: {}, create: { tenantId, name: 'Cashier', isSystem: true, isManager: false } })
   const staff = await prisma.staffUser.create({ data: { tenantId, roleId: role.id, name } })
-  const token = signPosToken({ id: staff.id, tenantId, outletId, name })
+  // restiq-backend#208 (PE-17): cash needs an open shift at the outlet - the
+  // first staff member created for an outlet opens one.
+  if (!(await prisma.shift.findFirst({ where: { outletId, closedAt: null } }))) {
+    await prisma.shift.create({ data: { tenantId, outletId, openedByStaffId: staff.id, floatMinor: 0n } })
+  }
+  const token = signPosToken({ sessionVersion: 0, id: staff.id, tenantId, outletId, name })
   return { id: staff.id, token }
 }
 
@@ -163,6 +172,9 @@ describe('/pos/v1 QSR counter and token mode (e2e)', () => {
   })
 
   afterAll(async () => {
+    // Leave no shifts behind (PE-17 fixtures open them): other spec files'
+    // wipe() helpers predate them and would trip their FK on staff_users.
+    await wipe(prisma)
     await app.close()
     await prisma.$disconnect()
   })
@@ -231,6 +243,22 @@ describe('/pos/v1 QSR counter and token mode (e2e)', () => {
       expect((second.body as OrderBody).tokenNumber).toBe(2)
     })
 
+    it('moves past token numbers already in use when the counter has fallen behind them (F-1)', async () => {
+      const tenantId = await createTenant(prisma)
+      const outletId = await createOutlet(prisma, tenantId)
+      const staff = await createStaff(prisma, tenantId, outletId)
+      const first = await authed(request(httpServer).post(`/pos/v1/outlets/${outletId}/counter-orders`), staff.token).send()
+      expect((first.body as OrderBody).tokenNumber).toBe(1)
+      // Tokens 2..5 exist (e.g. seeded or imported orders) but the counter still says 1.
+      for (const tokenNumber of [2, 5]) {
+        await prisma.order.create({ data: { tenantId, outletId, tableId: null, ownerId: staff.id, status: 'closed', tokenNumber } })
+      }
+
+      const next = await authed(request(httpServer).post(`/pos/v1/outlets/${outletId}/counter-orders`), staff.token).send()
+      expect(next.status).toBe(201)
+      expect((next.body as OrderBody).tokenNumber).toBe(6)
+    })
+
     it('rejects an outlet from a different tenant', async () => {
       const tenantId = await createTenant(prisma)
       const outletId = await createOutlet(prisma, tenantId)
@@ -287,6 +315,19 @@ describe('/pos/v1 QSR counter and token mode (e2e)', () => {
       })
       expect(finalized.status).toBe(200)
       expect((finalized.body as BillBody).subtotalMinor).toBe(30000)
+    })
+
+    it('prices a counter order at the item\'s takeaway price, a table order at its dine-in price (restiq-backend#208, SE-8)', async () => {
+      const tenantId = await createTenant(prisma)
+      const outletId = await createOutlet(prisma, tenantId)
+      const staff = await createStaff(prisma, tenantId, outletId)
+      const itemId = await createItemWithPrice(prisma, tenantId, 20000)
+      await prisma.itemPrice.create({ data: { tenantId, itemId, priceMinor: 18000n, currency: 'INR', channel: 'takeaway' } })
+      const order = (await authed(request(httpServer).post(`/pos/v1/outlets/${outletId}/counter-orders`), staff.token).send()).body as OrderBody
+
+      const res = await authed(request(httpServer).post(`/pos/v1/orders/${order.id}/lines`), staff.token).send({ itemId, quantity: 1 })
+      expect(res.status).toBe(201)
+      expect((res.body as OrderBody).lines[0]?.unitPriceMinor).toBe(18000)
     })
 
     it('rings up and settles a counter order in one continuous sequence: create -> add lines -> bill -> finalize', async () => {

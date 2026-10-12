@@ -18,11 +18,11 @@
 // piece of pos/orders' machinery genuinely shared here is the kitchen fire
 // hook itself (src/kitchen, AD-16), which has no such dependency and is
 // injected the same way pos/orders does.
-import { BadRequestException, GoneException, Injectable, NotFoundException } from '@nestjs/common'
+import { BadRequestException, ConflictException, GoneException, Injectable, NotFoundException } from '@nestjs/common'
 import { resolveComboSelection, resolveCurrentPrice } from '../../admin'
 import type { Order, Prisma, PriceChannel, TableSession, Ticket } from '../../generated/prisma/client'
 import { KitchenTicketsService } from '../../kitchen'
-import { GuestPrincipal, RegionRegistryService } from '../../platform'
+import { GuestPrincipal, RegionRegistryService, reserveTokenNumber } from '../../platform'
 import { isSessionInactive } from '../sessions/sessions.service'
 import { setTenantContext } from '../tenant-context'
 import { GuestOrderStatusView, GuestOrderStep, GuestOrderStepView, GuestSessionOrdersView, PlacedOrderLineModifierView, PlacedOrderLineView, PlacedOrderView } from './orders.dtos'
@@ -94,7 +94,7 @@ async function loadOrderInSession(tx: Tx, guest: GuestPrincipal, session: TableS
 // from 'accepted' in the UI, despite sharing a reachedAt), 'ready' once all
 // are bumped. The stepper never claims a step the ticket data doesn't
 // support (SPEC CAP-6 success criterion).
-function buildOrderStatusView(order: Pick<Order, 'id' | 'tableId' | 'createdAt'>, tickets: Pick<Ticket, 'status' | 'firedAt' | 'bumpedAt'>[]): GuestOrderStatusView {
+function buildOrderStatusView(order: Pick<Order, 'id' | 'tableId' | 'tokenNumber' | 'createdAt'>, tickets: Pick<Ticket, 'status' | 'firedAt' | 'bumpedAt'>[]): GuestOrderStatusView {
   const hasTickets = tickets.length > 0
   const allBumped = hasTickets && tickets.every((t) => t.status === 'bumped')
   const acceptedAt = hasTickets ? new Date(Math.min(...tickets.map((t) => t.firedAt.getTime()))).toISOString() : null
@@ -109,7 +109,7 @@ function buildOrderStatusView(order: Pick<Order, 'id' | 'tableId' | 'createdAt'>
     { step: 'ready', reachedAt: readyAt },
   ]
 
-  return { orderId: order.id, tableId: order.tableId, step, steps }
+  return { orderId: order.id, tableId: order.tableId, tokenNumber: order.tokenNumber, step, steps }
 }
 
 @Injectable()
@@ -152,6 +152,16 @@ export class GuestOrdersService {
       const guests = await tx.guest.findMany({ where: { tenantId: guest.tenantId, sessionId: session.id }, orderBy: { joinedAt: 'asc' } })
       const seatByGuest = new Map(guests.map((g, i) => [g.id, i + 1]))
 
+      // Issue #138: a kiosk session has no table, so its order is a counter
+      // order - same gapless token reservation as pos/orders' createCounterOrder,
+      // in the same transaction, so a failed placement never burns a number.
+      const kiosk = session.tableId === null
+      const tokenNumber = kiosk ? await reserveTokenNumber(tx, guest.tenantId, guest.outletId) : null
+      // One live order per table (orders_one_active_per_table): say so with a 409 instead of letting the unique index surface as a 500.
+      if (session.tableId) {
+        const live = await tx.order.findFirst({ where: { tenantId: guest.tenantId, tableId: session.tableId, status: { not: 'closed' } }, select: { id: true } })
+        if (live) throw new ConflictException({ code: 'table_has_active_order', message: 'This table already has an order in progress - ask your server to add to it' })
+      }
       const order = await tx.order.create({
         data: {
           tenantId: guest.tenantId,
@@ -162,7 +172,8 @@ export class GuestOrdersService {
           // over later via the existing transfer() action.
           ownerId: null,
           status: 'open',
-          source: 'qr',
+          source: kiosk ? 'kiosk' : 'qr',
+          tokenNumber,
           sessionId: session.id,
         },
       })
@@ -285,7 +296,8 @@ export class GuestOrdersService {
         orderId: sent.id,
         tableId: session.tableId,
         status: 'sent',
-        source: 'qr',
+        source: kiosk ? 'kiosk' : 'qr',
+        tokenNumber,
         sessionId: session.id,
         lines: lineViews,
       }

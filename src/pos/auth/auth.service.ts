@@ -1,18 +1,17 @@
-// pos/CAP-1 (AD-13): PIN login for a shared device. StaffUser has no
-// outletId column (it's tenant-wide - a staff member can work any outlet),
-// so this is a two-step flow: verify the PIN against this tenant's active
+// pos/CAP-1 (AD-13): PIN login for a shared device. A staff member works the
+// outlets in StaffUser.outletIds (#197; empty = every outlet), so this is a
+// two-step flow: verify the PIN against this tenant's active
 // StaffUser rows, then either finalise immediately (single-outlet tenant) or
 // hand back a short-lived pending token plus the outlet list for the staff
 // member to pick from.
-import { BadRequestException, ConflictException, HttpException, Injectable, UnauthorizedException } from '@nestjs/common'
+import { BadRequestException, ConflictException, ForbiddenException, Injectable, UnauthorizedException } from '@nestjs/common'
 import * as argon2 from 'argon2'
 import { pinStatus } from '../../admin'
-import { PosPrincipal, RegionRegistryService, signPosPendingToken, signPosToken, verifyPosPendingToken } from '../../platform'
+import { AttemptLimiter, AttemptRule, deviceSecretMatches, PosPrincipal, PosTokenClaims, RegionRegistryService, signPosPendingToken, signPosToken, verifyPosPendingToken } from '../../platform'
 import type { Outlet, StaffUser } from '../../generated/prisma/client'
 import { recordClockInIfNeeded } from '../clock/clock.util'
 import { setTenantContext } from '../tenant-context'
 import { OutletSummary, PosLoginDto, PosLoginResult, SelectOutletDto, StaffSummary } from './auth.dtos'
-import { clearAttempts, isLockedOut, recordFailedAttempt } from './lockout'
 
 function toStaffSummary(staff: StaffUser): StaffSummary {
   return { id: staff.id, name: staff.name }
@@ -22,6 +21,21 @@ function toOutletSummary(outlet: Outlet): OutletSummary {
   return { id: outlet.id, name: outlet.name }
 }
 
+// restiq-backend#171: PINs are 4 digits (10,000 guesses), so wrong-PIN
+// attempts are limited per source, never per guessed PIN (rotating guesses
+// used to bypass that). A trusted device gets its own allowance, so one
+// outlet's devices sharing a NAT address don't lock each other out; an
+// unbound browser is limited by IP, and all unbound browsers of a tenant
+// share a slower hourly cap so a spread-out guesser still runs dry. Trusted
+// devices never touch that cap, so an attack can't lock the tills out.
+// restiq-backend#209 (SE-12): "trusted" means the request presents the
+// device's enrolment secret - a device id alone (it sits in /pos/login and
+// kiosk URLs) let anyone lock a till out, or multiply their guesses by the
+// number of ids they knew.
+const DEVICE_RULE = { max: 10, windowSeconds: 15 * 60 }
+const IP_RULE = { max: 10, windowSeconds: 15 * 60 }
+const UNTRUSTED_TENANT_RULE = { max: 30, windowSeconds: 60 * 60 }
+
 @Injectable()
 export class PosAuthService {
   // Verified when there's no PIN match, so both "wrong PIN" and "no staff at
@@ -29,29 +43,44 @@ export class PosAuthService {
   // via response timing (same reasoning as OpsAuthService.dummyHash).
   private dummyHash?: Promise<string>
 
-  constructor(private readonly registry: RegionRegistryService) {}
+  constructor(
+    private readonly registry: RegionRegistryService,
+    private readonly limiter: AttemptLimiter,
+  ) {}
 
   private plane() {
     return this.registry.planeFor(this.registry.homeRegion())
   }
 
-  async login(dto: PosLoginDto): Promise<PosLoginResult> {
+  async login(dto: PosLoginDto, ip: string): Promise<PosLoginResult> {
     const { tenantId, pin } = dto
 
-    if (isLockedOut(tenantId, pin)) {
-      throw new HttpException({ code: 'locked_out', message: 'Too many incorrect attempts - try again shortly' }, 429)
+    const device = dto.deviceId ? await this.findDevice(tenantId, dto.deviceId) : null
+    const active = device && device.status === 'active' && !device.revokedAt ? device : null
+    const rules = this.throttleRules(tenantId, ip, active && deviceSecretMatches(dto.deviceSecret, active.secretHash) ? active.id : null)
+    await this.limiter.consume(rules)
+    // restiq-backend#209 (SE-11): a revoked till can't sign anyone in - it has to be enrolled again.
+    if (device && !active) {
+      throw new ForbiddenException({ code: 'device_revoked', message: 'This device was removed by the owner - set it up again with a new code' })
     }
-
     const staff = await this.findStaffByPin(tenantId, pin)
     if (!staff) {
-      recordFailedAttempt(tenantId, pin)
       throw new UnauthorizedException({ code: 'invalid_pin', message: 'Incorrect tenant or PIN' })
     }
-    clearAttempts(tenantId, pin)
+    await this.limiter.refund(rules)
 
-    const outlets = await this.listOutlets(tenantId)
+    const outlets = await this.listOutlets(tenantId, staff.outletIds)
+
+    // #197: an enrolled till belongs to one outlet - sign in there, and only if this person works there.
+    if (active?.outletId) {
+      const tillOutlet = outlets.find((outlet) => outlet.id === active.outletId)
+      if (!tillOutlet) throw new ForbiddenException({ code: 'outlet_not_assigned', message: `${staff.name} isn't set up to work at this outlet` })
+      return this.finalize(staff, tillOutlet, active.id)
+    }
+
     if (outlets.length === 0) {
-      throw new ConflictException({ code: 'no_outlets', message: 'This tenant has no outlets configured yet' })
+      const message = staff.outletIds.length > 0 ? `None of ${staff.name}'s outlets are open - ask the owner to update their outlets` : 'This tenant has no outlets configured yet'
+      throw new ConflictException({ code: 'no_outlets', message })
     }
 
     if (outlets.length > 1) {
@@ -83,10 +112,31 @@ export class PosAuthService {
       if (!outletRow || outletRow.tenantId !== pending.tenantId || outletRow.deletedAt) {
         throw new BadRequestException({ code: 'invalid_outlet', message: "Select one of this tenant's outlets" })
       }
+      if (staffRow.outletIds.length > 0 && !staffRow.outletIds.includes(outletRow.id)) {
+        throw new ForbiddenException({ code: 'outlet_not_assigned', message: `${staffRow.name} isn't set up to work at ${outletRow.name}` })
+      }
       return { staff: staffRow, outlet: outletRow }
     })
 
     return this.finalize(staff, outlet)
+  }
+
+  /** trustedDeviceId: a device whose enrolment secret this request presented - it gets its own allowance. */
+  private throttleRules(tenantId: string, ip: string, trustedDeviceId: string | null): AttemptRule[] {
+    if (trustedDeviceId) return [{ key: `pos-pin:device:${tenantId}:${trustedDeviceId}`, ...DEVICE_RULE }]
+    return [
+      { key: `pos-pin:ip:${tenantId}:${ip}`, ...IP_RULE },
+      { key: `pos-pin:untrusted:${tenantId}`, ...UNTRUSTED_TENANT_RULE },
+    ]
+  }
+
+  /** The tenant's device with this id, in any status (null for an unknown or another tenant's id). */
+  private async findDevice(tenantId: string, deviceId: string) {
+    const plane = this.plane()
+    return plane.$transaction(async (tx) => {
+      await setTenantContext(tx, tenantId)
+      return tx.device.findFirst({ where: { id: deviceId, tenantId }, select: { id: true, outletId: true, status: true, revokedAt: true, secretHash: true } })
+    })
   }
 
   private async findStaffByPin(tenantId: string, pin: string): Promise<StaffUser | null> {
@@ -109,27 +159,40 @@ export class PosAuthService {
     return null
   }
 
-  private async listOutlets(tenantId: string): Promise<Outlet[]> {
+  /** This tenant's live outlets, narrowed to the staff member's own when they have any (#197). */
+  private async listOutlets(tenantId: string, staffOutletIds: string[]): Promise<Outlet[]> {
     const plane = this.plane()
     return plane.$transaction(async (tx) => {
       await setTenantContext(tx, tenantId)
-      return tx.outlet.findMany({ where: { tenantId, deletedAt: null }, orderBy: { createdAt: 'asc' } })
+      return tx.outlet.findMany({
+        where: { tenantId, deletedAt: null, ...(staffOutletIds.length > 0 ? { id: { in: staffOutletIds } } : {}) },
+        orderBy: { createdAt: 'asc' },
+      })
     })
   }
 
-  private async finalize(staff: StaffUser, outlet: Outlet): Promise<PosLoginResult> {
+  private async finalize(staff: StaffUser, outlet: Outlet, deviceId?: string): Promise<PosLoginResult> {
     const plane = this.plane()
     await plane.$transaction(async (tx) => {
       await setTenantContext(tx, staff.tenantId)
       await recordClockInIfNeeded(tx, { tenantId: staff.tenantId, staffId: staff.id, outletId: outlet.id, timezone: outlet.timezone })
     })
 
-    const principal: PosPrincipal = { id: staff.id, tenantId: staff.tenantId, outletId: outlet.id, name: staff.name }
+    const claims: PosTokenClaims = { id: staff.id, tenantId: staff.tenantId, outletId: outlet.id, name: staff.name, sessionVersion: staff.sessionVersion, ...(deviceId ? { deviceId } : {}) }
     return {
       status: 'authenticated',
-      token: signPosToken(principal),
+      token: signPosToken(claims),
       staff: toStaffSummary(staff),
       outlet: toOutletSummary(outlet),
     }
+  }
+
+  /** restiq-backend#169: ends every session this staff member holds (all devices) by moving their sessionVersion on. */
+  async logout(staff: PosPrincipal): Promise<void> {
+    const plane = this.plane()
+    await plane.$transaction(async (tx) => {
+      await setTenantContext(tx, staff.tenantId)
+      await tx.staffUser.update({ where: { id: staff.id }, data: { sessionVersion: { increment: 1 } } })
+    })
   }
 }

@@ -1,9 +1,23 @@
 import { Body, Controller, Delete, Get, HttpCode, Param, ParseIntPipe, ParseUUIDPipe, Patch, Post, Put, Query } from '@nestjs/common'
-import { CurrentOperator, OpsPrincipal } from '../../platform'
-import { CapabilityKey, ReasonDto, ToggleCapabilityDto, UpdateBrandingDto, UpdateTenantDto } from './directory.dtos'
+import { CurrentOperator, OpsPrincipal, slugProblem } from '../../platform'
+import { ReasonDto, SetModeDto, UpdateBrandingDto, UpdateTenantDto } from './directory.dtos'
 import { InviteView, TenantDetail, TenantDirectoryService, TenantListResult } from './directory.service'
-import { SubmitTenantDto } from './submit.dto'
+import { SubmitTenantDto, TaxNumberQueryDto } from './submit.dto'
 import { DraftView, OpsTenantsService, ProvisionResult } from './tenants.service'
+
+// Is this subdomain free? (D14) Separate from the tenants routes: it is about a name, not a tenant.
+@Controller('ops/v1/tenant-slugs')
+export class OpsTenantSlugsController {
+  constructor(private readonly tenants: OpsTenantsService) {}
+
+  @Get(':slug')
+  async check(@Param('slug') raw: string): Promise<{ slug: string; available: boolean; reason: 'taken' | 'reserved' | 'invalid' | null }> {
+    const slug = raw.trim().toLowerCase()
+    const problem = slugProblem(slug)
+    if (problem) return { slug, available: false, reason: problem }
+    return (await this.tenants.slugTaken(slug)) ? { slug, available: false, reason: 'taken' } : { slug, available: true, reason: null }
+  }
+}
 
 @Controller('ops/v1/tenants')
 export class OpsTenantsController {
@@ -18,8 +32,14 @@ export class OpsTenantsController {
   }
 
   @Get('draft')
-  async getDraft(@CurrentOperator() operator: OpsPrincipal): Promise<{ draft: DraftView }> {
+  async getDraft(@CurrentOperator() operator: OpsPrincipal): Promise<{ draft: DraftView | null }> {
     return { draft: await this.tenants.getDraft(operator.id) }
+  }
+
+  // PE-6: free / taken / malformed, never which tenant holds it.
+  @Get('tax-number-available')
+  taxNumberAvailable(@Query() query: TaxNumberQueryDto): Promise<{ available: boolean; reason: 'taken' | 'invalid' | null }> {
+    return this.tenants.taxNumberAvailability(query.country, query.number)
   }
 
   @Put('draft/steps/:step')
@@ -55,16 +75,6 @@ export class OpsTenantsController {
     @Body() dto: UpdateTenantDto,
   ): Promise<{ tenant: { id: string; name: string } }> {
     return this.directory.updateBasics(operator, id, dto)
-  }
-
-  @Put(':id/capabilities/:key')
-  toggleCapability(
-    @CurrentOperator() operator: OpsPrincipal,
-    @Param('id', ParseUUIDPipe) id: string,
-    @Param('key') key: string,
-    @Body() dto: ToggleCapabilityDto,
-  ): Promise<{ capability: { key: CapabilityKey; enabled: boolean } }> {
-    return this.directory.toggleCapability(operator, id, key, dto)
   }
 
   @Put(':id/branding')
@@ -114,6 +124,17 @@ export class OpsTenantsController {
     @Body() dto: ReasonDto,
   ): Promise<{ tenant: { id: string; status: string } }> {
     return this.directory.reactivate(operator, id, dto.reason)
+  }
+
+  // #213: Test / Live mode. Audited like every other tenant mutation.
+  @Post(':id/mode')
+  @HttpCode(200)
+  setMode(
+    @CurrentOperator() operator: OpsPrincipal,
+    @Param('id', ParseUUIDPipe) id: string,
+    @Body() dto: SetModeDto,
+  ): Promise<{ tenant: { id: string; testMode: boolean; liveSince: string | null } }> {
+    return this.directory.setMode(operator, id, dto.mode, dto.reason)
   }
 
   @Delete(':id')

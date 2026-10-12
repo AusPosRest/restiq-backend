@@ -27,6 +27,10 @@ export class PatchMenuImportDraftDto {
   @ValidateNested({ each: true })
   @Type(() => PatchDraftItemDto)
   items!: PatchDraftItemDto[]
+
+  // Rows the owner drops before commit, e.g. ones already on the menu (restiq-web#247).
+  @IsOptional() @IsArray() @IsUUID('all', { each: true })
+  removeIds?: string[]
 }
 
 export interface DraftItemView {
@@ -37,6 +41,8 @@ export interface DraftItemView {
   priceMinor: number
   currency: string
   confidence: DraftFieldConfidence
+  /** PE-11: on_menu = already on the menu in that category; repeated = earlier in this import. Commit refuses either. */
+  duplicate: 'on_menu' | 'repeated' | null
 }
 
 export interface MenuImportDraftView {

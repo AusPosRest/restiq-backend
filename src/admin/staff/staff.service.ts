@@ -15,7 +15,7 @@ import { BadRequestException, ConflictException, Injectable, NotFoundException }
 import * as argon2 from 'argon2'
 import { randomInt } from 'node:crypto'
 import type { Prisma } from '../../generated/prisma/client'
-import { AdminPrincipal, RegionRegistryService, uuidv7 } from '../../platform'
+import { AdminPrincipal, Permission, permissionsFor, RegionRegistryService, uuidv7 } from '../../platform'
 import { setTenantContext } from '../menu/tenant-context'
 import { CreateStaffDto, UpdateStaffDto } from './staff.dtos'
 
@@ -25,6 +25,8 @@ export interface RoleView {
   id: string
   name: string
   isSystem: boolean
+  /** #169: what this role may do on the POS/KDS - the catalog the API enforces. */
+  permissions: Permission[]
 }
 
 export type PinStatus = 'none' | 'active' | 'revoked'
@@ -36,6 +38,8 @@ export interface StaffView {
   email: string | null
   roleId: string
   roleName: string
+  /** #197: outlets this person may sign in at; empty = every outlet. */
+  outletIds: string[]
   pinStatus: PinStatus
   createdAt: string
   updatedAt: string
@@ -51,6 +55,7 @@ interface StaffWithRole {
   name: string
   email: string | null
   roleId: string
+  outletIds: string[]
   pinHash: string | null
   pinRevokedAt: Date | null
   createdAt: Date
@@ -73,6 +78,7 @@ function toStaffView(row: StaffWithRole): StaffView {
     email: row.email,
     roleId: row.roleId,
     roleName: row.role.name,
+    outletIds: row.outletIds,
     pinStatus: pinStatus(row),
     createdAt: row.createdAt.toISOString(),
     updatedAt: row.updatedAt.toISOString(),
@@ -98,7 +104,7 @@ export class StaffService {
     return plane.$transaction(async (tx) => {
       await setTenantContext(tx, tenantId)
       const roles = await tx.role.findMany({ where: { tenantId }, orderBy: { name: 'asc' } })
-      return roles.map((role) => ({ id: role.id, name: role.name, isSystem: role.isSystem }))
+      return roles.map((role) => ({ id: role.id, name: role.name, isSystem: role.isSystem, permissions: [...permissionsFor(role.name)] }))
     })
   }
 
@@ -122,6 +128,16 @@ export class StaffService {
     }
   }
 
+  /** #197: de-duplicated ids, each one of this tenant's live outlets (400 otherwise). */
+  private async assertOwnOutlets(tx: Prisma.TransactionClient, tenantId: string, outletIds: string[]): Promise<string[]> {
+    const ids = [...new Set(outletIds)]
+    const found = await tx.outlet.count({ where: { id: { in: ids }, tenantId, deletedAt: null } })
+    if (found !== ids.length) {
+      throw new BadRequestException({ code: 'validation_failed', message: "outletIds must be this tenant's outlets" })
+    }
+    return ids
+  }
+
   private async findOwnedStaff(tx: Prisma.TransactionClient, tenantId: string, staffId: string): Promise<StaffWithRole> {
     const staff = await tx.staffUser.findUnique({ where: { id: staffId }, include: STAFF_INCLUDE })
     if (!staff || staff.tenantId !== tenantId) {
@@ -135,11 +151,12 @@ export class StaffService {
     return plane.$transaction(async (tx) => {
       await setTenantContext(tx, owner.tenantId)
       await this.assertSeededRole(tx, owner.tenantId, dto.roleId)
+      const outletIds = await this.assertOwnOutlets(tx, owner.tenantId, dto.outletIds ?? [])
 
       const isFirstStaffForTenant = (await tx.staffUser.count({ where: { tenantId: owner.tenantId } })) === 0
 
       const created = await tx.staffUser.create({
-        data: { id: uuidv7(), tenantId: owner.tenantId, roleId: dto.roleId, name: dto.name.trim(), email: dto.email },
+        data: { id: uuidv7(), tenantId: owner.tenantId, roleId: dto.roleId, name: dto.name.trim(), email: dto.email, outletIds },
         include: STAFF_INCLUDE,
       })
 
@@ -172,10 +189,14 @@ export class StaffService {
         }
       }
 
+      const outletIds = dto.outletIds === undefined ? undefined : await this.assertOwnOutlets(tx, owner.tenantId, dto.outletIds)
+      const outletsChanging = outletIds !== undefined && [...outletIds].sort().join() !== [...existing.outletIds].sort().join()
+
       const now = new Date()
       const updated = await tx.staffUser.update({
         where: { id: staffId },
-        data: { name: dto.name?.trim(), roleId: dto.roleId },
+        // #169: a role change ends the staff member's open POS/KDS sessions; #197: so does an outlet change.
+        data: { name: dto.name?.trim(), roleId: dto.roleId, outletIds, ...(roleChanging || outletsChanging ? { sessionVersion: { increment: 1 } } : {}) },
         include: STAFF_INCLUDE,
       })
 
@@ -205,7 +226,8 @@ export class StaffService {
       await this.findOwnedStaff(tx, owner.tenantId, staffId)
       // Re-issuing always supersedes any prior PIN, revoked or not - a fresh
       // PIN is unconditionally active from this point.
-      await tx.staffUser.update({ where: { id: staffId }, data: { pinHash, pinIssuedAt: new Date(), pinRevokedAt: null } })
+      // #169: and ends every session opened with the old PIN.
+      await tx.staffUser.update({ where: { id: staffId }, data: { pinHash, pinIssuedAt: new Date(), pinRevokedAt: null, sessionVersion: { increment: 1 } } })
     })
 
     return { pin }
@@ -220,7 +242,7 @@ export class StaffService {
       if (staff.pinRevokedAt) throw new ConflictException({ code: 'conflict', message: 'This PIN is already revoked' })
 
       const now = new Date()
-      const updated = await tx.staffUser.update({ where: { id: staffId }, data: { pinRevokedAt: now }, include: STAFF_INCLUDE })
+      const updated = await tx.staffUser.update({ where: { id: staffId }, data: { pinRevokedAt: now, sessionVersion: { increment: 1 } }, include: STAFF_INCLUDE })
 
       // AD-6: PIN revoke is destructive and security-relevant, so it carries
       // an audited reason in the same transaction as the mutation - unlike

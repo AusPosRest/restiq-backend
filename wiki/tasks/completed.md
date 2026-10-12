@@ -1,5 +1,109 @@
 # Completed
 
+- **2026-10-11** - Sessions, devices, throttles and access - QA fixes (issue #209):
+  - Owner logout: `POST /admin/v1/auth/logout` moves `owner_users.session_version` on (audited `owner.logout`); the signed-out token answers 401 `session_revoked` (SE-9).
+  - Devices: enrolment returns a one-time `deviceSecret` (`devices.secret_hash` keeps its sha256). PIN login takes optional `deviceSecret`; only with it does `deviceId` get the till's own throttle bucket, otherwise the address limits apply (SE-12). Login on a revoked device answers 403 `device_revoked`; a session signed in on a till carries `did` and answers 401 `device_revoked` once the till is revoked (SE-11). Devices enrolled before this sign in as untrusted browsers until enrolled again.
+  - Outlet-restricted staff (`outletIds`) get 403 `outlet_mismatch` on any POS/kitchen request reaching another outlet - by path, body or query `outletId`, or the outlet of the order/bill/shift/ticket/payment intent/print job named (SE-26).
+  - Finalize with a discount needs `discounts`; refund needs `refunds` (was `settle_bills`); the manager PIN stays a second gate (SE-29).
+  - Throttles: device enrolment uses `resolveClientIp` + the shared `AttemptLimiter` (SE-32); table join PIN counts per guest address (10/15 min) plus a per-table 30/15 min cap (SE-24).
+  - Errors: every unexpected error answers `{ error: { code, message } }` - Prisma P2034/P2002 409 `conflict`, P2020 400 `validation_failed`, else 500 `internal_error` (SE-30).
+  - Migration `20261011093000_database_timezone_utc` sets the database's default timezone to UTC so Prisma timestamps are stored correctly (SE-31).
+- **2026-10-11** - POS till flows - QA fixes (issue #210):
+  - Order lifecycle: lines added to a sent order wait for Send instead of firing on add (CU-15); a line already on a kitchen ticket is voided with `POST /pos/v1/orders/{orderId}/lines/{lineId}/void` (manager PIN + reason, audited; ticket line shows VOID); unsent lines are still deleted, sent ones answer 409 `line_sent`.
+  - `DELETE /pos/v1/orders/{orderId}` discards an order with nothing on it, with its empty bill (audited `order.discarded`; 409 `order_not_empty` / `has_payments`) (PE-16, CU-27).
+  - Line `note` (special instructions, max 200) reaches the bill, invoice and kitchen ticket; lines and orders carry staff display names, the table map carries `ownerName` and `guestSessionOpen` (CU-12, SE-22, CU-26).
+  - Staff with `settle_bills` may open any order's bill - waiter takes, cashier settles (SE-23); a paid counter order always reaches the kitchen (CU-17).
+  - Card-terminal intents answer 409 `no_terminal` when no terminal serves the outlet, with no ids in the message (PE-22, CU-13); print responses carry `printerAvailable` (CU-18); unlabelled devices get names like "Till 2".
+  - Migration `20261011150000_order_line_note_void` adds `order_lines.note`, `voided_at`, `void_reason`.
+- **2026-10-11** - Menu variants, kitchen and QR tables (issue #211):
+  - `POST /admin/v1/menu/items/:id/variants` takes `priceMinor` + `currency` (the variant's price, audited) and `basePortionName`. An item's first variant keeps its existing base price on sale as a variant of that name (default "Regular"), copying the base price rows. `GET` item responses carry `priceMinor`/`currency` and per-variant `priceMinor` (dine-in, current) inline.
+  - The guest menu leaves out unpriced variants and items with nothing purchasable, as the POS menu already did.
+  - Kitchen: expo keeps a paid/closed order while any ticket is still queued; tickets fired over 12 hours ago leave station queues, expo and all-day counts; an item routed to another outlet's station goes to the same-named station at the order's outlet, else its default.
+  - Guest sessions: `GET /guest/v1/outlets/:id/availability?tableId=` reports `table_busy` when a live order no open session owns is on the table; session start refuses it with 409 `table_has_active_order`; a session with no order and no activity for 30 minutes is replaced by the next start.
+  - Menu import drafts flag `duplicate: on_menu | repeated` per row.
+- **2026-10-11** - GST invoice, Australia, reporting and guest QR - QA fixes (issue #212):
+  - Bill/invoice views carry what a GST tax invoice needs: "Tax Invoice" title, SAC 996331, place of supply, variant name on each line and the token number (PE-18, CU-10). Tax maths unchanged.
+  - Owner dashboard: each outlet's `today` (bills, gross, refunded, net, average bill, open orders, by tender method) in the outlet's own calendar day; "Sales today" is net of refunds and matches Reports > Payments (PE-23, PE-33, CU-5, CU-7). Payments report carries net, currency and local CSV times.
+  - Australian tenants keep the chosen timezone, get an AUD sample menu, and outlets carry the tenant currency (PE-9, PE-10, PE-28).
+  - Public `GET /guest/v1/outlets/{outletId}/tables/{tableId}/welcome` names the restaurant, outlet and table for the QR welcome screen (CU-22, PE-24).
+- **2026-10-12** - Import resume and early tax-number check (issue #222): `GET /admin/v1/menu-import/latest` answers the tenant's most recently edited uncommitted draft (with duplicate flags) or `{ draft: null }` (PE-11). `GET /ops/v1/tenants/tax-number-available?country=&number=` answers `{ available, reason: taken | invalid | null }` with the same format rule and unique registration number as submit, never naming the other tenant (PE-6). Tests: `test/menu-import`, `test/tenant-onboarding` e2e.
+- **2026-10-11** - Per-tenant Test / Live mode and QA polish (issue #213):
+  - `tenants.live_since` (migration `20261011100000_tenant_test_mode`; null = Test mode, existing tenants Live from creation). `platform/tenant-mode.ts`; `paymentsSimulatorFor(tx, tenantId)` (env on OR tenant in Test mode) replaces the env-only check in intent creation, the simulate webhook, `confirmIntent` and finalisation. `paymentsSimulatorEnabled()` stays exported for callers without a tenant.
+  - `POST /ops/v1/tenants/:id/mode` `{ mode, reason }`, audited `tenant.switched_to_test` / `tenant.switched_to_live`; 409 `tenant_has_live_sales` once a bill was finalised since going Live. `POST /ops/v1/tenants` takes `testMode`. List and detail carry `testMode` (detail also `liveSince`); dashboard KPIs count Live tenants only.
+  - Mail for a Test-mode tenant always goes to `simulated_messages`; the operator inbox no longer 404s with a real provider (it then holds only Test tenants' mail).
+  - `GET /admin/v1/tenant` and `GET /pos/v1/tenant` (`name`, `country`, `testMode`) for console badges; invoices carry `testMode` (bill finalised before `live_since`).
+  - Tenant list health is the worst device severity, filterable (PE-2); `GET /ops/v1/tenants/draft` answers `{ draft: null }` instead of 404 (PE-6); auto device labels use the random tail of the id (PE-25).
+  - Tests: `test/tenant-directory`, `tenant-onboarding`, `pos-payment-intents`, `dev-inbox`, `tenant-admin-branding-capabilities` e2e; `src/ops/devices/default-label.spec.ts`.
+- **2026-10-12** - Refund method and net credit-note lines (issue #221): `credit_notes.method` (TenderMethod, nullable for older notes; migration `20261012100000_credit_note_method`). `POST /pos/v1/bills/:id/refund` takes an optional `method` (any tender method, else 400 `validation_failed`); omitted, it defaults server-side to the bill's largest tender (earliest on a tie). `method` is on `CreditNoteView`, the invoice's `creditNotes` and the payments report's credit-note rows. Shift close subtracts only `cash` refunds; NULL-method notes keep the cash-first assumption. Each credit-note line's `amountMinor` is now its share of the note's discounted subtotal (last line takes the rounding), so the lines add up to `subtotalMinor`; `unitPriceMinor` stays the gross unit price.
+- **2026-10-11** - Menu variants, kitchen and QR tables (issue #211):
+  - `POST /admin/v1/menu/items/:id/variants` takes `priceMinor` + `currency` (the variant's price, audited) and `basePortionName`. An item's first variant keeps its existing base price on sale as a variant of that name (default "Regular"), copying the base price rows. `GET` item responses carry `priceMinor`/`currency` and per-variant `priceMinor` (dine-in, current) inline.
+  - The guest menu leaves out unpriced variants and items with nothing purchasable, as the POS menu already did.
+  - Kitchen: expo keeps a paid/closed order while any ticket is still queued; tickets fired over 12 hours ago leave station queues, expo and all-day counts; an item routed to another outlet's station goes to the same-named station at the order's outlet, else its default.
+  - Guest sessions: `GET /guest/v1/outlets/:id/availability?tableId=` reports `table_busy` when a live order no open session owns is on the table; session start refuses it with 409 `table_has_active_order`; a session with no order and no activity for 30 minutes is replaced by the next start.
+  - Menu import drafts flag `duplicate: on_menu | repeated` per row.
+- **2026-10-08** - Platform admin login and mail audit fixes (issue #203): the dev inbox moved to `GET /ops/v1/dev-inbox` and needs an operator session (it was public and showed live reset links); operator logout bumps `operator_users.session_version`, so the logged-out token (and every other session of that operator) answers 401 `session_revoked`; the login email is trimmed before validation.
+- **2026-10-08** - Configurable plan prices (issue #201): `plan_prices` (country x plan, monthly price in minor units or null for "on quote", annual discount percent), seeded A$49/129 and ₹499/999 at 20% off annual. `GET /ops/v1/plan-prices`; `PUT /ops/v1/plan-prices/:country/:plan` with a reason, audited as `plan_price.updated`.
+- **2026-10-08** - Mail simulator and owner invite emails (issue #198):
+  - `MAIL_PROVIDER=simulator` stores every outgoing email in `simulated_messages` instead of sending it. `GET /ops/v1/dev-inbox?to=` lists the newest 100 and answers 404 for any other provider. Production still refuses anything but `mailjet`.
+  - Onboarding a tenant and regenerating its owner invite email the invite link to the owner (in the background, after the commit). The ops console still shows the copyable link.
+- **2026-10-08** - Staff assigned to outlets (issue #197):
+  - `staff_users.outlet_ids` (uuid[]). Empty means every outlet, so existing staff keep working.
+  - The owner staff API (`POST`/`PATCH /admin/v1/staff`) takes `outletIds` (this tenant's live outlets only, else 400) and returns them. Changing them ends the person's open POS sessions.
+  - POS PIN login offers only the assigned outlets and signs straight in when there is one. Picking another outlet is refused with 403 `outlet_not_assigned`.
+  - On an enrolled till (`deviceId`), sign-in goes straight to that till's outlet, or 403 `outlet_not_assigned` if the person doesn't work there.
+- **2026-10-08** - Owner invite details (issue #193). `POST /admin/v1/auth/invite-details { token }` returns `{ restaurantName, email, firstName }` for an unused, unexpired invite. It uses the same errors as accept and consumes nothing.
+- **2026-10-08** - One capability list (issue #191):
+  - `GET /ops/v1/tenants/:id` returns `outlets[].capabilities`, the real `outlet_capabilities` switches that guest QR, kiosk and menu photos read.
+  - The tenant-level toggle (`PUT …/capabilities/:key`, `CAPABILITY_KEYS`, `CAPABILITY_DEFAULTS`, `ToggleCapabilityDto`) is removed. Nothing read `tenant_capabilities`. The table stays, unused.
+- **2026-10-08** - Live status after the first sales (issue #189):
+  - `commitFinalize` flips a `provisioning` tenant to `active` on its first finalised bill, audited as `tenant.went_live` with reason "First sale".
+  - Ops KPI `devices_online` counts active devices heard from within the 1 h lagging threshold. `open_dlq` counts unresolved dead letters.
+  - Owner dashboard `sales` is today's tenders per outlet, on the outlet's local day.
+- **2026-10-08** - Device enrolment returns the restaurant and outlet names (issue #187).
+  - `DevicesService.enrollWithActor` reads `tenantName` and `outletName` in the enrolment transaction and returns them next to `device` (`EnrollResult`).
+  - This lets a till show "Binflow Indiranagar" instead of a UUID, and lets the PIN pad sign it into its own outlet.
+  - `DeviceView` is unchanged.
+- **2026-09-22** - Production readiness prep (issue #175, audit PROD-06..11):
+  - `fly.toml` is always on (min 1 machine, auto-stop off) with 1 GB.
+  - `enableShutdownHooks()`.
+  - `assertProductionConfig()` refuses a production boot with a missing or unsafe HOME_REGION,
+    JWT secrets, PROXY_SHARED_SECRET, PAYMENTS_SIMULATOR or WEB_ORIGIN.
+  - `WebhookAlertChannel` posts silent-device alerts to `ALERT_WEBHOOK_URL`.
+  - Runbooks in `wiki/ops/`: launch configuration, release, backup/restore, alerts,
+    staging rehearsal.
+  - None of it has been applied to live infrastructure yet.
+
+- **2026-09-22** - Shared sign-in throttling (issue #171, audit PROD-03):
+  - Atomic, database-backed counters in `auth_attempts` (additive migration
+    `20260922130000_auth_attempts`), counted before the secret is checked.
+  - Covers POS PIN, owner, operator, manager PIN and guest join.
+  - The POS is keyed by trusted device or client IP (never the guessed PIN), plus a
+    tenant cap for unbound browsers.
+  - `TRUST_PROXY_HOPS` (1 on Fly) controls `req.ip`.
+  - The in-memory lockout modules are removed.
+  - e2e: new `test/login-throttle.e2e-spec.ts`; lockout tests in pos-auth-clock,
+    admin-auth and guest-session updated.
+  - pos-menu's wipe now clears guest sessions (an order-dependent FK failure).
+
+- **2026-09-22** - Simulated card payments can't be used in production (issue #170, audit
+  PROD-01):
+  - The `PAYMENTS_SIMULATOR` flag defaults off, and `fly.toml` pins it off.
+  - With it off, the services refuse creating, approving (route and `confirmIntent`) and
+    settling any simulated payment, including intents or tenders made while it was on.
+  - Cash and external-terminal tenders still work.
+  - e2e: 4 new tests in `test/pos-payment-intents.e2e-spec.ts`.
+
+- **2026-09-22** - POS/KDS sessions end when access changes, and the API enforces staff
+  permissions (issue #169, audit PROD-02/PROD-04):
+  - `staff_users.session_version` goes in the token as `sv`.
+  - The guard re-reads staff + role on every request and refuses a token after a PIN
+    revoke/reissue, role change or logout, and refuses any token without `sv`.
+  - The permission catalog is enforced per route and fails closed.
+  - Roles now return their `permissions`.
+  - Migration `20260922120000_staff_session_version` is additive.
+  - e2e: new `test/pos-sessions.e2e-spec.ts`; helpers moved to real system role names.
+  - See [pos-cashier-waiter.md](../features/pos-cashier-waiter.md).
+
 - **2026-09-19** - Combo menu, issue #160 (backend half of restiq-web#264). Combos are built
   from slots (`combo_slots`, `combo_slot_options`: pick N of these, or one fixed item, with
   per-option extra charges); `combos` gains `photo_url`, `available`, `archived_at` (live names
@@ -10,11 +114,33 @@
   tickets carry `comboName`; invoice lines carry `components`; combo refunds are whole.
   Migration `20260919120000_combo_slots` (checked against a demo-DB copy with existing combo
   components). e2e: new `test/combos.e2e-spec.ts`, plus `menu-management` and `pos-bills` updates.
+- **2026-09-16** - POS payment history, issue #158. `GET pos/v1/outlets/:outletId/payments`
+  (today's tenders on finalized bills at the outlet in the outlet's local day, per-method totals,
+  `takenBy`). `bills.service.ts#listPaymentsToday`; e2e cases in `pos-bills.e2e-spec.ts`.
+  Web: restiq-web#253.
+- **2026-09-16** - Product directory, issue #153. `catalog_products` (migration
+  `20260916100000_catalog_products`, platform-wide, `TEXT[]` tags, currency as market);
+  ops CRUD `ops/v1/catalog/products`; owner `admin/v1/menu/directory` list/tags/import.
+  Menu-import commit loop extracted to `src/admin/menu/commit-items.ts` and shared.
+  e2e in `product-directory.e2e-spec.ts`. Web: restiq-web#245.
 
 - **2026-09-15** - External payment tender, issue #146. `TenderMethod.external` +
   `tenders.reference` (migration `20260915120000_external_tender`; CHECKs: external needs no
   intent and must carry a reference). `TenderDto.reference` required for external (1-64 chars,
   trimmed); `TenderView.reference` on bills and invoices. e2e in `pos-bills.e2e-spec.ts`.
+- **2026-09-15** - Menu photos setting, issue #148 (backend half of restiq-web#230):
+  `GET /pos/v1/menu` items carry `photoUrl`; new outlet capability key `menu_photos`
+  (free-text key, no migration, **absent row = on**). When an owner turns it off, POS
+  and guest menu reads (list + item) return `photoUrl: null`. New cases in
+  `pos-menu.e2e-spec.ts` and `guest-menu.e2e-spec.ts`; typecheck/lint clean.
+
+- **2026-09-12** - Kiosk ordering, issue #138 (backend half of restiq-web#214):
+  `table_sessions.table_id` nullable, `OrderSource.kiosk`, nullable guest-principal
+  `tableId`; `POST /guest/v1/kiosk/sessions { outletId, deviceId }` starts a table-less
+  session bound to an active kiosk device behind the outlet's `kiosk` capability (404 /
+  403 `kiosk_disabled`); a kiosk order reserves a gap-free token number and lands as
+  `source: 'kiosk'` for the kitchen and POS. `test/guest-kiosk.e2e-spec.ts`; guest, RLS
+  and payments-report suites green; typecheck/lint clean.
 
 - **2026-09-12** - Device topology, issue #134. `devices.paired_pos_id`,
   `print_jobs.target_device_id`, `payment_intents.target_device_id`
@@ -823,3 +949,55 @@
   counter-orders suites green. See
   [wiki/features/pos-cashier-waiter.md](../features/pos-cashier-waiter.md)
   (Payments, first slice).
+- **2026-09-12** - Admin devices: owner-scoped revoke (issue #140).
+  `POST admin/v1/outlets/:outletId/devices/:deviceId/revoke { reason }` on
+  `AdminDevicesService` - status → revoked with `revokedAt`, peripherals
+  linked to a revoked POS fall back to the outlet, queued print jobs /
+  payment intents for the device go to the outlet-wide queue, audit row
+  `device.revoked` with the owner as actor; 404 cross-tenant/outlet, 409 on a
+  second revoke, 400 without a reason. 3 new e2e tests in
+  `test/admin-devices.e2e-spec.ts`. See
+  [wiki/features/tenant-admin.md](../features/tenant-admin.md) CAP-6.
+- **2026-10-07 - Starter setup per outlet type (D2) and two 500 fixes.**
+  `src/admin/outlets/starter-setup.ts` holds the starting stations, tables and
+  switches for `dine_in`, `qsr`, `cloud_kitchen` and `food_court`. It is applied
+  to every outlet when a tenant is provisioned and on demand through
+  `POST /admin/v1/outlets/:outletId/starter-setup`; running it again adds only
+  what is missing and never overrides the owner. New
+  `DELETE /admin/v1/outlets/:outletId/floor-plan/stations/:stationId` removes a
+  station (its menu items go back to no station). F-1: counter and kiosk token
+  numbers now move past tokens already in use (`reserveTokenNumber`). F-2: a guest
+  order on a table that already has a live order answers 409
+  `table_has_active_order`. Tests: `test/floor-plan.e2e-spec.ts`,
+  `test/tenant-onboarding.e2e-spec.ts`, `test/pos-counter-orders.e2e-spec.ts`,
+  `test/guest-order-placement.e2e-spec.ts`.
+- **2026-10-07 - Agreements are an uploaded PDF (#179).** `POST /ops/v1/agreements`
+  is multipart (title, reason, PDF up to 5 MB, checked by its `%PDF-` bytes) and
+  the file is stored with its SHA-256; `GET /ops/v1/agreements/:id/file` and
+  `GET /admin/v1/agreement/:versionId/file` stream it inline; the text `body` is
+  gone from the API. Signing sends the `fileSha256` the owner was shown (409
+  `file_changed` otherwise) and the evidence hash covers it; versions published
+  as text before this have no file and answer 409 `no_file`. Migration
+  `20261007100000_agreement_pdf`. Tests: `test/agreements.e2e-spec.ts`.
+- **2026-10-07 - Owner password reset by email, revocable owner sessions (#181).**
+  `POST /admin/v1/auth/forgot-password` always answers 202 (never says whether the
+  email is registered; 3 per email and 10 per address in 15 minutes) and emails a
+  single-use, one-hour link through `MailService` (`MAIL_PROVIDER=mailjet`, or `log`
+  in development). `POST /admin/v1/auth/reset-password` sets the password (10+
+  characters), uses the link up and moves `owner_users.session_version` on, so every
+  older owner token answers 401 `session_revoked`. Tokens issued before this carry no
+  version and expire as before. Production start refuses to run without Mailjet
+  settings. Migration `20261007200000_owner_password_reset`. Tests:
+  `test/owner-password-reset.e2e-spec.ts`, `src/platform/mail.service.spec.ts`.
+- **2026-10-07 - Tenant subdomain addressing (D14).** `tenants.slug` (unique, 3-32
+  lowercase letters, digits, hyphens; reserved names refused; set at creation, never
+  changed). `POST /ops/v1/tenants` takes an optional `slug`, otherwise one is made
+  from the company name and numbered on a clash (409 `slug_taken`, 400 `slug_invalid`
+  / `slug_reserved`). `GET /ops/v1/tenant-slugs/:slug` reports free, taken, reserved
+  or invalid. `GET /public/v1/tenant` (`host` query or Host header, under
+  `BASE_DOMAIN`, default idelta.com.au) returns what a sign-in page needs, 404
+  `tenant_not_found` otherwise. The web server forwards the visitor's address in
+  `X-Restiq-Tenant-Host`, believed only with the proxy secret; the admin, POS and
+  guest guards then refuse a token for another tenant (403 `tenant_mismatch`).
+  Migration `20261007300000_tenant_slug`. Tests: `test/tenant-address.e2e-spec.ts`,
+  `src/platform/tenant-slug.spec.ts`.
