@@ -1,6 +1,6 @@
 # Completed
 
-- **2026-10-12** - QR guest line notes (#231): nullable cart notes, trimmed 200-character validation on add/update, cart response and order placement propagation. Migration `20261012083000_cart_line_note`; end-to-end coverage includes kitchen visibility and separate lines.
+- **2026-10-12** - QR guest line notes (#231): nullable cart notes, trimmed 200-character validation on add/update, cart response and order placement propagation. Migration `20261012100100_cart_line_note`; end-to-end coverage includes kitchen visibility and separate lines.
 
 - **2026-10-11** - Sessions, devices, throttles and access - QA fixes (issue #209):
   - Owner logout: `POST /admin/v1/auth/logout` moves `owner_users.session_version` on (audited `owner.logout`); the signed-out token answers 401 `session_revoked` (SE-9).
