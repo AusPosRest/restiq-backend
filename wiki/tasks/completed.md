@@ -1001,3 +1001,7 @@
   guest guards then refuse a token for another tenant (403 `tenant_mismatch`).
   Migration `20261007300000_tenant_slug`. Tests: `test/tenant-address.e2e-spec.ts`,
   `src/platform/tenant-slug.spec.ts`.
+
+## 2026-10-12 — #234 / AP-se-1: Protect paid bill lines
+
+Refuse removals, quantity/modifier price reductions and manager voids with `409 bill_has_payments` after payment starts. The shared transactional guard and payment-intent creation lock the bill row. E2E coverage includes unpaid controls, pending intents, partial/full captures, and allowed additions/increases.

@@ -13,6 +13,7 @@
 import { INestApplication } from '@nestjs/common'
 import { Test } from '@nestjs/testing'
 import request from 'supertest'
+import * as argon2 from 'argon2'
 import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it } from 'vitest'
 import { AppModule } from '../src/app.module'
 import { createPrismaClient, PrismaClient } from '../src/db/client'
@@ -206,13 +207,13 @@ describe('/pos/v1 payment intents - simulated card terminal (e2e)', () => {
   }
 
   /** A sent 2 x 10000 dine-in order with its open bill (21000 total at the 5% placeholder tax) and the owner's token. */
-  async function setUpOpenBill(): Promise<{ tenantId: string; outletId: string; billId: string; token: string }> {
+  async function setUpOpenBill(counter = false): Promise<{ tenantId: string; outletId: string; billId: string; token: string }> {
     const tenantId = await createTenant(prisma)
     const outletId = await createOutlet(prisma, tenantId)
     const tableId = await createTable(prisma, tenantId, outletId)
     const owner = await createStaff(prisma, tenantId, outletId, 'Asha')
     const itemId = await createItemWithPrice(prisma, tenantId, 10000)
-    const opened = await authed(request(httpServer).post(`/pos/v1/outlets/${outletId}/tables/${tableId}/order`), owner.token).send()
+    const opened = await authed(request(httpServer).post(counter ? `/pos/v1/outlets/${outletId}/counter-orders` : `/pos/v1/outlets/${outletId}/tables/${tableId}/order`), owner.token).send()
     const orderId = (opened.body as OrderBody).id
     await authed(request(httpServer).post(`/pos/v1/orders/${orderId}/lines`), owner.token).send({ itemId, quantity: 2 })
     await authed(request(httpServer).patch(`/pos/v1/orders/${orderId}/status`), owner.token).send({ status: 'sent' })
@@ -228,6 +229,47 @@ describe('/pos/v1 payment intents - simulated card terminal (e2e)', () => {
   function sendToTerminal(billId: string, token: string, amountMinor: number, clientKey = uuidv7()): request.Test {
     return authed(request(httpServer).post(`/pos/v1/bills/${billId}/intents`), token).send({ rail: 'card_terminal', amountMinor, clientKey })
   }
+
+  describe('paid line protection (#234)', () => {
+    it.each(['unpaid', 'pending', 'partial', 'full'] as const)('%s bill protects reductions while allowing additions', async (payment) => {
+      const { tenantId, billId, token } = await setUpOpenBill(true)
+      const bill = await prisma.bill.findUniqueOrThrow({ where: { id: billId } })
+      const orderId = bill.orderId
+      const itemId = await createItemWithPrice(prisma, tenantId, 10000)
+      const group = await prisma.modifierGroup.create({ data: { tenantId, name: 'Extras', minSelections: 0, maxSelections: 1 } })
+      const modifier = await prisma.modifier.create({ data: { tenantId, groupId: group.id, name: 'Extra', priceMinor: 1000n, sortOrder: 0 } })
+      await prisma.itemModifierGroup.create({ data: { tenantId, itemId, groupId: group.id, sortOrder: 0 } })
+      const role = await prisma.role.create({ data: { tenantId, name: 'Manager', isManager: true } })
+      await prisma.staffUser.create({ data: { tenantId, roleId: role.id, name: 'Manager', pinHash: await argon2.hash('4321') } })
+      const added = await authed(request(httpServer).post(`/pos/v1/orders/${orderId}/lines`), token).send({ itemId, quantity: 2, modifierIds: [modifier.id] })
+      expect(added.status).toBe(201)
+      const line = await prisma.orderLine.findFirstOrThrow({ where: { orderId, itemId } })
+      const sentLine = await prisma.orderLine.findFirstOrThrow({ where: { orderId, itemId: { not: itemId } } })
+      if (payment !== 'unpaid') {
+        const current = await authed(request(httpServer).post(`/pos/v1/orders/${orderId}/bill`), token).send()
+        const intent = (await sendToTerminal(billId, token, payment === 'full' ? (current.body as BillBody).totalMinor : 1000)).body as IntentBody
+        expect(intent.status).toBe('pending')
+        if (payment !== 'pending') {
+          expect((await authed(request(httpServer).post(`/pos/v1/payment-intents/${intent.id}/simulate`), token).send({ outcome: 'success' })).status).toBe(200)
+        }
+      }
+      const expected = payment === 'unpaid' ? 200 : 409
+      const responses = [
+        await authed(request(httpServer).patch(`/pos/v1/orders/${orderId}/lines/${line.id}`), token).send({ quantity: 1 }),
+        await authed(request(httpServer).patch(`/pos/v1/orders/${orderId}/lines/${line.id}`), token).send({ modifierIds: [] }),
+        await authed(request(httpServer).post(`/pos/v1/orders/${orderId}/lines/${sentLine.id}/void`), token).send({ managerPin: '4321', reason: 'Wrong item' }),
+        await authed(request(httpServer).delete(`/pos/v1/orders/${orderId}/lines/${line.id}`), token),
+      ]
+      for (const response of responses) {
+        expect(response.status).toBe(expected)
+        if (expected === 409) expect((response.body as ErrorBody).error.code).toBe('bill_has_payments')
+      }
+      expect((await authed(request(httpServer).post(`/pos/v1/orders/${orderId}/lines`), token).send({ itemId, quantity: 1 })).status).toBe(201)
+      if (payment !== 'unpaid') {
+        expect((await authed(request(httpServer).patch(`/pos/v1/orders/${orderId}/lines/${line.id}`), token).send({ quantity: 3 })).status).toBe(200)
+      }
+    })
+  })
 
   describe('sending an amount to the terminal', () => {
     it('creates a pending simulated intent for the amount, idempotent per clientKey, and refuses a second active one', async () => {

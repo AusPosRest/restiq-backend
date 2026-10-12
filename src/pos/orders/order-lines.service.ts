@@ -21,6 +21,7 @@ import type { Order, OrderLine, PriceChannel, Prisma } from '../../generated/pri
 import { ManagerAuthService, PosPrincipal, RegionRegistryService } from '../../platform'
 import { setTenantContext } from '../tenant-context'
 import { AddComboLineDto, AddOrderLineDto, OrderView, UpdateOrderLineDto, VoidOrderLineDto } from './orders.dtos'
+import { lockBill } from '../bills'
 import { assertOwner, buildOrderView, loadOrder, Tx } from './orders.service'
 
 // A table order is dine-in; a counter (token) order has no table and is
@@ -137,6 +138,16 @@ function assertNotComboLine(line: OrderLine, action: 'change' | 'remove'): void 
   }
 }
 
+async function assertBillHasNoPayments(tx: Tx, orderId: string): Promise<void> {
+  const bill = await tx.bill.findUnique({ where: { orderId }, select: { id: true } })
+  if (!bill) return
+  await lockBill(tx, bill.id)
+  const locked = await tx.bill.findUnique({ where: { id: bill.id }, include: { _count: { select: { tenders: true, paymentIntents: true, shares: true } } } })
+  if (locked && locked._count.tenders + locked._count.paymentIntents + locked._count.shares > 0) {
+    throw new ConflictException({ code: 'bill_has_payments', message: 'Payment has been taken on this bill. Refund or reverse it before changing lines.' })
+  }
+}
+
 @Injectable()
 export class OrderLinesService {
   constructor(
@@ -232,6 +243,10 @@ export class OrderLinesService {
       assertNotComboLine(line, 'change')
       await assertLineNotSent(tx, line)
 
+      if (dto.quantity !== undefined && dto.quantity < line.quantity) {
+        await assertBillHasNoPayments(tx, orderId)
+      }
+
       if (dto.quantity !== undefined) {
         await tx.orderLine.update({ where: { id: lineId }, data: { quantity: dto.quantity } })
       }
@@ -244,6 +259,10 @@ export class OrderLinesService {
         const item = await loadItemForOrderLine(tx, staff.tenantId, line.itemId!)
         assertModifierSelectionValid(item, dto.modifierIds)
         const modifierPrices = await resolveModifierPrices(tx, staff.tenantId, dto.modifierIds)
+        const previous = await tx.orderLineModifier.findMany({ where: { orderLineId: lineId }, select: { priceMinor: true } })
+        const oldPrice = previous.reduce((sum, modifier) => sum + modifier.priceMinor, 0n)
+        const newPrice = dto.modifierIds.reduce((sum, id) => sum + (modifierPrices.get(id) ?? 0n), 0n)
+        if (newPrice < oldPrice) await assertBillHasNoPayments(tx, orderId)
         await tx.orderLineModifier.deleteMany({ where: { orderLineId: lineId } })
         for (const modifierId of dto.modifierIds) {
           await tx.orderLineModifier.create({
@@ -266,6 +285,7 @@ export class OrderLinesService {
       const line = await loadOrderLine(tx, staff.tenantId, orderId, lineId)
       assertNotComboLine(line, 'remove')
       await assertLineNotSent(tx, line)
+      await assertBillHasNoPayments(tx, orderId)
 
       // A combo's child lines go with it (parent_line_id ON DELETE CASCADE).
       await tx.orderLine.delete({ where: { id: lineId } })
@@ -294,6 +314,7 @@ export class OrderLinesService {
       if (!(await isSentToKitchen(tx, ids))) {
         throw new ConflictException({ code: 'line_not_sent', message: 'The kitchen does not have this item yet - just remove it' })
       }
+      await assertBillHasNoPayments(tx, orderId)
 
       const approval = await this.managerAuth.authorize('void_after_fire', staff.tenantId, order.outletId, dto.managerPin, dto.reason.trim(), staff.id)
       await tx.orderLine.updateMany({ where: { id: { in: ids } }, data: { voidedAt: new Date(), voidReason: dto.reason.trim() } })
