@@ -127,12 +127,12 @@ export class RefundLineDto {
   quantity!: number
 }
 
-// managerPin/reason are both mandatory here, unlike FinalizeBillDto's
-// conditional pair - refund is one of CAP-8's six gated actions
-// unconditionally (AD-15), not only above some threshold.
+// Every refund requires PIN approval and a reason. Missing PIN is handled
+// by the service so an unprivileged cashier gets 403 (#240), while a
+// manager retains the existing 400 validation error.
 export class RefundBillDto {
-  @IsString() @MinLength(1)
-  managerPin!: string
+  @ValidateIf((dto: RefundBillDto) => dto.managerPin !== undefined) @IsString() @MinLength(1)
+  managerPin?: string
 
   @IsString() @MinLength(1)
   reason!: string
