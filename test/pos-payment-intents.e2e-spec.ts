@@ -231,7 +231,7 @@ describe('/pos/v1 payment intents - simulated card terminal (e2e)', () => {
   }
 
   describe('paid line protection (#234)', () => {
-    it.each(['unpaid', 'pending', 'partial', 'full'] as const)('%s bill protects reductions while allowing additions', async (payment) => {
+    it.each(['unpaid', 'failed', 'pending', 'partial', 'full'] as const)('%s bill protects reductions while allowing additions', async (payment) => {
       const { tenantId, billId, token } = await setUpOpenBill(true)
       const bill = await prisma.bill.findUniqueOrThrow({ where: { id: billId } })
       const orderId = bill.orderId
@@ -250,10 +250,10 @@ describe('/pos/v1 payment intents - simulated card terminal (e2e)', () => {
         const intent = (await sendToTerminal(billId, token, payment === 'full' ? (current.body as BillBody).totalMinor : 1000)).body as IntentBody
         expect(intent.status).toBe('pending')
         if (payment !== 'pending') {
-          expect((await authed(request(httpServer).post(`/pos/v1/payment-intents/${intent.id}/simulate`), token).send({ outcome: 'success' })).status).toBe(200)
+          expect((await authed(request(httpServer).post(`/pos/v1/payment-intents/${intent.id}/simulate`), token).send({ outcome: payment === 'failed' ? 'failure' : 'success' })).status).toBe(200)
         }
       }
-      const expected = payment === 'unpaid' ? 200 : 409
+      const expected = payment === 'unpaid' || payment === 'failed' ? 200 : 409
       const responses = [
         await authed(request(httpServer).patch(`/pos/v1/orders/${orderId}/lines/${line.id}`), token).send({ quantity: 1 }),
         await authed(request(httpServer).patch(`/pos/v1/orders/${orderId}/lines/${line.id}`), token).send({ modifierIds: [] }),
@@ -265,7 +265,7 @@ describe('/pos/v1 payment intents - simulated card terminal (e2e)', () => {
         if (expected === 409) expect((response.body as ErrorBody).error.code).toBe('bill_has_payments')
       }
       expect((await authed(request(httpServer).post(`/pos/v1/orders/${orderId}/lines`), token).send({ itemId, quantity: 1 })).status).toBe(201)
-      if (payment !== 'unpaid') {
+      if (expected === 409) {
         expect((await authed(request(httpServer).patch(`/pos/v1/orders/${orderId}/lines/${line.id}`), token).send({ quantity: 3 })).status).toBe(200)
       }
     })

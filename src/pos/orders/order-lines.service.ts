@@ -22,6 +22,7 @@ import { ManagerAuthService, PosPrincipal, RegionRegistryService } from '../../p
 import { setTenantContext } from '../tenant-context'
 import { AddComboLineDto, AddOrderLineDto, OrderView, UpdateOrderLineDto, VoidOrderLineDto } from './orders.dtos'
 import { lockBill } from '../bills'
+import { ACTIVE_INTENT_STATUSES } from '../payments/intent-core'
 import { assertOwner, buildOrderView, loadOrder, Tx } from './orders.service'
 
 // A table order is dine-in; a counter (token) order has no table and is
@@ -142,7 +143,18 @@ async function assertBillHasNoPayments(tx: Tx, orderId: string): Promise<void> {
   const bill = await tx.bill.findUnique({ where: { orderId }, select: { id: true } })
   if (!bill) return
   await lockBill(tx, bill.id)
-  const locked = await tx.bill.findUnique({ where: { id: bill.id }, include: { _count: { select: { tenders: true, paymentIntents: true, shares: true } } } })
+  const locked = await tx.bill.findUnique({
+    where: { id: bill.id },
+    include: {
+      _count: {
+        select: {
+          tenders: true,
+          paymentIntents: { where: { status: { in: [...ACTIVE_INTENT_STATUSES] } } },
+          shares: { where: { OR: [{ status: 'paid' }, { paidAt: { not: null } }] } },
+        },
+      },
+    },
+  })
   if (locked && locked._count.tenders + locked._count.paymentIntents + locked._count.shares > 0) {
     throw new ConflictException({ code: 'bill_has_payments', message: 'Payment has been taken on this bill. Refund or reverse it before changing lines.' })
   }
