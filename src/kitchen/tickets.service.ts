@@ -300,13 +300,25 @@ export class KitchenTicketsService {
       // SE-17: an order already paid and closed (pay-first counter/QSR, or a
       // QR table that settled early) stays while any ticket is still queued.
       // CU-20: only orders with a ticket fired inside the live window.
+      // restiq-backend#243 (AP-cu-5): a paid order whose tickets are all
+      // bumped stays as Ready for the Done tab's window so the runner can
+      // call the token. Paid = finalized bill with no refund; a discarded
+      // (cancelled) order has no bill, so it drops off as before.
       const since = liveSince()
       const orders = await tx.order.findMany({
         where: {
           tenantId: staff.tenantId,
           outletId,
           tickets: { some: { firedAt: { gte: since } } },
-          OR: [{ status: 'sent' }, { tickets: { some: { status: 'queued' } } }],
+          OR: [
+            { status: 'sent' },
+            { tickets: { some: { status: 'queued' } } },
+            {
+              bill: { status: 'finalized', creditNotes: { none: {} } },
+              // `every` alone is true for an order with no tickets - require at least one.
+              AND: [{ tickets: { some: {} } }, { tickets: { every: { status: 'bumped', bumpedAt: { gte: new Date(Date.now() - BUMPED_WINDOW_MS) } } } }],
+            },
+          ],
         },
         include: { table: true },
         orderBy: { createdAt: 'asc' },
