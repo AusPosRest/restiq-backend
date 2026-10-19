@@ -151,6 +151,7 @@ async function toComboCartLineView(tx: Tx, line: CartLineWithRelations): Promise
     currency: combo.currency,
     view: {
       id: line.id,
+      note: line.note,
       guestId: line.guestId,
       guestName: line.guestName,
       itemId: null,
@@ -178,6 +179,7 @@ async function toCartLineView(tx: Tx, tenantId: string, outletId: string, line: 
     currency: resolved?.currency ?? null,
     view: {
       id: line.id,
+      note: line.note,
       guestId: line.guestId,
       guestName: line.guestName,
       itemId: line.itemId,
@@ -263,6 +265,7 @@ export class CartService {
           itemId: dto.itemId,
           variantId: dto.variantId ?? null,
           quantity: dto.quantity,
+          note: dto.note ?? null,
         },
       })
       for (const modifierId of modifierIds) {
@@ -303,6 +306,10 @@ export class CartService {
       assertNotComboPick(line)
       if (line.comboId && dto.modifierIds !== undefined) {
         throw new ConflictException({ code: 'combo_locked', message: 'Remove the combo and add it again to change it' })
+      }
+
+      if (dto.note !== undefined) {
+        await tx.cartLine.update({ where: { id: lineId }, data: { note: dto.note } })
       }
 
       if (dto.quantity !== undefined) {
