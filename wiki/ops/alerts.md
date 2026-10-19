@@ -3,7 +3,8 @@
 ## What exists in code
 - **Silent device.** The sync-health sweep finds devices that haven't reported for the silent threshold.
   - `WebhookAlertChannel` posts the alert (JSON `{ text, alert }`) to `ALERT_WEBHOOK_URL` and logs it.
-  - With no URL it only logs.
+  - Runs every minute without a page visit; page reads also check. One alert per silent period per API process, reset by recovery or a newer heartbeat. Restarting the API resets this in-memory history.
+  - Production refuses to boot without the URL; development may omit it and only log. Tests disable the timer.
 
 ## Still to set up (needs access)
 - [ ] **Destination:** a Slack or Teams incoming webhook for the on-call channel, or a pager's generic webhook. Store it as `fly secrets set ALERT_WEBHOOK_URL=…`.

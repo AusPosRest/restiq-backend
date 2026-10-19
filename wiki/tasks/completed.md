@@ -1,5 +1,7 @@
 # Completed
 
+- **2026-10-19** - Silent-device alert sweep (issue #233, G26): one-minute background sweep, shared per-device deduplication with page reads, recovery resets alerts, shutdown cleanup, and production webhook requirement. Unit tests cover scheduling, silent-period transitions and config validation; sync-health e2e covers background sweep plus page reads.
+
 - **2026-10-11** - Sessions, devices, throttles and access - QA fixes (issue #209):
   - Owner logout: `POST /admin/v1/auth/logout` moves `owner_users.session_version` on (audited `owner.logout`); the signed-out token answers 401 `session_revoked` (SE-9).
   - Devices: enrolment returns a one-time `deviceSecret` (`devices.secret_hash` keeps its sha256). PIN login takes optional `deviceSecret`; only with it does `deviceId` get the till's own throttle bucket, otherwise the address limits apply (SE-12). Login on a revoked device answers 403 `device_revoked`; a session signed in on a till carries `did` and answers 401 `device_revoked` once the till is revoked (SE-11). Devices enrolled before this sign in as untrusted browsers until enrolled again.
