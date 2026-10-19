@@ -13,7 +13,7 @@
 import { BadRequestException, ConflictException, ForbiddenException, Injectable, NotFoundException } from '@nestjs/common'
 import type { Prisma } from '../../generated/prisma/client'
 import { paymentsSimulatorFor, PosPrincipal, RegionRegistryService, uuidv7 } from '../../platform'
-import { isUniqueViolation, loadBill, refreshOpenBillTotals, toBillView } from '../bills'
+import { isUniqueViolation, loadBill, lockBill, refreshOpenBillTotals, toBillView } from '../bills'
 import { setTenantContext } from '../tenant-context'
 import { linkedPeripheral, queueFor } from '../device-routing'
 import { ACTIVE_INTENT_STATUSES, confirmIntent, expireIfDue, failIntent, INTENT_INCLUDE, IntentRow, isIntentActive, toPaymentIntentView } from './intent-core'
@@ -61,6 +61,7 @@ export class PaymentIntentsService {
           message: 'Card terminal payments are not connected yet - take the card on your own terminal and record it as an external payment',
         })
       }
+      await lockBill(tx, billId)
       const bill = await refreshOpenBillTotals(tx, await loadBill(tx, staff.tenantId, billId))
       if (bill.status === 'finalized') {
         throw new ConflictException({ code: 'already_finalized', message: 'This bill has already been finalised' })
