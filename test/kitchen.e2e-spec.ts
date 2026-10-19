@@ -116,6 +116,7 @@ async function wipe(prisma: PrismaClient): Promise<void> {
   // dining_tables (RESTRICT) - wiped first so this helper is safe regardless
   // of what another e2e file left behind (same rationale as every sibling
   // spec's wipe(), e.g. tenant-onboarding.e2e-spec.ts).
+  await prisma.guest.deleteMany()
   await prisma.tableSession.deleteMany()
   await prisma.diningTable.deleteMany()
   await prisma.floor.deleteMany()
