@@ -400,6 +400,54 @@ describe('/guest/v1/orders order placement into the real pipeline (e2e)', () => 
       expect(await prisma.cartLine.count()).toBe(1)
     })
 
+    it('places the order on a table whose open order is over 12 hours old, moving that order off the table without closing it (#230)', async () => {
+      const tenantId = await createTenant(prisma)
+      const outletId = await createOutlet(prisma, tenantId)
+      const tableId = await createTable(prisma, tenantId, outletId)
+      await enableQrOrdering(prisma, tenantId, outletId)
+      const item = await createItemWithPrice(prisma, tenantId, 19000)
+      const stale = await prisma.order.create({ data: { tenantId, outletId, tableId, ownerId: null, status: 'sent', createdAt: new Date(Date.now() - 13 * 60 * 60 * 1000) } })
+      const staleLine = await prisma.orderLine.create({ data: { tenantId, orderId: stale.id, itemId: item, quantity: 2, unitPriceMinor: 19000n } })
+      const { tokenA } = await startAndJoin(outletId, tableId)
+      await authed(request(httpServer).post('/guest/v1/cart/lines'), tokenA).send({ itemId: item, quantity: 1 })
+
+      const res = await authed(request(httpServer).post('/guest/v1/orders'), tokenA).send({})
+      expect(res.status).toBe(201)
+      const placed = res.body as PlacedOrderBody
+      expect(placed.orderId).not.toBe(stale.id)
+      expect(await prisma.order.findUnique({ where: { id: placed.orderId } })).toMatchObject({ tableId, source: 'qr' })
+
+      // Not closed: same status, same lines, just no longer on the table.
+      expect(await prisma.order.findUnique({ where: { id: stale.id } })).toMatchObject({ status: 'sent', tableId: null })
+      expect(await prisma.orderLine.findMany({ where: { orderId: stale.id } })).toEqual([expect.objectContaining({ id: staleLine.id, quantity: 2 })])
+      const audit = await prisma.auditEvent.findMany({ where: { tenantId, action: 'order.detached_stale_table' } })
+      expect(audit).toHaveLength(1)
+      expect(audit[0]?.reason).toContain(stale.id)
+      expect(audit[0]?.reason).toContain(tableId)
+
+      // Still in Open orders, for End of day (#251) to close.
+      const staffToken = await createStaff(prisma, tenantId, outletId, 'Server Priya')
+      const orders = (await authed(request(httpServer).get(`/pos/v1/outlets/${outletId}/orders`), staffToken)).body as OrderBody[]
+      expect(orders.map((o) => o.id)).toEqual(expect.arrayContaining([stale.id, placed.orderId]))
+    })
+
+    it('still 409s when the table\'s open order is under 12 hours old (#230)', async () => {
+      const tenantId = await createTenant(prisma)
+      const outletId = await createOutlet(prisma, tenantId)
+      const tableId = await createTable(prisma, tenantId, outletId)
+      await enableQrOrdering(prisma, tenantId, outletId)
+      const item = await createItemWithPrice(prisma, tenantId, 19000)
+      const { tokenA } = await startAndJoin(outletId, tableId)
+      await authed(request(httpServer).post('/guest/v1/cart/lines'), tokenA).send({ itemId: item, quantity: 1 })
+      const recent = await prisma.order.create({ data: { tenantId, outletId, tableId, ownerId: null, status: 'open', createdAt: new Date(Date.now() - 11 * 60 * 60 * 1000) } })
+
+      const res = await authed(request(httpServer).post('/guest/v1/orders'), tokenA).send({})
+      expect(res.status).toBe(409)
+      expect((res.body as ErrorBody).error.code).toBe('table_has_active_order')
+      expect((await prisma.order.findUnique({ where: { id: recent.id } }))?.tableId).toBe(tableId)
+      expect(await prisma.auditEvent.count({ where: { action: 'order.detached_stale_table' } })).toBe(0)
+    })
+
     it('410s placement once the session is closed', async () => {
       const tenantId = await createTenant(prisma)
       const outletId = await createOutlet(prisma, tenantId)

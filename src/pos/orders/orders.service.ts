@@ -7,7 +7,7 @@
 import { BadRequestException, ConflictException, ForbiddenException, Injectable, NotFoundException } from '@nestjs/common'
 import type { Order, Prisma } from '../../generated/prisma/client'
 import { KitchenTicketsService } from '../../kitchen'
-import { PosPrincipal, RegionRegistryService, reserveTokenNumber, uuidv7 } from '../../platform'
+import { detachStaleTableOrder, liveSince, PosPrincipal, RegionRegistryService, reserveTokenNumber, uuidv7 } from '../../platform'
 import { OrderLineView, OrderView, TableMapEntry, TransferOrderDto, UpdateOrderStatusDto } from './orders.dtos'
 
 export type Tx = Prisma.TransactionClient
@@ -173,9 +173,10 @@ export class OrdersService {
       })
       // One query for every table's order, not N+1 - status != 'closed'
       // is what "occupied" means for CAP-2 (needs-bill is a later story, see
-      // the TODO on TableMapEntry).
+      // the TODO on TableMapEntry). #230: an order opened before the live
+      // window is a leftover and doesn't mark its table occupied.
       const activeOrders = await tx.order.findMany({
-        where: { tenantId: staff.tenantId, outletId, status: { not: 'closed' }, tableId: { not: null } },
+        where: { tenantId: staff.tenantId, outletId, status: { not: 'closed' }, tableId: { not: null }, createdAt: { gte: liveSince() } },
         include: { owner: { select: { name: true } } },
       })
       const byTable = new Map(activeOrders.map((o) => [o.tableId as string, o]))
@@ -216,6 +217,8 @@ export class OrdersService {
       await setTenantContext(tx, staff.tenantId)
       await loadTableInOutlet(tx, staff.tenantId, outletId, tableId)
 
+      // #230: the map shows a table with only a stale order as empty - tapping it starts a fresh order.
+      await detachStaleTableOrder(tx, staff.tenantId, tableId, { actorId: staff.id, actorEmail: staff.name })
       const existing = await tx.order.findFirst({ where: { tenantId: staff.tenantId, tableId, status: { not: 'closed' } } })
       if (existing) return buildOrderView(tx, existing)
 

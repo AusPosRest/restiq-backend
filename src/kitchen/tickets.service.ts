@@ -10,7 +10,7 @@
 //    opens its own transaction, same shape as every pos/admin service.
 import { ConflictException, Injectable, NotFoundException } from '@nestjs/common'
 import type { Order, Prisma, Station } from '../generated/prisma/client'
-import { PosPrincipal, RegionRegistryService } from '../platform'
+import { liveSince, LIVE_WINDOW_MS, PosPrincipal, RegionRegistryService } from '../platform'
 import { setTenantContext } from './tenant-context'
 import { AllDaySummaryEntryView, ExpoOrderView, ExpoStationEntryView, StationView, TicketLineView, TicketView } from './tickets.dtos'
 
@@ -72,12 +72,8 @@ export const UNROUTED_STATION_PARAM = 'unrouted'
  * screen; reopening is limited to the same window, since a ticket bumped
  * yesterday has no business going back on a live station board.
  */
-const BUMPED_WINDOW_MS = 12 * 60 * 60 * 1000
-// CU-20: the same window bounds what is still live. A ticket fired more than
-// 12 hours ago and never bumped is a leftover (yesterday's unclosed order),
-// not food anyone is cooking - it stays in the data but leaves the boards.
-const LIVE_WINDOW_MS = BUMPED_WINDOW_MS
-const liveSince = (): Date => new Date(Date.now() - LIVE_WINDOW_MS)
+// CU-20: the same window bounds what is still live (see platform/live-window).
+const BUMPED_WINDOW_MS = LIVE_WINDOW_MS
 const BUMPED_MAX = 200
 
 /** Resolves a `:stationId` path param (a real station id, or the literal "unrouted") to the DB value, validating outlet ownership. */
