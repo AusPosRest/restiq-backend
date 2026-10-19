@@ -311,7 +311,8 @@ export class KitchenTicketsService {
             { tickets: { some: { status: 'queued' } } },
             {
               bill: { status: 'finalized', creditNotes: { none: {} } },
-              tickets: { every: { status: 'bumped', bumpedAt: { gte: new Date(Date.now() - BUMPED_WINDOW_MS) } } },
+              // `every` alone is true for an order with no tickets - require at least one.
+              AND: [{ tickets: { some: {} } }, { tickets: { every: { status: 'bumped', bumpedAt: { gte: new Date(Date.now() - BUMPED_WINDOW_MS) } } } }],
             },
           ],
         },
