@@ -33,7 +33,7 @@
 // pipeline, and couldn't be unit-tested without booting HTTP. This also
 // means all four future call sites can call it as a normal awaited method,
 // no decorator wiring or metadata reflection to get right.
-import { BadRequestException, ForbiddenException, Injectable, UnauthorizedException } from '@nestjs/common'
+import { BadRequestException, Injectable, UnauthorizedException } from '@nestjs/common'
 import * as argon2 from 'argon2'
 import type { Prisma } from '../generated/prisma/client'
 import { AttemptLimiter, AttemptRule } from './attempt-limiter'
@@ -136,15 +136,16 @@ export class ManagerAuthService {
       })
     })
 
-    for (const candidate of candidates) {
+    const eligibleCandidates = actionType === 'refund'
+      ? candidates.filter((candidate) => roleHasPermission(candidate.role.name, 'refunds') && (candidate.outletIds.length === 0 || candidate.outletIds.includes(outletId)))
+      : candidates
+
+    for (const candidate of eligibleCandidates) {
       // pinHash can't be null here (filtered in the query above) - the
       // field stays nullable because it's shared with StaffUser's
       // unfiltered shape elsewhere.
       if (await argon2.verify(candidate.pinHash as string, enteredPin)) {
         await this.limiter.refund(rules)
-        if (actionType === 'refund' && (!roleHasPermission(candidate.role.name, 'refunds') || (candidate.outletIds.length > 0 && !candidate.outletIds.includes(outletId)))) {
-          throw new ForbiddenException({ code: 'forbidden', message: 'This staff member cannot approve refunds at this outlet' })
-        }
         return {
           approverId: candidate.id,
           approverName: candidate.name,

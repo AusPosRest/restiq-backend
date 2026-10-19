@@ -5,7 +5,7 @@
 The approving PIN must belong to an active staff member in the bill's tenant whose role has `refunds` and who may work at the bill's outlet. Empty `outletIds` means all outlets. `isManager` alone does not authorize a refund.
 
 - Cashier without `managerPin`: 403 `forbidden`.
-- PIN belonging to staff without `refunds` or outside the outlet: 403 `forbidden`.
+- PIN belonging to staff without `refunds` or outside the outlet: 401 `invalid_credentials`, the same as an incorrect PIN. These attempts count toward the PIN attempt limit.
 - Incorrect, revoked or another tenant's PIN: existing 401 `invalid_credentials`.
 - Manager without PIN: existing 400 `validation_failed`; manager with valid approval: 201.
 
