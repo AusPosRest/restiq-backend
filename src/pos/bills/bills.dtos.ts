@@ -3,7 +3,7 @@
 // every other pos DTO (AD-5).
 import { Type } from 'class-transformer'
 import { ArrayMinSize, IsArray, IsBoolean, IsIn, IsInt, IsOptional, IsString, IsUUID, MaxLength, Min, MinLength, ValidateIf, ValidateNested } from 'class-validator'
-import type { BillStatus, TenderMethod } from '../../generated/prisma/client'
+import type { BillStatus, GstSplitRounding, TenderMethod } from '../../generated/prisma/client'
 
 // Only the cashier-asserted methods are postable here. The electronic ones
 // (card_terminal, ...) are written by src/pos/payments' confirmIntent when
@@ -104,6 +104,10 @@ export interface BillView {
   // recomputed once at finalize on the discounted value when a discount is
   // given (SE-2) - immutable after that.
   taxBreakdown: TaxBreakdownLineView[]
+  // The India CGST/SGST odd-paisa rule taxBreakdown was computed with
+  // (restiq-backend#244), snapshotted with it; null for AU, IGST,
+  // composition, and bills computed before #244's setting existed.
+  gstSplitRounding: GstSplitRounding | null
   // True only for a tax-inclusive country (AU GST) - see tax.ts.
   pricesIncludeTax: boolean
   discountMinor: number | null

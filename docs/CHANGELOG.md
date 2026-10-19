@@ -6,9 +6,13 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+### Added
+- Per-tenant India CGST/SGST rounding (#244): `gstSplitRounding` (`exact_total` default, `equal_half_up`, `equal_half_even`) on `GET`/`PUT /admin/v1/tax-registration`, stored in `tenant_tax_registrations.gst_split_rounding` (migration `20261019100000_gst_split_rounding`). POS and guest bill responses add `gstSplitRounding` (null for AU, IGST and composition). Finalized bills keep their stored tax lines.
+
 ### Fixed
 - Cash round-off is stored (#241, Q28): finalize also accepts tenders where the cash share is rounded per market rule (IN nearest Rs 1, AU nearest 5c; only the cash part of a split) and stores the adjustment as `bills.round_off_minor`. Cash tenders may carry `tenderedMinor` (cash handed over; change derived). Shift expected cash, the outlet payments list and the owner payments report now count what went into the drawer, so shift close no longer shows a false over/short. Bill, invoice and payments-report views expose `roundOffMinor`; tenders expose `tenderedMinor`/`changeMinor`; the payments CSV gains a trailing `round_off` column. Exact-total tenders still finalize as before.
 - KDS Serve (expo) keeps a paid order on screen as Ready after its last ticket is bumped, for the Done tab's 12-hour window, so the runner can call the token. Refunded and discarded orders do not appear (#243, AP-cu-5).
+- India CGST/SGST no longer over-collects a paisa: total GST is rounded once, then split CGST = lower half, SGST = remainder (Rs 289 at 5% is 14.45 = 7.22 + 7.23, was 14.46). Applies to bills, bill preview, invoices, refunds and reports, which all read the same tax result; IGST and AU GST unchanged (#244, AP-cu-15).
 - Bill row locking under concurrency (#227): acquire `lockBill` row lock inside transaction for `confirmIntent`, `payShare`, and `payAll` to serialize concurrent payments, prevent duplicate tenders, and avoid unfinalizable tender mismatch states.
 - Silent-device alerts run every minute without opening sync health, with one alert per silent period per API process. Recovery or a newer heartbeat permits another alert; timers stop on shutdown and are disabled in tests (#233).
 - Production startup requires `ALERT_WEBHOOK_URL`; development and test environments may omit it (#233).

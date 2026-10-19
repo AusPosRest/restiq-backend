@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest'
-import { computeTax } from './tax'
+import { computeTax, GstSplitRounding } from './tax'
 
 function sumBreakdown(breakdown: { amountMinor: bigint }[]): bigint {
   return breakdown.reduce((sum, line) => sum + line.amountMinor, 0n)
@@ -93,8 +93,8 @@ describe('computeTax', () => {
     expect(withComposition.notes).toEqual([])
   })
 
-  it('rounding: IN CGST and SGST are each rounded on their own and always equal (CU-11)', () => {
-    // 30 * 2.5% = 0.75 -> round-half-up 1 each; tax = 2.
+  it('rounding: IN total GST is rounded once, then split CGST = lower half, SGST = remainder (#244)', () => {
+    // 30 * 5% = 1.5 -> round-half-up 2; split 1 + 1.
     const result = computeTax({ country: 'IN', gstRegistered: true, taxProfile: '', compositionScheme: false, subtotalMinor: 30n })
     expect(result.taxMinor).toBe(2n)
     expect(result.breakdown).toEqual([
@@ -103,11 +103,21 @@ describe('computeTax', () => {
     ])
   })
 
-  it('rounding: IN CGST/SGST never differ by a paisa - 52020 at 5% is 1301 + 1301, not 1301 + 1300 (CU-11)', () => {
-    // 52020 * 2.5% = 1300.5 -> round-half-up 1301 per half.
+  it('rounding: Rs 289 at 5% is GST 14.45 (7.22 + 7.23), never 14.46 (#244, AP-cu-15)', () => {
+    const result = computeTax({ country: 'IN', gstRegistered: true, taxProfile: 'India GST - CGST/SGST split', compositionScheme: false, subtotalMinor: 28900n })
+    expect(result.taxMinor).toBe(1445n)
+    expect(result.breakdown).toEqual([
+      { label: 'CGST', ratePercent: 2.5, amountMinor: 722n },
+      { label: 'SGST', ratePercent: 2.5, amountMinor: 723n },
+    ])
+    expect(sumBreakdown(result.breakdown)).toBe(result.taxMinor)
+  })
+
+  it('rounding: a discounted taxable value with odd-paisa GST still splits to the rounded total (#244)', () => {
+    // 52020 * 5% = 2601 -> 1300 + 1301 (rounding each half up gave 2602).
     const result = computeTax({ country: 'IN', gstRegistered: true, taxProfile: '', compositionScheme: false, subtotalMinor: 52020n })
-    expect(result.breakdown.map((l) => l.amountMinor)).toEqual([1301n, 1301n])
-    expect(result.taxMinor).toBe(2602n)
+    expect(result.taxMinor).toBe(2601n)
+    expect(result.breakdown.map((l) => l.amountMinor)).toEqual([1300n, 1301n])
     expect(sumBreakdown(result.breakdown)).toBe(result.taxMinor)
   })
 
@@ -173,5 +183,60 @@ describe('computeTax', () => {
     expect(computeTax({ country: 'IN', gstRegistered: true, taxProfile: '', compositionScheme: true, subtotalMinor: 0n }).taxMinor).toBe(0n)
     expect(computeTax({ country: 'AU', gstRegistered: true, taxProfile: '', compositionScheme: false, subtotalMinor: 0n }).taxMinor).toBe(0n)
     expect(computeTax({ country: 'AU', gstRegistered: false, taxProfile: '', compositionScheme: false, subtotalMinor: 0n }).taxMinor).toBe(0n)
+  })
+
+  describe('gstSplitRounding (per-tenant CGST/SGST rule, #244)', () => {
+    const inSplit = (subtotalMinor: bigint, gstSplitRounding?: GstSplitRounding) =>
+      computeTax({ country: 'IN', gstRegistered: true, taxProfile: 'India GST - CGST/SGST split', compositionScheme: false, subtotalMinor, gstSplitRounding })
+
+    it.each([
+      ['exact_total', 722n, 723n, 1445n],
+      ['equal_half_up', 723n, 723n, 1446n],
+      ['equal_half_even', 722n, 722n, 1444n],
+    ] as const)('Rs 289 at 5%% under %s is %s + %s', (mode, cgst, sgst, total) => {
+      const result = inSplit(28900n, mode)
+      expect(result.breakdown.map((l) => [l.label, l.amountMinor])).toEqual([['CGST', cgst], ['SGST', sgst]])
+      expect(result.taxMinor).toBe(total)
+      expect(sumBreakdown(result.breakdown)).toBe(result.taxMinor)
+      expect(result.gstSplitRounding).toBe(mode)
+    })
+
+    it('defaults to exact_total when the setting is not given', () => {
+      const result = inSplit(28900n)
+      expect(result.breakdown.map((l) => l.amountMinor)).toEqual([722n, 723n])
+      expect(result.gstSplitRounding).toBe('exact_total')
+    })
+
+    it('equal_half_even rounds a half-paisa tie to the even paisa', () => {
+      // 30 * 2.5% = 0.75 per half -> 1 (not a tie); 52020 * 2.5% = 1300.5 -> 1300 (even).
+      expect(inSplit(30n, 'equal_half_even').breakdown.map((l) => l.amountMinor)).toEqual([1n, 1n])
+      expect(inSplit(52020n, 'equal_half_even').breakdown.map((l) => l.amountMinor)).toEqual([1300n, 1300n])
+      // 52060 * 2.5% = 1301.5 -> 1302 (even).
+      expect(inSplit(52060n, 'equal_half_even').breakdown.map((l) => l.amountMinor)).toEqual([1302n, 1302n])
+    })
+
+    it('an even-paisa total splits the same under every rule', () => {
+      for (const mode of ['exact_total', 'equal_half_up', 'equal_half_even'] as const) {
+        const result = inSplit(28800n, mode) // 1440 -> 720 + 720
+        expect(result.taxMinor).toBe(1440n)
+        expect(result.breakdown.map((l) => l.amountMinor)).toEqual([720n, 720n])
+      }
+    })
+
+    it('IGST, composition and AU ignore the setting and report null', () => {
+      for (const mode of ['exact_total', 'equal_half_up', 'equal_half_even'] as const) {
+        const igst = computeTax({ country: 'IN', gstRegistered: true, taxProfile: 'IGST', compositionScheme: false, subtotalMinor: 28900n, gstSplitRounding: mode })
+        expect(igst.breakdown).toEqual([{ label: 'IGST', ratePercent: 5, amountMinor: 1445n }])
+        expect(igst.gstSplitRounding).toBeNull()
+
+        const composition = computeTax({ country: 'IN', gstRegistered: true, taxProfile: '', compositionScheme: true, subtotalMinor: 28900n, gstSplitRounding: mode })
+        expect(composition.taxMinor).toBe(0n)
+        expect(composition.gstSplitRounding).toBeNull()
+
+        const au = computeTax({ country: 'AU', gstRegistered: true, taxProfile: 'Australia GST', compositionScheme: false, subtotalMinor: 28900n, gstSplitRounding: mode })
+        expect(au.taxMinor).toBe(2627n) // 28900 - round(28900 * 10 / 11)
+        expect(au.gstSplitRounding).toBeNull()
+      }
+    })
   })
 })
