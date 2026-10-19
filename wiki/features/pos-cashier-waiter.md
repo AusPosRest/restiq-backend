@@ -1152,6 +1152,14 @@ service directly rather than through an HTTP endpoint)
 
 ## CAP-9 - Refunds and adjustments
 
+Issue #240 (AP-pe-2): authenticated cashiers may refund with a PIN approver
+whose role has `refunds`, whose PIN is active, and whose outlet assignments
+allow the bill's outlet (empty assignments mean all outlets). The refund
+service checks this permission rather than relying on `isManager`. Cashier
+without PIN: 403 `forbidden`; wrong PIN: existing 401 `invalid_credentials`.
+Managers still need a PIN (missing PIN remains 400). Credit notes and audit
+rows retain the PIN approver's ID. See [refund authorization](../../docs/api/refunds.md).
+
 - **Intent:** staff can refund one or more items against an already-
   finalized, immutable Bill (story 8), gated by story 9's manager
   authorisation, with correct tax reversal. Success: a refund never mutates

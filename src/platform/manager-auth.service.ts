@@ -3,7 +3,8 @@
 // PIN-check-plus-audit-row logic. Bound actions: order void-after-fire and
 // comp (pos/CAP-3), bill discount-above-threshold and price override
 // (pos/CAP-7), refund (pos/CAP-9), no-sale drawer-open (pos/CAP-10) - see
-// MANAGER_GATED_ACTIONS below.
+// MANAGER_GATED_ACTIONS below. Refunds use the approver's Refunds permission
+// and outlet access rather than isManager (#240).
 //
 // "Manager-capable" - the decision other stories depend on: a StaffUser is
 // manager-capable when their Role has isManager = true (see
@@ -36,6 +37,7 @@ import { BadRequestException, Injectable, UnauthorizedException } from '@nestjs/
 import * as argon2 from 'argon2'
 import type { Prisma } from '../generated/prisma/client'
 import { AttemptLimiter, AttemptRule } from './attempt-limiter'
+import { roleHasPermission } from './permissions'
 import { RegionRegistryService } from './region-registry.service'
 
 // The six actions AD-15 names as bound to this gate, in AD-15's own words.
@@ -102,15 +104,8 @@ export class ManagerAuthService {
    * Verifies a manager PIN plus mandatory reason for a gated action. On
    * success, returns the approver's identity; throws otherwise.
    *
-   * outletId is accepted for interface parity with the money-path's
-   * outlet-scoped shape (AD-14) and so every call site can pass the same
-   * request context uniformly, but StaffUser rows are tenant-scoped, not
-   * outlet-scoped, in this schema - SPEC has staff pick an outlet right
-   * after login, they aren't assigned to one - so it currently plays no
-   * part in finding a candidate approver, and it isn't persisted on the
-   * audit row either (audit_events has no outlet column). A caller that
-   * needs outlet context in its own trail includes it in its own
-   * reason/action string.
+   * Refund approval also requires the Refunds permission and access to the
+   * bill's outlet (#240). Other actions retain the manager-capable gate.
    */
   async authorize(
     actionType: ManagerGatedAction,
@@ -121,8 +116,6 @@ export class ManagerAuthService {
     /** restiq-backend#171: the signed-in staff member asking - wrong manager PINs are limited per requester. */
     requesterId: string,
   ): Promise<ManagerApproval> {
-    void outletId // see doc comment above - accepted, not yet used
-
     // Cheapest check first: reject a missing reason before touching the
     // database or doing any argon2 work.
     if (!reason.trim()) {
@@ -138,12 +131,16 @@ export class ManagerAuthService {
     const candidates = await plane.$transaction(async (tx) => {
       await setTenantContext(tx, tenantId)
       return tx.staffUser.findMany({
-        where: { tenantId, pinHash: { not: null }, pinRevokedAt: null, role: { isManager: true } },
+        where: { tenantId, pinHash: { not: null }, pinRevokedAt: null, ...(actionType === 'refund' ? {} : { role: { isManager: true } }) },
         include: { role: { select: { id: true, name: true } } },
       })
     })
 
-    for (const candidate of candidates) {
+    const eligibleCandidates = actionType === 'refund'
+      ? candidates.filter((candidate) => roleHasPermission(candidate.role.name, 'refunds') && (candidate.outletIds.length === 0 || candidate.outletIds.includes(outletId)))
+      : candidates
+
+    for (const candidate of eligibleCandidates) {
       // pinHash can't be null here (filtered in the query above) - the
       // field stays nullable because it's shared with StaffUser's
       // unfiltered shape elsewhere.
@@ -161,7 +158,7 @@ export class ManagerAuthService {
       }
     }
 
-    // No match - wrong PIN, the PIN belongs to a non-manager, or no
+    // No match - wrong PIN, a non-manager PIN for another action, or no
     // manager-capable staff exist at all. One dummy verify keeps the
     // response time the same across all three cases, so a caller can't
     // learn from timing whether this tenant has any managers.
