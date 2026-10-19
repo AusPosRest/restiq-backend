@@ -131,6 +131,7 @@ model Tenant {
   updatedAt         DateTime         @updatedAt @map("updated_at") @db.Timestamptz(6)
   deletedAt         DateTime?        @map("deleted_at") @db.Timestamptz(6)
 
+  revokedPosTokens    RevokedPosToken[]
   taxRegistrations    TenantTaxRegistration[]
   brands              Brand[]
   outlets             Outlet[]
@@ -2152,4 +2153,16 @@ model PlanPrice {
 
   @@id([country, plan])
   @@map("plan_prices")
+}
+
+
+// #242: logged-out POS tokens cannot be replayed, without ending other devices.
+model RevokedPosToken {
+  jti       String   @id
+  tenantId  String   @map("tenant_id") @db.Uuid
+  expiresAt DateTime @map("expires_at") @db.Timestamptz(6)
+  tenant    Tenant   @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+
+  @@index([tenantId])
+  @@map("revoked_pos_tokens")
 }

@@ -12,6 +12,8 @@ export function productionConfigProblems(env: NodeJS.ProcessEnv): string[] {
 
   if (!env.HOME_REGION) problems.push('HOME_REGION must be set explicitly (the region existing tenants are registered in)')
 
+  if (!env.ALERT_WEBHOOK_URL?.trim()) problems.push('ALERT_WEBHOOK_URL must be set so silent-device alerts reach the responder')
+
   const secrets = JWT_SECRETS.map((name) => [name, env[name] ?? ''] as const)
   for (const [name, value] of secrets) {
     if (value.length < MIN_SECRET_LENGTH) problems.push(`${name} must be at least ${MIN_SECRET_LENGTH} characters`)
