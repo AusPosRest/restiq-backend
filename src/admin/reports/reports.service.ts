@@ -198,6 +198,7 @@ function toPaymentRow(bill: BillWithPaymentsInclude): PaymentRow {
     taxMinor: Number(bill.taxMinor),
     taxBreakdown: readTaxBreakdownLines(bill.taxBreakdown),
     totalMinor: Number(computeTotalMinor(bill.subtotalMinor, bill.taxMinor, discountMinor, bill.pricesIncludeTax)),
+    roundOffMinor: bill.roundOffMinor === null ? null : Number(bill.roundOffMinor),
     tenders: bill.tenders.map((t) => ({ method: t.method, amountMinor: Number(t.amountMinor), createdAt: t.createdAt.toISOString() })),
     creditNotes: bill.creditNotes.map((n) => toCreditNoteRow(n, bill.pricesIncludeTax)),
   }
@@ -278,7 +279,7 @@ export class ReportsService {
   // scalar columns needed for that per-bill formula and reduces them in JS -
   // the same "no cap on range size" posture exportPaymentsCsv already has.
   private async totalsFor(tx: Prisma.TransactionClient, where: Prisma.BillWhereInput): Promise<PaymentsTotals> {
-    const bills = await tx.bill.findMany({ where, select: { id: true, subtotalMinor: true, discountMinor: true, taxMinor: true, pricesIncludeTax: true } })
+    const bills = await tx.bill.findMany({ where, select: { id: true, subtotalMinor: true, discountMinor: true, taxMinor: true, pricesIncludeTax: true, roundOffMinor: true } })
     const billIds = bills.map((b) => b.id)
     const pricesIncludeTaxByBillId = new Map(bills.map((b) => [b.id, b.pricesIncludeTax]))
 
@@ -291,7 +292,9 @@ export class ReportsService {
     let discountMinor = 0n
     let taxMinor = 0n
     let totalMinor = 0n
+    let roundOffMinor = 0n
     for (const bill of bills) {
+      roundOffMinor += bill.roundOffMinor ?? 0n
       const billDiscount = bill.discountMinor ?? 0n
       subtotalMinor += bill.subtotalMinor
       discountMinor += billDiscount
@@ -312,6 +315,7 @@ export class ReportsService {
       discountMinor: Number(discountMinor),
       taxMinor: Number(taxMinor),
       totalMinor: Number(totalMinor),
+      roundOffMinor: Number(roundOffMinor),
       tenderedMinor: Number(tenderAgg._sum.amountMinor ?? 0n),
       refundedMinor: Number(refundedMinor),
     }
@@ -383,11 +387,12 @@ export class ReportsService {
           formatMinor(BigInt(row.totalMinor)),
           tenders,
           creditNotes,
+          formatMinor(BigInt(row.roundOffMinor ?? 0)),
         ]
       })
 
       return toCsv(
-        ['bill_number', 'finalized_at', 'outlet', 'source', 'table', 'token_number', 'cashier', 'subtotal', 'discount', 'discount_reason', 'tax', 'total', 'tenders', 'credit_notes'],
+        ['bill_number', 'finalized_at', 'outlet', 'source', 'table', 'token_number', 'cashier', 'subtotal', 'discount', 'discount_reason', 'tax', 'total', 'tenders', 'credit_notes', 'round_off'],
         rows,
       )
     })

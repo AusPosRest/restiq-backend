@@ -313,6 +313,12 @@ export class BillsService {
       }
 
       for (const tender of dto.tenders) {
+        if (tender.tenderedMinor !== undefined && (tender.method !== 'cash' || tender.tenderedMinor < tender.amountMinor)) {
+          throw new BadRequestException({
+            code: 'validation_failed',
+            message: tender.method === 'cash' ? 'The cash handed over cannot be less than the cash tender' : 'Only a cash tender records the cash handed over',
+          })
+        }
         await createTenderRecord(tx, {
           tenantId: staff.tenantId,
           billId,
@@ -320,6 +326,7 @@ export class BillsService {
           amountMinor: BigInt(tender.amountMinor),
           riskAcknowledged: tender.riskAcknowledged,
           reference: tender.method === 'external' ? tender.reference?.trim() : undefined,
+          tenderedMinor: tender.tenderedMinor !== undefined ? BigInt(tender.tenderedMinor) : undefined,
         })
       }
 
