@@ -1,5 +1,6 @@
 # Completed
 
+- **2026-10-19** - Cash round-off stored on the bill (issue #241, Q28, gap G8): new nullable `bills.round_off_minor` and `tenders.tendered_minor` (cash only, CHECK `tenders_tendered_cash_only`); one server-side rounding rule `cashRoundOffMinor` in `src/pos/bills/bill-core.ts`; `commitFinalize` accepts the exact total or the total with the cash share rounded; views/reports expose round-off, tendered and change. Unit test for the rule; pos-bills e2e covers the INR shift repro (expected 562.93, short 0.00), AU 5c, split cash+UPI and tendered validation; reports-payments e2e covers row/totals/CSV.
 - **2026-10-19** - Silent-device alert sweep (issue #233, G26): one-minute background sweep, shared per-device deduplication with page reads, recovery resets alerts, shutdown cleanup, and production webhook requirement. Unit tests cover scheduling, silent-period transitions and config validation; sync-health e2e covers background sweep plus page reads.
 - **2026-10-12** - Bill row locking on guest-pay and card-intent paths (issue #227):
   - In `src/pos/payments/intent-core.ts` (`confirmIntent`), acquire `lockBill(tx, target.billId)` before checking `bill.status` and creating electronic tender, serializing with cash or other finalizations so late card captures do not write duplicate tenders.

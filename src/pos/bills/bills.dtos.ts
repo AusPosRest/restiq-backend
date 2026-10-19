@@ -34,6 +34,12 @@ export class TenderDto {
   @ValidateIf((tender: TenderDto) => tender.method === 'external')
   @IsString() @MinLength(1) @MaxLength(64)
   reference?: string
+
+  // restiq-backend#241 (Q28): cash only - what the guest handed over; the
+  // change is tenderedMinor - amountMinor. amountMinor stays what went into
+  // the drawer. Checked against method/amountMinor in the service.
+  @IsOptional() @IsInt() @Min(1)
+  tenderedMinor?: number
 }
 
 // discountMinor/discountReason are optional, but only together - a bare
@@ -70,6 +76,10 @@ export interface TenderView {
   riskAcknowledged: boolean
   // The external tender's reference / bill number (issue #146); null otherwise.
   reference: string | null
+  // restiq-backend#241: cash handed over and the change given back - null
+  // unless the client recorded tenderedMinor on a cash tender.
+  tenderedMinor: number | null
+  changeMinor: number | null
   createdAt: string
 }
 
@@ -102,6 +112,9 @@ export interface BillView {
   // subtotal + tax - discount. Never persisted as its own column - always
   // derived from the three that are.
   totalMinor: number
+  // restiq-backend#241 (Q28): the cash round-off settled at finalize (tenders
+  // sum to totalMinor + this). Null when none was taken. Not taxed.
+  roundOffMinor: number | null
   status: BillStatus
   // qr-self-order/CAP-5 (issue #80): null for a guest-checkout Bill (no
   // staff creator - see Bill.createdByStaffId's schema comment).
@@ -249,6 +262,9 @@ export interface InvoiceView {
   taxBreakdown: TaxBreakdownLineView[]
   taxMinor: number
   totalMinor: number
+  // restiq-backend#241 (Q28): the cash round-off line; amount paid is
+  // totalMinor + roundOffMinor. Null when none. GST totals exclude it.
+  roundOffMinor: number | null
   pricesIncludeTax: boolean
   // Empty on the pro-forma view even if a guest has partially paid shares
   // pre-finalize (issue #125) - a pro-forma bill shows no payments.

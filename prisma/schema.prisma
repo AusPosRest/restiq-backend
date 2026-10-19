@@ -1567,6 +1567,11 @@ model Bill {
   pricesIncludeTax   Boolean    @default(false) @map("prices_include_tax")
   discountMinor      BigInt?    @map("discount_minor")
   discountReason     String?    @map("discount_reason")
+  // restiq-backend#241 (Q28): the cash round-off (IN nearest Rs 1, AU nearest
+  // 5c) settled at finalize - tenders sum to total + this. Null when the
+  // tenders matched the exact total (no rounding, or a pre-#241 client).
+  // Never taxed: subtotal/tax/total stay the GST figures.
+  roundOffMinor      BigInt?    @map("round_off_minor")
   status             BillStatus @default(open)
   // qr-self-order/CAP-5 (issue #80): nullable as of this story - a
   // guest-checkout Bill (src/guest/bills) has no staff creator, same posture
@@ -1669,6 +1674,10 @@ model Tender {
   // issue #146: the outside system's reference / bill number. Set exactly
   // when method = external (CHECK tenders_external_needs_reference).
   reference        String?
+  // restiq-backend#241 (Q28): what the guest handed over for a cash tender
+  // (amountMinor is what stayed in the drawer; the difference is change).
+  // Cash only, >= amountMinor (CHECK tenders_tendered_cash_only).
+  tenderedMinor    BigInt?      @map("tendered_minor")
   createdAt        DateTime     @default(now()) @map("created_at") @db.Timestamptz(6)
 
   tenant        Tenant         @relation(fields: [tenantId], references: [id])

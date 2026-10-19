@@ -135,6 +135,8 @@ function toTenderView(t: BillWithTenders['tenders'][number]): TenderView {
     paymentIntentId: t.paymentIntentId,
     riskAcknowledged: t.riskAcknowledged,
     reference: t.reference,
+    tenderedMinor: t.tenderedMinor === null ? null : Number(t.tenderedMinor),
+    changeMinor: t.tenderedMinor === null ? null : Number(t.tenderedMinor - t.amountMinor),
     createdAt: t.createdAt.toISOString(),
   }
 }
@@ -156,6 +158,7 @@ export function toBillView(bill: BillWithTenders): BillView {
     discountMinor: bill.discountMinor === null ? null : Number(bill.discountMinor),
     discountReason: bill.discountReason,
     totalMinor: Number(computeTotalMinor(bill.subtotalMinor, bill.taxMinor, discountMinor, bill.pricesIncludeTax)),
+    roundOffMinor: bill.roundOffMinor === null ? null : Number(bill.roundOffMinor),
     status: bill.status,
     createdByStaffId: bill.createdByStaffId,
     createdAt: bill.createdAt.toISOString(),
@@ -336,6 +339,8 @@ export async function createTenderRecord(
     riskAcknowledged?: boolean
     // External tenders only (issue #146) - the CHECK rejects it on any other method.
     reference?: string
+    // Cash only, >= amountMinor (restiq-backend#241) - the CHECK rejects anything else.
+    tenderedMinor?: bigint
   },
 ): Promise<BillWithTenders['tenders'][number]> {
   return tx.tender.create({
@@ -348,6 +353,7 @@ export async function createTenderRecord(
       paymentIntentId: params.paymentIntentId ?? null,
       riskAcknowledged: params.riskAcknowledged ?? false,
       reference: params.reference ?? null,
+      tenderedMinor: params.tenderedMinor ?? null,
     },
   })
 }
@@ -414,13 +420,28 @@ export async function commitFinalize(tx: Tx, params: CommitFinalizeParams): Prom
   const tax = discountMinor > 0n ? await computeTaxOn(tx, params.tenantId, bill.subtotalMinor - discountMinor) : null
   const taxMinor = tax?.taxMinor ?? bill.taxMinor
   const totalMinor = computeTotalMinor(bill.subtotalMinor, taxMinor, discountMinor, bill.pricesIncludeTax)
-  const tenderAgg = await tx.tender.aggregate({ where: { billId: bill.id }, _sum: { amountMinor: true } })
-  const tenderTotal = tenderAgg._sum.amountMinor ?? 0n
+  // restiq-backend#241 (Q28): the tenders cover the exact total, or the
+  // total with the cash part rounded per market rule - only the cash share
+  // (what is left after every other tender) is rounded, and the round-off is
+  // stored on the bill. The exact sum (round-off null) still settles, so an
+  // older client that adds the round-off back onto the cash keeps working.
+  const tenders = await tx.tender.findMany({ where: { billId: bill.id }, select: { method: true, amountMinor: true } })
+  const tenderTotal = tenders.reduce((sum, t) => sum + t.amountMinor, 0n)
+  const cashMinor = tenders.reduce((sum, t) => (t.method === 'cash' ? sum + t.amountMinor : sum), 0n)
+  let roundOffMinor: bigint | null = null
   if (tenderTotal !== totalMinor) {
-    throw new BadRequestException({
-      code: 'tender_mismatch',
-      message: `Tenders sum to ${tenderTotal} but the bill total is ${totalMinor}`,
-    })
+    const country = cashMinor > 0n ? (await tx.tenant.findUniqueOrThrow({ where: { id: params.tenantId }, select: { country: true } })).country : null
+    const cashRoundOff = country ? cashRoundOffMinor(totalMinor - (tenderTotal - cashMinor), country) : 0n
+    if (cashRoundOff === 0n || tenderTotal !== totalMinor + cashRoundOff) {
+      throw new BadRequestException({
+        code: 'tender_mismatch',
+        message:
+          cashRoundOff === 0n
+            ? `Tenders sum to ${tenderTotal} but the bill total is ${totalMinor}`
+            : `Tenders sum to ${tenderTotal} but the bill total is ${totalMinor} (${totalMinor + cashRoundOff} with the cash rounded)`,
+      })
+    }
+    roundOffMinor = cashRoundOff
   }
 
   // Reserve-then-commit (AD-14): the counter is touched only now, after
@@ -443,6 +464,7 @@ export async function commitFinalize(tx: Tx, params: CommitFinalizeParams): Prom
       billNumber: counter.lastNumber,
       discountMinor: params.discountMinor,
       discountReason: params.discountReason,
+      roundOffMinor,
       ...(tax && {
         taxMinor: tax.taxMinor,
         taxBreakdown: toStoredTaxBreakdown(tax.breakdown, tax.notes) as unknown as Prisma.InputJsonValue,
@@ -490,6 +512,18 @@ export async function commitFinalize(tx: Tx, params: CommitFinalizeParams): Prom
 // than read back.
 export function currencyForCountry(country: TaxCountry): string {
   return country === 'IN' ? 'INR' : 'AUD'
+}
+
+/**
+ * restiq-backend#241 (Q28): the one server-side cash rounding rule - cash due
+ * is settled to the nearest Rs 1 (IN) or 5c (AU), halves rounding up (same as
+ * restiq-web's src/lib/money.ts cashRoundOffMinor for INR). Returns the
+ * adjustment to add to what is due: -46 for 24046 paise, +4 for 8296.
+ */
+export function cashRoundOffMinor(dueMinor: bigint, country: TaxCountry): bigint {
+  if (dueMinor <= 0n) return 0n
+  const unit = country === 'IN' ? 100n : 5n
+  return ((dueMinor * 2n + unit) / (2n * unit)) * unit - dueMinor
 }
 
 /**
@@ -602,6 +636,7 @@ export async function buildInvoiceView(tx: Tx, tenantId: string, billId: string)
     taxBreakdown,
     taxMinor: Number(bill.taxMinor),
     totalMinor: Number(computeTotalMinor(bill.subtotalMinor, bill.taxMinor, discountMinor, bill.pricesIncludeTax)),
+    roundOffMinor: bill.roundOffMinor === null ? null : Number(bill.roundOffMinor),
     pricesIncludeTax: bill.pricesIncludeTax,
     tenders: isFinalized ? bill.tenders.map(toTenderView) : [],
     creditNotes: creditNoteViews,
