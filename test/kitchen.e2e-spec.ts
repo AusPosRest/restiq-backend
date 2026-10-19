@@ -518,6 +518,86 @@ describe('/kitchen/v1 ticket domain, routing, and fire-on-send (e2e)', () => {
       expect(after).toEqual([])
     })
 
+    describe('paid counter order after its last bump (#243, AP-cu-5)', () => {
+      async function paidCounterOrder(): Promise<{ outletId: string; tenantId: string; orderId: string; billId: string; token: string }> {
+        const tenantId = await createTenant(prisma)
+        const outletId = await createOutlet(prisma, tenantId)
+        const waiter = await createStaff(prisma, tenantId, outletId, 'Asha')
+        const tandoor = await createStation(prisma, tenantId, outletId, 'Tandoor')
+        const item = await createItem(prisma, tenantId, 19000, { stationId: tandoor })
+        const res = await authed(request(httpServer).post(`/pos/v1/outlets/${outletId}/counter-orders`), waiter.token).send()
+        expect(res.status).toBe(201)
+        const orderId = (res.body as OrderBody).id
+        await addLine(orderId, item, waiter.token)
+        await fire(orderId, waiter.token)
+        // Paid up front: finalized bill, order closed (what finalize does).
+        const bill = await prisma.bill.create({
+          data: { tenantId, outletId, orderId, billNumber: 1, subtotalMinor: 19000n, taxMinor: 950n, status: 'finalized', finalizedAt: new Date() },
+        })
+        await prisma.order.update({ where: { id: orderId }, data: { status: 'closed' } })
+        return { outletId, tenantId, orderId, billId: bill.id, token: waiter.token }
+      }
+
+      async function bumpAll(outletId: string, token: string): Promise<void> {
+        const expo = (await authed(request(httpServer).get(`/kitchen/v1/outlets/${outletId}/expo`), token)).body as ExpoOrderBody[]
+        for (const station of expo[0]?.stations ?? []) {
+          for (const ticket of station.tickets) {
+            const res = await authed(request(httpServer).post(`/kitchen/v1/tickets/${ticket.id}/bump`), token).send()
+            expect(res.status).toBe(200)
+          }
+        }
+      }
+
+      it('stays on expo as ready once every ticket is bumped', async () => {
+        const { outletId, orderId, token } = await paidCounterOrder()
+        await bumpAll(outletId, token)
+
+        const expo = (await authed(request(httpServer).get(`/kitchen/v1/outlets/${outletId}/expo`), token)).body as ExpoOrderBody[]
+        expect(expo.map((o) => o.orderId)).toEqual([orderId])
+        expect(expo[0]?.stations.every((s) => s.ready)).toBe(true)
+        expect(expo[0]?.waitingOn).toEqual([])
+      })
+
+      it('drops off once the last bump is older than the Done-tab window', async () => {
+        const { outletId, orderId, token } = await paidCounterOrder()
+        await bumpAll(outletId, token)
+        await prisma.ticket.updateMany({ where: { orderId }, data: { bumpedAt: new Date(Date.now() - 13 * 60 * 60 * 1000) } })
+
+        const expo = (await authed(request(httpServer).get(`/kitchen/v1/outlets/${outletId}/expo`), token)).body as ExpoOrderBody[]
+        expect(expo).toEqual([])
+      })
+
+      it('does not show a refunded order', async () => {
+        const { outletId, tenantId, billId, token } = await paidCounterOrder()
+        await bumpAll(outletId, token)
+        const manager = await prisma.staffUser.findFirstOrThrow({ where: { tenantId } })
+        await prisma.creditNote.create({
+          data: { tenantId, originalBillId: billId, reason: 'Refund', approvedByStaffId: manager.id, createdByStaffId: manager.id, subtotalMinor: 19000n, taxMinor: 950n },
+        })
+
+        const expo = (await authed(request(httpServer).get(`/kitchen/v1/outlets/${outletId}/expo`), token)).body as ExpoOrderBody[]
+        expect(expo).toEqual([])
+      })
+    })
+
+    it('an unpaid table order still shows ready after its last bump', async () => {
+      const tenantId = await createTenant(prisma)
+      const outletId = await createOutlet(prisma, tenantId)
+      const tableId = await createTable(prisma, tenantId, outletId)
+      const waiter = await createStaff(prisma, tenantId, outletId, 'Asha')
+      const tandoor = await createStation(prisma, tenantId, outletId, 'Tandoor')
+      const item = await createItem(prisma, tenantId, 19000, { stationId: tandoor })
+      const orderId = await openOrder(outletId, tableId, waiter.token)
+      await addLine(orderId, item, waiter.token)
+      await fire(orderId, waiter.token)
+      const [ticket] = (await authed(request(httpServer).get(`/kitchen/v1/outlets/${outletId}/stations/${tandoor}/queue`), waiter.token)).body as TicketBody[]
+      await authed(request(httpServer).post(`/kitchen/v1/tickets/${ticket?.id}/bump`), waiter.token).send()
+
+      const expo = (await authed(request(httpServer).get(`/kitchen/v1/outlets/${outletId}/expo`), waiter.token)).body as ExpoOrderBody[]
+      expect(expo.map((o) => o.orderId)).toEqual([orderId])
+      expect(expo[0]?.stations[0]?.ready).toBe(true)
+    })
+
     it('a ticket fired more than 12 hours ago leaves the station queue, expo and all-day counts (CU-20)', async () => {
       const tenantId = await createTenant(prisma)
       const outletId = await createOutlet(prisma, tenantId)

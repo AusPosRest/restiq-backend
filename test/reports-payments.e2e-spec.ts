@@ -57,6 +57,7 @@ interface PaymentRowBody {
   taxMinor: number
   taxBreakdown: TaxBreakdownLineBody[]
   totalMinor: number
+  roundOffMinor: number | null
   tenders: TenderRowBody[]
   creditNotes: CreditNoteRowBody[]
 }
@@ -66,6 +67,7 @@ interface PaymentsTotalsBody {
   discountMinor: number
   taxMinor: number
   totalMinor: number
+  roundOffMinor: number
   tenderedMinor: number
   refundedMinor: number
   netMinor: number
@@ -346,6 +348,7 @@ describe('/admin/v1/reports/payments (e2e)', () => {
         discountMinor: 0,
         taxMinor: 3000,
         totalMinor: 63000,
+        roundOffMinor: 0,
         tenderedMinor: 63000,
         refundedMinor: 31500,
         // PE-33: net of refunds - the same figure the dashboard calls "Sales today".
@@ -406,6 +409,21 @@ describe('/admin/v1/reports/payments (e2e)', () => {
     })
   })
 
+  it('shows a bill\'s stored cash round-off on its row, in the totals and in the CSV (restiq-backend#241)', async () => {
+    const seed = await seedTenant('Round Off')
+    // Fixture: store a round-off on b1 directly - the finalize path that sets it is covered in pos-bills.e2e-spec.ts.
+    await prisma.bill.update({ where: { id: seed.b1.billId }, data: { roundOffMinor: -46n } })
+
+    const body = (await authed(request(httpServer).get(`/admin/v1/reports/payments?outletId=${seed.outlet1}`), seed.token)).body as PaymentsListBody
+    expect(body.items.find((i) => i.billId === seed.b1.billId)?.roundOffMinor).toBe(-46)
+    expect(body.items.find((i) => i.billId === seed.b2.billId)?.roundOffMinor).toBeNull()
+    expect(body.totals).toMatchObject({ totalMinor: 63000, roundOffMinor: -46 })
+
+    const csv = (await authed(request(httpServer).get(`/admin/v1/reports/payments/export?outletId=${seed.outlet1}`), seed.token)).text
+    const rows = csv.trim().split('\r\n').map((line) => line.split(','))
+    expect(rows[3][14]).toBe('-0.46') // oldest last: b1
+  })
+
   describe('GET /admin/v1/reports/payments/export', () => {
     it('exports a real CSV with the right header and one row per finalized bill', async () => {
       const seed = await seedTenant('CSV Export')
@@ -418,13 +436,13 @@ describe('/admin/v1/reports/payments (e2e)', () => {
         .trim()
         .split('\r\n')
         .map((line) => line.split(','))
-      expect(rows[0]).toEqual(['bill_number', 'finalized_at', 'outlet', 'source', 'table', 'token_number', 'cashier', 'subtotal', 'discount', 'discount_reason', 'tax', 'total', 'tenders', 'credit_notes'])
+      expect(rows[0]).toEqual(['bill_number', 'finalized_at', 'outlet', 'source', 'table', 'token_number', 'cashier', 'subtotal', 'discount', 'discount_reason', 'tax', 'total', 'tenders', 'credit_notes', 'round_off'])
       expect(rows).toHaveLength(4) // header + 3 finalized bills
 
       const b3Row = rows[1] // newest first
       // PE-23: the outlet's local time with its offset, not UTC.
       expect(b3Row[1]).toMatch(/^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\+05:30$/)
-      expect(b3Row.slice(2)).toEqual(['CSV Export Main', 'pos', 'T1', '', 'Asha', '300.00', '0.00', '', '15.00', '315.00', 'cash=315.00', 'Sent back=315.00'])
+      expect(b3Row.slice(2)).toEqual(['CSV Export Main', 'pos', 'T1', '', 'Asha', '300.00', '0.00', '', '15.00', '315.00', 'cash=315.00', 'Sent back=315.00', '0.00'])
     })
   })
 })

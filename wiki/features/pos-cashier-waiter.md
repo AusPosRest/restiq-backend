@@ -59,9 +59,12 @@ story by story.
     request.
   - It returns 401 `session_revoked` if the row is gone, belongs to another
     tenant, has a revoked PIN, or has a different version.
-  - The version is bumped by: PIN issue/reissue, PIN revoke, role change, and
-    `POST /pos/v1/auth/logout` (which signs that staff member out on every
-    device).
+  - The version is bumped by PIN issue/reissue, PIN revoke, and role change,
+    ending all devices.
+  - Each new token has a unique `jti`. `POST /pos/v1/auth/logout` records that
+    token in the tenant-scoped `revoked_pos_tokens` table with its expiry. The
+    guard refuses it with 401 `session_revoked`; other devices stay signed in.
+    Legacy tokens without `jti` still bump the version on logout to prevent replay.
   - A token with no `sv`, meaning anything issued before #169, is refused, so
     everyone logs in once more after that deploy.
 - **Role from the database.** The role is never in the token; the guard reads it
@@ -1149,6 +1152,14 @@ service directly rather than through an HTTP endpoint)
 
 ## CAP-9 - Refunds and adjustments
 
+Issue #240 (AP-pe-2): authenticated cashiers may refund with a PIN approver
+whose role has `refunds`, whose PIN is active, and whose outlet assignments
+allow the bill's outlet (empty assignments mean all outlets). The refund
+service checks this permission rather than relying on `isManager`. Cashier
+without PIN: 403 `forbidden`; wrong PIN: existing 401 `invalid_credentials`.
+Managers still need a PIN (missing PIN remains 400). Credit notes and audit
+rows retain the PIN approver's ID. See [refund authorization](../../docs/api/refunds.md).
+
 - **Intent:** staff can refund one or more items against an already-
   finalized, immutable Bill (story 8), gated by story 9's manager
   authorisation, with correct tax reversal. Success: a refund never mutates
@@ -1705,3 +1716,9 @@ a real Postgres test DB)
 - **Tests:** `pos-bills.e2e-spec.ts` ▸ "GET /pos/v1/outlets/:outletId/payments".
 - **Not built (by design):** refunds/credit notes in the list (separate
   ledger), pagination, a date picker (today only, per the ask).
+
+### Paid bill line protection (#234)
+
+Once payment starts on an open bill, removing or voiding lines and reducing quantity or modifier price returns `409 bill_has_payments`: “Payment has been taken on this bill. Refund or reverse it before changing lines.” Staff can still add items or increase quantity and collect the remaining balance. The bill row is locked inside the mutation transaction before checking tenders, payment intents and shares.
+
+Follow-up #234: only tenders, active intents and shares marked paid (or with a paid timestamp) block reductions. Declined attempts and unpaid shares allow edits; outstanding share amounts are recalculated before payment. Discard still checks all payment history.
