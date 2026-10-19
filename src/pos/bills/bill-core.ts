@@ -16,6 +16,7 @@
 // scoped barrel (src/pos/bills/index.ts - see eslint.config.mjs's
 // '!**/pos/bills' exception to the pos-module-boundary rule) with no cycle.
 import { BadRequestException, ConflictException, NotFoundException } from '@nestjs/common'
+import { fireOnSend } from '../../kitchen'
 import type { Prisma } from '../../generated/prisma/client'
 import { isTestSale, paymentsSimulatorFor, uuidv7 } from '../../platform'
 import { BillView, InvoiceCreditNoteView, InvoiceLineView, InvoiceView, TaxBreakdownLineView, TenderView } from './bills.dtos'
@@ -455,6 +456,10 @@ export async function commitFinalize(tx: Tx, params: CommitFinalizeParams): Prom
   if (updated.count === 0) {
     throw new ConflictException({ code: 'already_finalized', message: 'This bill has already been finalised' })
   }
+
+  // Every finalize path sends unticketed lines in the settlement transaction.
+  // A failure anywhere in the transaction rolls the kitchen writes back too.
+  await fireOnSend(tx, { id: bill.orderId, tenantId: bill.tenantId, outletId: bill.outletId })
 
   // pos/CAP-2's comment on Order.status calls this out explicitly: "closed"
   // was a placeholder ahead of this exact story - finalising a Bill is what

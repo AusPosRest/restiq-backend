@@ -34,7 +34,6 @@
 // story picks 20% of the bill's subtotal, the example the spec's own memlog
 // floated ("any discount over 20%") - see DISCOUNT_THRESHOLD_FRACTION.
 import { BadRequestException, ConflictException, ForbiddenException, Injectable, NotFoundException } from '@nestjs/common'
-import { KitchenTicketsService } from '../../kitchen'
 import { ManagerApproval, ManagerAuthService, PosPrincipal, RegionRegistryService, roleHasPermission, uuidv7 } from '../../platform'
 import { setTenantContext } from '../tenant-context'
 import { linkedPeripheral, queueFor } from '../device-routing'
@@ -84,7 +83,6 @@ export class BillsService {
   constructor(
     private readonly registry: RegionRegistryService,
     private readonly managerAuth: ManagerAuthService,
-    private readonly tickets: KitchenTicketsService,
   ) {}
 
   private plane() {
@@ -324,11 +322,6 @@ export class BillsService {
           reference: tender.method === 'external' ? tender.reference?.trim() : undefined,
         })
       }
-
-      // restiq-backend#210 (CU-17): a paid order always reaches the kitchen -
-      // anything not yet sent (a counter order settled from Open orders, an
-      // item added after the first send) fires now, in the same transaction.
-      await this.tickets.fireOnSend(tx, { id: bill.orderId, tenantId: bill.tenantId, outletId: bill.outletId })
 
       const final = await commitFinalize(tx, {
         tenantId: staff.tenantId,

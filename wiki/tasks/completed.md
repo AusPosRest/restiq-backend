@@ -1,5 +1,7 @@
 # Completed
 
+- **2026-10-19** - Fire kitchen on every finalize path (issue #228, G3): shared `commitFinalize` sends unticketed lines within the settlement transaction; POS no longer fires separately. E2E covers guest payment of staff-added lines, no duplicate POS tickets, and no kitchen writes on `shift_not_open`.
+
 - **2026-10-11** - Sessions, devices, throttles and access - QA fixes (issue #209):
   - Owner logout: `POST /admin/v1/auth/logout` moves `owner_users.session_version` on (audited `owner.logout`); the signed-out token answers 401 `session_revoked` (SE-9).
   - Devices: enrolment returns a one-time `deviceSecret` (`devices.secret_hash` keeps its sha256). PIN login takes optional `deviceSecret`; only with it does `deviceId` get the till's own throttle bucket, otherwise the address limits apply (SE-12). Login on a revoked device answers 403 `device_revoked`; a session signed in on a till carries `did` and answers 401 `device_revoked` once the till is revoked (SE-11). Devices enrolled before this sign in as untrusted browsers until enrolled again.
