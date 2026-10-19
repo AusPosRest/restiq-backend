@@ -6,7 +6,7 @@
 import type { Prisma } from '../../generated/prisma/client'
 import { ConflictException } from '@nestjs/common'
 import { paymentsSimulatorFor } from '../../platform'
-import { createTenderRecord } from '../bills'
+import { createTenderRecord, lockBill } from '../bills'
 import { PaymentIntentView } from './intents.dtos'
 
 type Tx = Prisma.TransactionClient
@@ -57,7 +57,9 @@ export function toPaymentIntentView(intent: IntentRow): PaymentIntentView {
  */
 export async function confirmIntent(tx: Tx, params: { tenantId: string; intentId: string }): Promise<IntentRow> {
   // #170: a simulated approval is never money - refuse it whenever the simulator is off, whenever the intent was made.
-  const target = await tx.paymentIntent.findUniqueOrThrow({ where: { id: params.intentId }, select: { provider: true } })
+  const target = await tx.paymentIntent.findUniqueOrThrow({ where: { id: params.intentId }, select: { provider: true, billId: true } })
+  // restiq-backend#227 (G2): takes the bill's row lock so a capture racing a cash/other finalize sees locked data.
+  await lockBill(tx, target.billId)
   if (target.provider === 'simulated' && !(await paymentsSimulatorFor(tx, params.tenantId))) {
     throw new ConflictException({ code: 'simulator_disabled', message: 'Simulated card payments are turned off' })
   }

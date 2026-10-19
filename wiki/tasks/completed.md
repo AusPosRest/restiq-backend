@@ -1,6 +1,11 @@
 # Completed
 
 - **2026-10-12** - Lock only this device (issue #242, AP-cu-1): unique POS token ids and tenant-scoped revocations preserve other device sessions while rejecting logout replay. Legacy logout, PIN reset/revoke and role changes retain all-device invalidation. Migration `20261012110000_revoked_pos_tokens` adds forced RLS and tenant/operator read policies.
+- **2026-10-19** - Silent-device alert sweep (issue #233, G26): one-minute background sweep, shared per-device deduplication with page reads, recovery resets alerts, shutdown cleanup, and production webhook requirement. Unit tests cover scheduling, silent-period transitions and config validation; sync-health e2e covers background sweep plus page reads.
+- **2026-10-12** - Bill row locking on guest-pay and card-intent paths (issue #227):
+  - In `src/pos/payments/intent-core.ts` (`confirmIntent`), acquire `lockBill(tx, target.billId)` before checking `bill.status` and creating electronic tender, serializing with cash or other finalizations so late card captures do not write duplicate tenders.
+  - In `src/guest/bills/bills.service.ts` (`payShare`, `payAll`), acquire `lockBill(tx, billId)` immediately inside transaction and refresh bill state under the lock so concurrent share payments, double-taps, or races with whole-bill settlement serialize cleanly.
+  - Added concurrency e2e suite (`test/bill-concurrency.e2e-spec.ts`) covering parallel payShare on the last share, double-tap payShare, parallel distinct payShares, and confirmIntent racing cash finalize.
 
 - **2026-10-11** - Sessions, devices, throttles and access - QA fixes (issue #209):
   - Owner logout: `POST /admin/v1/auth/logout` moves `owner_users.session_version` on (audited `owner.logout`); the signed-out token answers 401 `session_revoked` (SE-9).
