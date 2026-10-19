@@ -3,7 +3,7 @@
 // aggregate globally; there is no payload field to begin with, NFR-15).
 // Every silent device found is pushed through the alert abstraction so a
 // device silent 48h raises an alert with zero customer involvement (SPEC).
-import { BadRequestException, Inject, Injectable } from '@nestjs/common'
+import { BadRequestException, Inject, Injectable, Logger, OnModuleDestroy, OnModuleInit } from '@nestjs/common'
 import type { Prisma } from '../../generated/prisma/client'
 import { RegionRegistryService } from '../../platform'
 import { ALERT_CHANNEL, AlertChannel } from './alert-channel'
@@ -43,11 +43,39 @@ async function setOperatorContext(tx: Prisma.TransactionClient): Promise<void> {
 }
 
 @Injectable()
-export class SyncHealthService {
+export class SyncHealthService implements OnModuleInit, OnModuleDestroy {
+  private readonly logger = new Logger(SyncHealthService.name)
+  private readonly lastAlertedAt = new Map<string, number>()
+  private timer?: ReturnType<typeof setInterval>
+  private sweeping = false
+
   constructor(
     private readonly registry: RegionRegistryService,
     @Inject(ALERT_CHANNEL) private readonly alerts: AlertChannel,
   ) {}
+
+  onModuleInit(): void {
+    if (process.env.NODE_ENV === 'test') return
+    this.timer = setInterval(() => {
+      void this.sweep().catch((error: unknown) => {
+        this.logger.error('Silent-device sweep failed', error instanceof Error ? error.message : error)
+      })
+    }, 60_000)
+  }
+
+  onModuleDestroy(): void {
+    if (this.timer) clearInterval(this.timer)
+  }
+
+  async sweep(): Promise<void> {
+    if (this.sweeping) return
+    this.sweeping = true
+    try {
+      await this.list({})
+    } finally {
+      this.sweeping = false
+    }
+  }
 
   async list(query: Record<string, string | undefined>): Promise<SyncHealthResult> {
     const tenantId = query.tenantId
@@ -66,6 +94,12 @@ export class SyncHealthService {
       })
     })
 
+    if (!tenantId) {
+      const activeIds = new Set(devices.map((device) => device.id))
+      for (const id of this.lastAlertedAt.keys()) {
+        if (!activeIds.has(id)) this.lastAlertedAt.delete(id)
+      }
+    }
     const now = Date.now()
     const summary: Record<Severity, number> = { healthy: 0, lagging: 0, silent: 0 }
     const rows: SyncHealthRow[] = []
@@ -78,14 +112,24 @@ export class SyncHealthService {
       const rowSeverity = classifySeverity(lagSeconds)
       summary[rowSeverity] += 1
 
-      if (rowSeverity === 'silent') {
-        await this.alerts.notifySilentDevice({
-          deviceId: device.id,
-          tenantId: device.tenantId,
-          outletId: device.outletId,
-          lastContactAt: device.lastContactAt ? device.lastContactAt.toISOString() : null,
-          lagSeconds,
-        })
+      const lastAlerted = this.lastAlertedAt.get(device.id)
+      if (rowSeverity !== 'silent') this.lastAlertedAt.delete(device.id)
+      if (rowSeverity === 'silent' && (lastAlerted === undefined || effectiveLastContact.getTime() > lastAlerted)) {
+        // Reserve before awaiting delivery so simultaneous page reads and sweeps
+        // cannot both send the same alert. A newer heartbeat starts a new period.
+        this.lastAlertedAt.set(device.id, now)
+        try {
+          await this.alerts.notifySilentDevice({
+            deviceId: device.id,
+            tenantId: device.tenantId,
+            outletId: device.outletId,
+            lastContactAt: device.lastContactAt ? device.lastContactAt.toISOString() : null,
+            lagSeconds,
+          })
+        } catch (error) {
+          this.lastAlertedAt.delete(device.id)
+          throw error
+        }
       }
 
       rows.push({

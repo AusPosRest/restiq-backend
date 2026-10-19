@@ -1,5 +1,6 @@
 // Public surface of the ops module - cross-module imports go through here.
 export { OpsModule } from './ops.module'
+export { SyncHealthService } from './sync-health/sync-health.service'
 export { ALERT_CHANNEL } from './sync-health/alert-channel'
 export type { AlertChannel, SilentDeviceAlert } from './sync-health/alert-channel'
 // tenant-admin/CAP-6 (AD-12): the one device/enrolment-code implementation,
