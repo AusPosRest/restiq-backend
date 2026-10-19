@@ -1,6 +1,10 @@
 # Completed
 
 - **2026-10-19** - Fire kitchen on every finalize path (issue #228, G3): shared `commitFinalize` sends unticketed lines within the settlement transaction; POS no longer fires separately. E2E covers guest payment of staff-added lines, no duplicate POS tickets, and no kitchen writes on `shift_not_open`.
+- **2026-10-12** - Bill row locking on guest-pay and card-intent paths (issue #227):
+  - In `src/pos/payments/intent-core.ts` (`confirmIntent`), acquire `lockBill(tx, target.billId)` before checking `bill.status` and creating electronic tender, serializing with cash or other finalizations so late card captures do not write duplicate tenders.
+  - In `src/guest/bills/bills.service.ts` (`payShare`, `payAll`), acquire `lockBill(tx, billId)` immediately inside transaction and refresh bill state under the lock so concurrent share payments, double-taps, or races with whole-bill settlement serialize cleanly.
+  - Added concurrency e2e suite (`test/bill-concurrency.e2e-spec.ts`) covering parallel payShare on the last share, double-tap payShare, parallel distinct payShares, and confirmIntent racing cash finalize.
 
 - **2026-10-11** - Sessions, devices, throttles and access - QA fixes (issue #209):
   - Owner logout: `POST /admin/v1/auth/logout` moves `owner_users.session_version` on (audited `owner.logout`); the signed-out token answers 401 `session_revoked` (SE-9).

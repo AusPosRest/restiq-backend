@@ -17,7 +17,7 @@
 // completes it exactly like any other share.
 import { ConflictException, GoneException, Injectable, NotFoundException } from '@nestjs/common'
 import type { Order, Prisma, TableSession } from '../../generated/prisma/client'
-import { buildInvoiceView, commitFinalize, createOrGetBillRecord, createTenderRecord, loadBill, refreshOpenBillTotals, toBillView } from '../../pos/bills'
+import { buildInvoiceView, commitFinalize, createOrGetBillRecord, createTenderRecord, loadBill, lockBill, refreshOpenBillTotals, toBillView } from '../../pos/bills'
 import type { BillWithTenders, InvoiceView } from '../../pos/bills'
 import { confirmIntent } from '../../pos/payments'
 import { GuestPrincipal, paymentsSimulatorEnabled, RegionRegistryService, uuidv7 } from '../../platform'
@@ -174,6 +174,9 @@ export class GuestBillsService {
     const plane = this.plane()
     return plane.$transaction(async (tx) => {
       await setTenantContext(tx, guest.tenantId)
+      // restiq-backend#227 (G2): take the bill's row lock first so concurrent
+      // share payments or finalizes serialize on locked bill data.
+      await lockBill(tx, billId)
       const bill = await refreshOpenBillTotals(tx, await loadBill(tx, guest.tenantId, billId))
       const order = await loadOrderForSession(tx, guest.tenantId, guest.sessionId, bill.orderId)
       if (bill.status === 'finalized') {
@@ -226,6 +229,9 @@ export class GuestBillsService {
     const plane = this.plane()
     return plane.$transaction(async (tx) => {
       await setTenantContext(tx, guest.tenantId)
+      // restiq-backend#227 (G2): take the bill's row lock first so concurrent
+      // payments or whole-bill settlements serialize on locked bill data.
+      await lockBill(tx, billId)
       const bill = await refreshOpenBillTotals(tx, await loadBill(tx, guest.tenantId, billId))
       const order = await loadOrderForSession(tx, guest.tenantId, guest.sessionId, bill.orderId)
       if (bill.status === 'finalized') {
@@ -363,7 +369,8 @@ export class GuestBillsService {
    * lifecycle (qr-self-order CAP-1's "expires on bill settlement" end).
    */
   private async completeBill(tx: Tx, tenantId: string, bill: BillWithTenders, order: Order): Promise<void> {
-    await commitFinalize(tx, { tenantId, bill, discountMinor: null, discountReason: null, finalizedByStaffId: null })
+    const freshBill = await loadBill(tx, tenantId, bill.id)
+    await commitFinalize(tx, { tenantId, bill: freshBill, discountMinor: null, discountReason: null, finalizedByStaffId: null })
     if (order.sessionId) {
       await tx.tableSession.update({ where: { id: order.sessionId }, data: { status: 'settled', closedAt: new Date() } })
     }
