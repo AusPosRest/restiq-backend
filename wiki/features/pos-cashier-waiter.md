@@ -59,9 +59,12 @@ story by story.
     request.
   - It returns 401 `session_revoked` if the row is gone, belongs to another
     tenant, has a revoked PIN, or has a different version.
-  - The version is bumped by: PIN issue/reissue, PIN revoke, role change, and
-    `POST /pos/v1/auth/logout` (which signs that staff member out on every
-    device).
+  - The version is bumped by PIN issue/reissue, PIN revoke, and role change,
+    ending all devices.
+  - Each new token has a unique `jti`. `POST /pos/v1/auth/logout` records that
+    token in the tenant-scoped `revoked_pos_tokens` table with its expiry. The
+    guard refuses it with 401 `session_revoked`; other devices stay signed in.
+    Legacy tokens without `jti` still bump the version on logout to prevent replay.
   - A token with no `sv`, meaning anything issued before #169, is refused, so
     everyone logs in once more after that deploy.
 - **Role from the database.** The role is never in the token; the guard reads it
