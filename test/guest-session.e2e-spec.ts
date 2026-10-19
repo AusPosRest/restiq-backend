@@ -335,6 +335,29 @@ describe('/guest/v1 table sessions (e2e)', () => {
       expect(await prisma.tableSession.count({ where: { tableId } })).toBe(0)
     })
 
+    it('a staff order left open past the 12-hour live window no longer blocks QR on that table (#230); a recent one still does', async () => {
+      const tenantId = await createTenant(prisma)
+      const outletId = await createOutlet(prisma, tenantId)
+      const staleTable = await createTable(prisma, tenantId, outletId)
+      const recentTable = await createTable(prisma, tenantId, outletId, 'T2')
+      await enableQrOrdering(prisma, tenantId, outletId)
+      const stale = await prisma.order.create({ data: { tenantId, outletId, tableId: staleTable, ownerId: null, status: 'sent', createdAt: new Date(Date.now() - 13 * 60 * 60 * 1000) } })
+      await prisma.order.create({ data: { tenantId, outletId, tableId: recentTable, ownerId: null, status: 'open', createdAt: new Date(Date.now() - 11 * 60 * 60 * 1000) } })
+
+      const free = await request(httpServer).get(`/guest/v1/outlets/${outletId}/availability?tableId=${staleTable}`)
+      expect(free.body).toEqual({ available: true })
+      const res = await start(outletId, staleTable)
+      expect(res.status).toBe(201)
+      // A stopgap only: the leftover order is left as it was, never auto-closed.
+      expect((await prisma.order.findUnique({ where: { id: stale.id } }))?.status).toBe('sent')
+
+      const busy = await request(httpServer).get(`/guest/v1/outlets/${outletId}/availability?tableId=${recentTable}`)
+      expect(busy.body).toEqual({ available: false, reason: 'table_busy' })
+      const refused = await start(outletId, recentTable)
+      expect(refused.status).toBe(409)
+      expect((refused.body as ErrorBody).error.code).toBe('table_has_active_order')
+    })
+
     it('reports a table from another outlet as not found', async () => {
       const tenantId = await createTenant(prisma)
       const outletId = await createOutlet(prisma, tenantId)

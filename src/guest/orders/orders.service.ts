@@ -22,7 +22,7 @@ import { BadRequestException, ConflictException, GoneException, Injectable, NotF
 import { resolveComboSelection, resolveCurrentPrice } from '../../admin'
 import type { Order, Prisma, PriceChannel, TableSession, Ticket } from '../../generated/prisma/client'
 import { KitchenTicketsService } from '../../kitchen'
-import { GuestPrincipal, RegionRegistryService, reserveTokenNumber } from '../../platform'
+import { detachStaleTableOrder, GuestPrincipal, RegionRegistryService, reserveTokenNumber } from '../../platform'
 import { isSessionInactive } from '../sessions/sessions.service'
 import { setTenantContext } from '../tenant-context'
 import { GuestOrderStatusView, GuestOrderStep, GuestOrderStepView, GuestSessionOrdersView, PlacedOrderLineModifierView, PlacedOrderLineView, PlacedOrderView } from './orders.dtos'
@@ -159,6 +159,7 @@ export class GuestOrdersService {
       const tokenNumber = kiosk ? await reserveTokenNumber(tx, guest.tenantId, guest.outletId) : null
       // One live order per table (orders_one_active_per_table): say so with a 409 instead of letting the unique index surface as a 500.
       if (session.tableId) {
+        await detachStaleTableOrder(tx, guest.tenantId, session.tableId, { actorId: null, actorEmail: `guest:${guest.name}` })
         const live = await tx.order.findFirst({ where: { tenantId: guest.tenantId, tableId: session.tableId, status: { not: 'closed' } }, select: { id: true } })
         if (live) throw new ConflictException({ code: 'table_has_active_order', message: 'This table already has an order in progress - ask your server to add to it' })
       }

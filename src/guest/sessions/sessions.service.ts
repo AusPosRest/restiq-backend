@@ -5,7 +5,7 @@
 import { ConflictException, ForbiddenException, GoneException, Injectable, NotFoundException } from '@nestjs/common'
 import { randomInt } from 'node:crypto'
 import type { DiningTable, Guest, Outlet, Prisma, TableSession } from '../../generated/prisma/client'
-import { AttemptLimiter, AttemptRule, GuestPrincipal, RegionRegistryService, signGuestToken } from '../../platform'
+import { AttemptLimiter, AttemptRule, GuestPrincipal, liveSince, RegionRegistryService, signGuestToken } from '../../platform'
 import { isUniqueViolation, setGuestEntryContext, setTenantContext } from '../tenant-context'
 import { GuestSummary, JoinSessionDto, KioskSessionStartResult, OutletAvailability, SessionJoinResult, SessionStartResult, StartKioskSessionDto, StartSessionDto, TableSessionView, TableWelcomeView } from './sessions.dtos'
 
@@ -109,7 +109,8 @@ async function isAbandoned(tx: Tx, session: TableSession): Promise<boolean> {
  * cart, rather than at "Place order".
  */
 async function isTableBusy(tx: Tx, tenantId: string, tableId: string): Promise<boolean> {
-  const live = await tx.order.findFirst({ where: { tenantId, tableId, status: { not: 'closed' } }, select: { sessionId: true } })
+  // #230: an order opened before the live window is a leftover, not a busy table.
+  const live = await tx.order.findFirst({ where: { tenantId, tableId, status: { not: 'closed' }, createdAt: { gte: liveSince() } }, select: { sessionId: true } })
   if (!live) return false
   if (!live.sessionId) return true
   const session = await tx.tableSession.findUnique({ where: { id: live.sessionId } })

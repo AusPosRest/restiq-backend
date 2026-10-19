@@ -423,6 +423,30 @@ describe('/guest/v1 checkout and split payment, simulated (e2e)', () => {
       await prisma.orderLine.create({ data: { tenantId, orderId, itemId, quantity: 1, unitPriceMinor: BigInt(priceMinor) } })
     }
 
+    it('fires an unsent staff-added line when a guest pays, without re-sending guest lines (#228)', async () => {
+      const tenantId = await createTenant(prisma)
+      const outletId = await createOutlet(prisma, tenantId)
+      const tableId = await createTable(prisma, tenantId, outletId)
+      await enableQrOrdering(prisma, tenantId, outletId)
+      const itemId = await createItemWithPrice(prisma, tenantId, 10000)
+      const { tokens, orderId } = await placeOrderForGuests(outletId, tableId, itemId, 10000, 1)
+      const originalTickets = await prisma.ticket.findMany({ where: { orderId } })
+      expect(originalTickets).toHaveLength(1)
+      const originalLine = await prisma.orderLine.findFirstOrThrow({ where: { orderId } })
+      await addStaffLine(tenantId, orderId, itemId, 10000)
+      const staffLine = await prisma.orderLine.findFirstOrThrow({ where: { orderId, guestId: null } })
+      expect(await prisma.ticketLine.count({ where: { orderLineId: staffLine.id } })).toBe(0)
+      const bill = (await authed(request(httpServer).post(`/guest/v1/orders/${orderId}/bill`), tokens[0]).send()).body as BillBody
+
+      const paid = await authed(request(httpServer).post(`/guest/v1/bills/${bill.id}/pay-all`), tokens[0]).send({ simulatedOutcome: 'success' })
+      expect(paid.status).toBe(200)
+      expect((paid.body as BillBody).status).toBe('finalized')
+      expect(await prisma.ticketLine.count({ where: { orderLineId: staffLine.id, ticket: { orderId } } })).toBe(1)
+      expect(await prisma.ticketLine.count({ where: { orderLineId: originalLine.id } })).toBe(1)
+      expect(await prisma.ticket.count({ where: { orderId } })).toBe(1)
+      expect(await prisma.ticketEvent.count({ where: { ticketId: originalTickets[0].id, type: 'add_on_fired' } })).toBe(1)
+    })
+
     it('spreads a staff-added line across the guest shares so they sum to the total and the last guest can pay', async () => {
       const tenantId = await createTenant(prisma)
       const outletId = await createOutlet(prisma, tenantId)
