@@ -1,5 +1,6 @@
 # Completed
 
+- **2026-10-19** - Stale open orders stop blocking tables (issue #230, G6, stopgap): `isTableBusy` (guest sessions) and the POS table map ignore orders created more than 12 hours ago, using the KDS live window now shared as `LIVE_WINDOW_MS` / `liveSince()` in `src/platform/live-window.ts`. Orders are not auto-closed. Manager force-close and end-of-day close are still waiting on Q26. E2E in `guest-session` and `pos-orders` covers a stale order (13 h) and a recent one (11 h).
 - **2026-10-19** - Silent-device alert sweep (issue #233, G26): one-minute background sweep, shared per-device deduplication with page reads, recovery resets alerts, shutdown cleanup, and production webhook requirement. Unit tests cover scheduling, silent-period transitions and config validation; sync-health e2e covers background sweep plus page reads.
 - **2026-10-12** - Bill row locking on guest-pay and card-intent paths (issue #227):
   - In `src/pos/payments/intent-core.ts` (`confirmIntent`), acquire `lockBill(tx, target.billId)` before checking `bill.status` and creating electronic tender, serializing with cash or other finalizations so late card captures do not write duplicate tenders.

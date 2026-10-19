@@ -239,6 +239,22 @@ describe('/pos/v1 table map and order ownership (e2e)', () => {
       expect((res.body as ErrorBody).error.code).toBe('invalid_transition')
     })
 
+    it('does not show a table occupied by an order left open past the 12-hour live window (#230); a recent one still is', async () => {
+      const tenantId = await createTenant(prisma)
+      const outletId = await createOutlet(prisma, tenantId)
+      const staleTable = await createTable(prisma, tenantId, outletId)
+      const recentTable = await createTable(prisma, tenantId, outletId, 'T2')
+      const waiter = await createStaff(prisma, tenantId, 'Asha')
+      const stale = await prisma.order.create({ data: { tenantId, outletId, tableId: staleTable, ownerId: waiter.id, status: 'sent', createdAt: new Date(Date.now() - 13 * 60 * 60 * 1000) } })
+      const recent = await prisma.order.create({ data: { tenantId, outletId, tableId: recentTable, ownerId: waiter.id, status: 'open', createdAt: new Date(Date.now() - 11 * 60 * 60 * 1000) } })
+
+      const map = (await authed(request(httpServer).get(`/pos/v1/outlets/${outletId}/table-map`), waiter.token)).body as TableMapEntryBody[]
+      expect(map.find((t) => t.tableId === staleTable)).toMatchObject({ status: 'empty', orderId: null, ownerId: null })
+      expect(map.find((t) => t.tableId === recentTable)).toMatchObject({ status: 'occupied', orderId: recent.id, ownerId: waiter.id })
+      // The leftover order is untouched - not closed or deleted.
+      expect((await prisma.order.findUnique({ where: { id: stale.id } }))?.status).toBe('sent')
+    })
+
     it('claiming an already-occupied table returns the existing order, never a second one', async () => {
       const tenantId = await createTenant(prisma)
       const outletId = await createOutlet(prisma, tenantId)
