@@ -34,7 +34,6 @@
 // story picks 20% of the bill's subtotal, the example the spec's own memlog
 // floated ("any discount over 20%") - see DISCOUNT_THRESHOLD_FRACTION.
 import { BadRequestException, ConflictException, ForbiddenException, Injectable, NotFoundException } from '@nestjs/common'
-import { KitchenTicketsService } from '../../kitchen'
 import { ManagerApproval, ManagerAuthService, PosPrincipal, RegionRegistryService, roleHasPermission, uuidv7 } from '../../platform'
 import { setTenantContext } from '../tenant-context'
 import { linkedPeripheral, queueFor } from '../device-routing'
@@ -84,7 +83,6 @@ export class BillsService {
   constructor(
     private readonly registry: RegionRegistryService,
     private readonly managerAuth: ManagerAuthService,
-    private readonly tickets: KitchenTicketsService,
   ) {}
 
   private plane() {
@@ -332,11 +330,6 @@ export class BillsService {
         })
       }
 
-      // restiq-backend#210 (CU-17): a paid order always reaches the kitchen -
-      // anything not yet sent (a counter order settled from Open orders, an
-      // item added after the first send) fires now, in the same transaction.
-      await this.tickets.fireOnSend(tx, { id: bill.orderId, tenantId: bill.tenantId, outletId: bill.outletId })
-
       const final = await commitFinalize(tx, {
         tenantId: staff.tenantId,
         bill,
@@ -365,6 +358,14 @@ export class BillsService {
    * Bill" success criterion structurally, not just by convention.
    */
   async refund(staff: PosPrincipal, billId: string, dto: RefundBillDto): Promise<CreditNoteView> {
+    if (!dto.managerPin) {
+      if (!roleHasPermission(staff.role, 'refunds')) {
+        throw new ForbiddenException({ code: 'forbidden', message: 'Your role cannot do this' })
+      }
+      // Managers still need PIN approval; preserve the existing validation error.
+      throw new BadRequestException({ code: 'validation_failed', message: 'managerPin must be longer than or equal to 1 characters; managerPin must be a string' })
+    }
+    const managerPin = dto.managerPin
     const plane = this.plane()
     return plane.$transaction(async (tx) => {
       await setTenantContext(tx, staff.tenantId)
@@ -479,7 +480,7 @@ export class BillsService {
       // Refund is unconditionally gated (unlike finalize()'s above-threshold
       // discount) - validate the refund request itself first (cheap), then
       // spend a manager-PIN check only on a request that's actually valid.
-      const approval = await this.managerAuth.authorize('refund', staff.tenantId, bill.outletId, dto.managerPin, dto.reason, staff.id)
+      const approval = await this.managerAuth.authorize('refund', staff.tenantId, bill.outletId, managerPin, dto.reason, staff.id)
 
       const created = await tx.creditNote.create({
         data: {

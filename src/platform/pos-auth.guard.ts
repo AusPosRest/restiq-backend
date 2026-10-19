@@ -12,7 +12,7 @@
 //
 // restiq-backend#169: a valid signature is not enough. Every request re-reads
 // the staff row: a revoked PIN or a sessionVersion that moved on (PIN
-// reissued/revoked, role changed, logout) ends the session at once instead of
+// reissued/revoked, role changed, legacy logout) ends the session at once instead of
 // after the token's 12 hours. The role comes from that row, and the handler's
 // @RequirePermission / @AnyStaff policy is checked against it - a handler with
 // no policy is refused (fail closed).
@@ -92,20 +92,21 @@ export class PosAuthGuard implements CanActivate {
     await this.address.assertTokenMatchesAddress(request, claims.tenantId)
 
     const plane = this.registry.planeFor(this.registry.homeRegion())
-    const { staff, deviceActive, outsideOutlets } = await plane.$transaction(async (tx) => {
+    const { staff, deviceActive, outsideOutlets, tokenRevoked } = await plane.$transaction(async (tx) => {
       await tx.$executeRaw`SELECT set_config('app.tenant_id', ${claims.tenantId}, true)`
       const staffRow = await tx.staffUser.findUnique({
         where: { id: claims.id },
         select: { tenantId: true, name: true, pinRevokedAt: true, sessionVersion: true, outletIds: true, role: { select: { name: true } } },
       })
+      const revoked = claims.token !== undefined && (await tx.revokedPosToken.findUnique({ where: { jti: claims.token.jti } })) !== null
       // restiq-backend#209 (SE-11): a session signed in on an enrolled till ends when that till is revoked.
       const active = claims.deviceId === undefined || (await tx.device.count({ where: { id: claims.deviceId, tenantId: claims.tenantId, status: 'active', revokedAt: null } })) > 0
       // Empty outletIds = works at every outlet (#197), so only restricted staff need the lookups.
       const allowed = staffRow?.outletIds ?? []
       const outside = allowed.length > 0 ? (await outletsReached(tx, request)).some((outletId) => !allowed.includes(outletId)) : false
-      return { staff: staffRow, deviceActive: active, outsideOutlets: outside }
+      return { staff: staffRow, deviceActive: active, outsideOutlets: outside, tokenRevoked: revoked }
     })
-    if (!staff || staff.tenantId !== claims.tenantId || staff.pinRevokedAt || staff.sessionVersion !== claims.sessionVersion) {
+    if (tokenRevoked || !staff || staff.tenantId !== claims.tenantId || staff.pinRevokedAt || staff.sessionVersion !== claims.sessionVersion) {
       throw new UnauthorizedException({ code: 'session_revoked', message: 'This session has ended - log in again' })
     }
     if (!deviceActive) {
@@ -123,7 +124,7 @@ export class PosAuthGuard implements CanActivate {
       throw new ForbiddenException({ code: 'forbidden', message: 'Your role cannot do this' })
     }
 
-    request.staff = { id: claims.id, tenantId: claims.tenantId, outletId: claims.outletId, name: staff.name, role: staff.role.name }
+    request.staff = { id: claims.id, tenantId: claims.tenantId, outletId: claims.outletId, name: staff.name, role: staff.role.name, ...(claims.token ? { token: claims.token } : {}) }
     return true
   }
 }

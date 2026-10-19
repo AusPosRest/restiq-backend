@@ -300,7 +300,7 @@ describe('/pos/v1 bill and settle (e2e)', () => {
   }
 
   /** Opens a table order, adds one line at priceMinor, sends it to the kitchen. Returns the order id and the owner's token. */
-  async function setUpSentOrder(tenantId: string, outletId: string, priceMinor: number): Promise<{ orderId: string; ownerToken: string; ownerId: string }> {
+  async function setUpSentOrder(tenantId: string, outletId: string, priceMinor: number, send = true): Promise<{ orderId: string; ownerToken: string; ownerId: string }> {
     const tableId = await createTable(prisma, tenantId, outletId)
     const owner = await createStaff(prisma, tenantId, outletId, 'Asha')
     const itemId = await createItemWithPrice(prisma, tenantId, priceMinor)
@@ -308,7 +308,7 @@ describe('/pos/v1 bill and settle (e2e)', () => {
     const opened = await authed(request(httpServer).post(`/pos/v1/outlets/${outletId}/tables/${tableId}/order`), owner.token).send()
     const orderId = (opened.body as OrderBody).id
     await authed(request(httpServer).post(`/pos/v1/orders/${orderId}/lines`), owner.token).send({ itemId, quantity: 2 })
-    await authed(request(httpServer).patch(`/pos/v1/orders/${orderId}/status`), owner.token).send({ status: 'sent' })
+    if (send) await authed(request(httpServer).patch(`/pos/v1/orders/${orderId}/status`), owner.token).send({ status: 'sent' })
 
     return { orderId, ownerToken: owner.token, ownerId: owner.id }
   }
@@ -490,6 +490,29 @@ describe('/pos/v1 bill and settle (e2e)', () => {
       })
       expect(second.status).toBe(409)
       expect((second.body as ErrorBody).error.code).toBe('already_finalized')
+    })
+
+    it('fires unsent POS lines exactly once and fires nothing when shift_not_open (#228)', async () => {
+      const tenantId = await createTenant(prisma)
+      const outletId = await createOutlet(prisma, tenantId)
+      const { orderId, ownerToken } = await setUpSentOrder(tenantId, outletId, 10000, false)
+      await prisma.shift.updateMany({ where: { outletId }, data: { closedAt: new Date() } })
+      const billId = ((await authed(request(httpServer).post(`/pos/v1/orders/${orderId}/bill`), ownerToken).send()).body as BillBody).id
+      const finalize = () => authed(request(httpServer).post(`/pos/v1/bills/${billId}/finalize`), ownerToken).send({ tenders: [{ method: 'cash', amountMinor: 21000 }] })
+
+      const refused = await finalize()
+      expect(refused.status).toBe(409)
+      expect((refused.body as ErrorBody).error.code).toBe('shift_not_open')
+      expect(await prisma.ticket.count({ where: { orderId } })).toBe(0)
+      expect(await prisma.ticketLine.count({ where: { orderLine: { orderId } } })).toBe(0)
+      await authed(request(httpServer).post('/pos/v1/shifts'), ownerToken).send({ outletId, floatMinor: 100000 }).expect(201)
+      await finalize().expect(200)
+      expect(await prisma.ticket.count({ where: { orderId } })).toBe(1)
+      expect(await prisma.ticketLine.count({ where: { orderLine: { orderId } } })).toBe(1)
+      await finalize().expect(409)
+      expect(await prisma.ticket.count({ where: { orderId } })).toBe(1)
+      expect(await prisma.ticketLine.count({ where: { orderLine: { orderId } } })).toBe(1)
+      expect(await prisma.ticketEvent.count({ where: { ticket: { orderId }, type: 'add_on_fired' } })).toBe(0)
     })
 
     it('takes a provisioning tenant live on its first finalised bill, audited once (issue #189)', async () => {
