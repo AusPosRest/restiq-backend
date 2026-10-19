@@ -6,6 +6,9 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+### Added
+- Per-tenant India CGST/SGST rounding (#244): `gstSplitRounding` (`exact_total` default, `equal_half_up`, `equal_half_even`) on `GET`/`PUT /admin/v1/tax-registration`, stored in `tenant_tax_registrations.gst_split_rounding` (migration `20261019100000_gst_split_rounding`). POS and guest bill responses add `gstSplitRounding` (null for AU, IGST and composition). Finalized bills keep their stored tax lines.
+
 ### Fixed
 - India CGST/SGST no longer over-collects a paisa: total GST is rounded once, then split CGST = lower half, SGST = remainder (Rs 289 at 5% is 14.45 = 7.22 + 7.23, was 14.46). Applies to bills, bill preview, invoices, refunds and reports, which all read the same tax result; IGST and AU GST unchanged (#244, AP-cu-15).
 - Bill row locking under concurrency (#227): acquire `lockBill` row lock inside transaction for `confirmIntent`, `payShare`, and `payAll` to serialize concurrent payments, prevent duplicate tenders, and avoid unfinalizable tender mismatch states.

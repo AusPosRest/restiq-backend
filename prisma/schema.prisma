@@ -218,6 +218,13 @@ enum TaxRegistrationType {
   abn
 }
 
+// India CGST/SGST odd-paisa rule (restiq-backend#244) - see tax.ts's computeTax().
+enum GstSplitRounding {
+  exact_total
+  equal_half_up
+  equal_half_even
+}
+
 model TenantTaxRegistration {
   id                 String              @id @default(uuid(7)) @db.Uuid
   tenantId           String              @map("tenant_id") @db.Uuid
@@ -233,6 +240,8 @@ model TenantTaxRegistration {
   // Null means "use the profile default" (5% IN, 10% AU) - tax.ts's
   // computeTax() only overrides the default when this is non-null.
   gstRatePercent     Decimal?            @map("gst_rate_percent") @db.Decimal(5, 2)
+  // Only used for an IN CGST/SGST split; ignored for IGST, composition and AU.
+  gstSplitRounding   GstSplitRounding    @default(exact_total) @map("gst_split_rounding")
   createdAt          DateTime            @default(now()) @map("created_at") @db.Timestamptz(6)
 
   tenant Tenant @relation(fields: [tenantId], references: [id])

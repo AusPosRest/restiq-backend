@@ -20,7 +20,7 @@ import type { Prisma } from '../../generated/prisma/client'
 import { isTestSale, paymentsSimulatorFor, uuidv7 } from '../../platform'
 import { BillView, InvoiceCreditNoteView, InvoiceLineView, InvoiceView, TaxBreakdownLineView, TenderView } from './bills.dtos'
 import { placeOfSupplyFromGstin, RESTAURANT_SAC } from './gst-place-of-supply'
-import { computeTax, TaxBreakdownLine, TaxCountry, TaxResult } from './tax'
+import { computeTax, GstSplitRounding, TaxCountry, TaxResult } from './tax'
 
 type Tx = Prisma.TransactionClient
 
@@ -34,6 +34,7 @@ export interface TenantTaxProfile {
   compositionScheme: boolean
   gstRegistered: boolean
   gstRatePercent: number | null
+  gstSplitRounding: GstSplitRounding
   legalEntityName: string | null
   registrationNumber: string | null
   fssaiLicense: string | null
@@ -73,6 +74,7 @@ export async function loadTenantTaxProfile(tx: Tx, tenantId: string): Promise<Te
     compositionScheme: registration?.compositionScheme ?? false,
     gstRegistered: registration?.gstRegistered ?? true,
     gstRatePercent: registration?.gstRatePercent != null ? Number(registration.gstRatePercent) : null,
+    gstSplitRounding: registration?.gstSplitRounding ?? 'exact_total',
     legalEntityName: registration?.legalEntityName ?? tenant.name,
     registrationNumber: registration?.registrationNumber ?? null,
     fssaiLicense: registration?.fssaiLicense ?? null,
@@ -90,18 +92,26 @@ export async function loadTenantTaxProfile(tx: Tx, tenantId: string): Promise<Te
 // invoice built later must read the note that actually applied at billing
 // time, not one freshly recomputed against whatever the tenant's tax
 // registration says today.
+// gstSplitRounding (restiq-backend#244) is the CGST/SGST rule the lines were
+// computed with - snapshotted for the same reason, so a finalized bill keeps
+// reporting the rule it was billed under after the tenant changes it.
 interface StoredTaxBreakdown {
   lines: TaxBreakdownLineView[]
   notes: string[]
+  gstSplitRounding: GstSplitRounding | null
 }
 
-function toStoredTaxBreakdown(lines: TaxBreakdownLine[], notes: string[]): StoredTaxBreakdown {
-  return { lines: lines.map((l) => ({ label: l.label, ratePercent: l.ratePercent, amountMinor: Number(l.amountMinor) })), notes }
+function toStoredTaxBreakdown(tax: TaxResult): StoredTaxBreakdown {
+  return {
+    lines: tax.breakdown.map((l) => ({ label: l.label, ratePercent: l.ratePercent, amountMinor: Number(l.amountMinor) })),
+    notes: tax.notes,
+    gstSplitRounding: tax.gstSplitRounding,
+  }
 }
 
 function readStoredTaxBreakdown(taxBreakdown: Prisma.JsonValue | null): StoredTaxBreakdown {
-  const stored = taxBreakdown as StoredTaxBreakdown | null
-  return { lines: stored?.lines ?? [], notes: stored?.notes ?? [] }
+  const stored = taxBreakdown as Partial<StoredTaxBreakdown> | null
+  return { lines: stored?.lines ?? [], notes: stored?.notes ?? [], gstSplitRounding: stored?.gstSplitRounding ?? null }
 }
 
 export function isUniqueViolation(error: unknown): boolean {
@@ -152,6 +162,7 @@ export function toBillView(bill: BillWithTenders): BillView {
     // [] rather than null for a pre-migration bill that predates this
     // column, so callers never need a null check on top of an array one.
     taxBreakdown: readStoredTaxBreakdown(bill.taxBreakdown).lines,
+    gstSplitRounding: readStoredTaxBreakdown(bill.taxBreakdown).gstSplitRounding,
     pricesIncludeTax: bill.pricesIncludeTax,
     discountMinor: bill.discountMinor === null ? null : Number(bill.discountMinor),
     discountReason: bill.discountReason,
@@ -246,6 +257,7 @@ async function computeTaxOn(tx: Tx, tenantId: string, taxableMinor: bigint): Pro
     compositionScheme: taxContext.compositionScheme,
     gstRegistered: taxContext.gstRegistered,
     gstRatePercent: taxContext.gstRatePercent,
+    gstSplitRounding: taxContext.gstSplitRounding,
     subtotalMinor: taxableMinor,
   })
 }
@@ -265,13 +277,14 @@ async function computeBillTotals(tx: Tx, tenantId: string, orderId: string): Pro
 export async function refreshOpenBillTotals(tx: Tx, bill: BillWithTenders): Promise<BillWithTenders> {
   if (bill.status !== 'open') return bill
   const { subtotalMinor, tax } = await computeBillTotals(tx, bill.tenantId, bill.orderId)
-  if (subtotalMinor === bill.subtotalMinor && tax.taxMinor === bill.taxMinor) return bill
+  // gstSplitRounding too (#244): a changed rule can leave taxMinor equal.
+  if (subtotalMinor === bill.subtotalMinor && tax.taxMinor === bill.taxMinor && tax.gstSplitRounding === readStoredTaxBreakdown(bill.taxBreakdown).gstSplitRounding) return bill
   return tx.bill.update({
     where: { id: bill.id },
     data: {
       subtotalMinor,
       taxMinor: tax.taxMinor,
-      taxBreakdown: toStoredTaxBreakdown(tax.breakdown, tax.notes) as unknown as Prisma.InputJsonValue,
+      taxBreakdown: toStoredTaxBreakdown(tax) as unknown as Prisma.InputJsonValue,
       pricesIncludeTax: tax.pricesIncludeTax,
     },
     include: BILL_INCLUDE,
@@ -302,7 +315,7 @@ export async function createOrGetBillRecord(tx: Tx, params: CreateBillParams): P
         orderId: params.orderId,
         subtotalMinor,
         taxMinor: tax.taxMinor,
-        taxBreakdown: toStoredTaxBreakdown(tax.breakdown, tax.notes) as unknown as Prisma.InputJsonValue,
+        taxBreakdown: toStoredTaxBreakdown(tax) as unknown as Prisma.InputJsonValue,
         pricesIncludeTax: tax.pricesIncludeTax,
         createdByStaffId: params.createdByStaffId,
       },
@@ -445,7 +458,7 @@ export async function commitFinalize(tx: Tx, params: CommitFinalizeParams): Prom
       discountReason: params.discountReason,
       ...(tax && {
         taxMinor: tax.taxMinor,
-        taxBreakdown: toStoredTaxBreakdown(tax.breakdown, tax.notes) as unknown as Prisma.InputJsonValue,
+        taxBreakdown: toStoredTaxBreakdown(tax) as unknown as Prisma.InputJsonValue,
       }),
       status: 'finalized',
       finalizedByStaffId: params.finalizedByStaffId,

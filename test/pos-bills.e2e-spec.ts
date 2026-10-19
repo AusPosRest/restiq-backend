@@ -16,7 +16,7 @@ import request from 'supertest'
 import { afterAll, beforeAll, beforeEach, describe, expect, it } from 'vitest'
 import { AppModule } from '../src/app.module'
 import { createPrismaClient, PrismaClient } from '../src/db/client'
-import { signPosToken, uuidv7 } from '../src/platform'
+import { signAdminToken, signPosToken, uuidv7 } from '../src/platform'
 
 interface ErrorBody {
   error: { code: string; message: string }
@@ -41,6 +41,7 @@ interface BillBody {
   subtotalMinor: number
   taxMinor: number
   taxBreakdown: TaxBreakdownLineBody[]
+  gstSplitRounding: 'exact_total' | 'equal_half_up' | 'equal_half_even' | null
   pricesIncludeTax: boolean
   discountMinor: number | null
   discountReason: string | null
@@ -860,6 +861,78 @@ describe('/pos/v1 bill and settle (e2e)', () => {
       expect(bill.taxMinor).toBe(0)
       expect(bill.taxBreakdown).toEqual([])
       expect(bill.totalMinor).toBe(11000)
+    })
+  })
+
+  describe('per-tenant GST split rounding (#244)', () => {
+    const adminToken = (tenantId: string): string => signAdminToken({ id: uuidv7(), tenantId, email: 'owner@spiceroute.example' })
+    const split = (bill: BillBody): number[] => bill.taxBreakdown.map((l) => l.amountMinor)
+
+    it.each([
+      ['exact_total', [722, 723], 1445],
+      ['equal_half_up', [723, 723], 1446],
+      ['equal_half_even', [722, 722], 1444],
+    ] as const)('%s set through the owner tax settings drives the Rs 289 bill preview and finalize', async (mode, lines, taxMinor) => {
+      const tenantId = await createTenant(prisma)
+      await createTaxRegistration(prisma, tenantId, { taxProfile: 'India GST - CGST/SGST split', registrationType: 'gstin' })
+      const put = await authed(request(httpServer).put('/admin/v1/tax-registration'), adminToken(tenantId)).send({ gstSplitRounding: mode })
+      expect(put.status).toBe(200)
+      expect((put.body as { gstSplitRounding: string }).gstSplitRounding).toBe(mode)
+
+      const outletId = await createOutlet(prisma, tenantId)
+      const { orderId, ownerToken } = await setUpSentOrder(tenantId, outletId, 14450) // 2 x 14450 = 28900
+      const preview = (await authed(request(httpServer).post(`/pos/v1/orders/${orderId}/bill`), ownerToken).send()).body as BillBody
+      expect(split(preview)).toEqual([...lines])
+      expect(preview.taxMinor).toBe(taxMinor)
+      expect(preview.gstSplitRounding).toBe(mode)
+
+      const res = await authed(request(httpServer).post(`/pos/v1/bills/${preview.id}/finalize`), ownerToken).send({
+        tenders: [{ method: 'cash', amountMinor: 28900 + taxMinor }],
+      })
+      expect(res.status).toBe(200)
+      const final = res.body as BillBody
+      expect(split(final)).toEqual([...lines])
+      expect(final.totalMinor).toBe(28900 + taxMinor)
+      expect(final.gstSplitRounding).toBe(mode)
+    })
+
+    it('an open bill follows a changed setting; a finalized bill keeps its stored lines', async () => {
+      const tenantId = await createTenant(prisma)
+      const outletId = await createOutlet(prisma, tenantId)
+      const { orderId, ownerToken } = await setUpSentOrder(tenantId, outletId, 14450)
+      const billId = ((await authed(request(httpServer).post(`/pos/v1/orders/${orderId}/bill`), ownerToken).send()).body as BillBody).id
+
+      // No tax registration row yet: PUT creates it with the chosen rule.
+      expect((await authed(request(httpServer).put('/admin/v1/tax-registration'), adminToken(tenantId)).send({ gstSplitRounding: 'equal_half_up' })).status).toBe(200)
+      const open = (await authed(request(httpServer).get(`/pos/v1/bills/${billId}`), ownerToken)).body as BillBody
+      expect(split(open)).toEqual([723, 723])
+      expect(open.gstSplitRounding).toBe('equal_half_up')
+
+      expect((await authed(request(httpServer).post(`/pos/v1/bills/${billId}/finalize`), ownerToken).send({ tenders: [{ method: 'cash', amountMinor: 30346 }] })).status).toBe(200)
+
+      expect((await authed(request(httpServer).put('/admin/v1/tax-registration'), adminToken(tenantId)).send({ gstSplitRounding: 'equal_half_even' })).status).toBe(200)
+      const after = (await authed(request(httpServer).get(`/pos/v1/bills/${billId}`), ownerToken)).body as BillBody
+      expect(split(after)).toEqual([723, 723])
+      expect(after.taxMinor).toBe(1446)
+      expect(after.gstSplitRounding).toBe('equal_half_up')
+      const invoice = await authed(request(httpServer).get(`/pos/v1/bills/${billId}/invoice`), ownerToken)
+      expect(invoice.body).toMatchObject({ taxMinor: 1446, totalMinor: 30346 })
+    })
+
+    it('IGST and composition bills report gstSplitRounding null', async () => {
+      const igstTenant = await createTenant(prisma)
+      await createTaxRegistration(prisma, igstTenant, { taxProfile: 'Interstate supply - IGST', registrationType: 'gstin' })
+      const igst = await setUpSentOrder(igstTenant, await createOutlet(prisma, igstTenant), 14450)
+      const igstBill = (await authed(request(httpServer).post(`/pos/v1/orders/${igst.orderId}/bill`), igst.ownerToken).send()).body as BillBody
+      expect(igstBill.taxBreakdown).toEqual([{ label: 'IGST', ratePercent: 5, amountMinor: 1445 }])
+      expect(igstBill.gstSplitRounding).toBeNull()
+
+      const compTenant = await createTenant(prisma, 'Composition Cafe')
+      await createTaxRegistration(prisma, compTenant, { taxProfile: 'India GST', registrationType: 'gstin', compositionScheme: true })
+      const comp = await setUpSentOrder(compTenant, await createOutlet(prisma, compTenant), 14450)
+      const compBill = (await authed(request(httpServer).post(`/pos/v1/orders/${comp.orderId}/bill`), comp.ownerToken).send()).body as BillBody
+      expect(compBill.taxMinor).toBe(0)
+      expect(compBill.gstSplitRounding).toBeNull()
     })
   })
 
