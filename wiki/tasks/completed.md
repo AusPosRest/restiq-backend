@@ -1,5 +1,6 @@
 # Completed
 
+- **2026-10-19** - GST split rounding (issue #244, AP-cu-15): `computeTax` in `src/pos/bills/tax.ts` rounds total CGST+SGST once and splits it floor-half / remainder, so the lines always add up to the rounded total. Replaces the CU-11 rule of rounding each half up. Unit tests for the Rs 289 case and a discounted odd-paisa case; pos-bills and pos-refunds e2e updated.
 - **2026-10-12** - Lock only this device (issue #242, AP-cu-1): unique POS token ids and tenant-scoped revocations preserve other device sessions while rejecting logout replay. Legacy logout, PIN reset/revoke and role changes retain all-device invalidation. Migration `20261012110000_revoked_pos_tokens` adds forced RLS and tenant/operator read policies.
 - **2026-10-19** - Silent-device alert sweep (issue #233, G26): one-minute background sweep, shared per-device deduplication with page reads, recovery resets alerts, shutdown cleanup, and production webhook requirement. Unit tests cover scheduling, silent-period transitions and config validation; sync-health e2e covers background sweep plus page reads.
 - **2026-10-12** - Bill row locking on guest-pay and card-intent paths (issue #227):

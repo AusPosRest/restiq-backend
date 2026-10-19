@@ -595,7 +595,7 @@ describe('/pos/v1 bill and settle (e2e)', () => {
     })
 
     describe('tax on a discounted bill (SE-2)', () => {
-      it('IN: GST is charged on subtotal - discount, CGST and SGST equal, and the invoice agrees', async () => {
+      it('IN: GST is charged on subtotal - discount, CGST + SGST equal the rounded total, and the invoice agrees (#244)', async () => {
         const tenantId = await createTenant(prisma)
         await createTaxRegistration(prisma, tenantId, { taxProfile: 'India GST - CGST/SGST split', registrationType: 'gstin' })
         const outletId = await createOutlet(prisma, tenantId)
@@ -611,23 +611,23 @@ describe('/pos/v1 bill and settle (e2e)', () => {
         expect(stale.status).toBe(400)
         expect((stale.body as ErrorBody).error.code).toBe('tender_mismatch')
 
-        // Taxable 52020; 2.5% = 1300.5 -> 1301 each; total 52020 + 2602 = 54622.
+        // Taxable 52020; 5% = 2601, split 1300 + 1301; total 52020 + 2601 = 54621.
         const res = await authed(request(httpServer).post(`/pos/v1/bills/${billId}/finalize`), ownerToken).send({
           discountMinor: 5780,
           discountReason: '10 pct',
-          tenders: [{ method: 'cash', amountMinor: 54622 }],
+          tenders: [{ method: 'cash', amountMinor: 54621 }],
         })
         expect(res.status).toBe(200)
         const bill = res.body as BillBody
-        expect(bill.taxMinor).toBe(2602)
+        expect(bill.taxMinor).toBe(2601)
         expect(bill.taxBreakdown).toEqual([
-          { label: 'CGST', ratePercent: 2.5, amountMinor: 1301 },
+          { label: 'CGST', ratePercent: 2.5, amountMinor: 1300 },
           { label: 'SGST', ratePercent: 2.5, amountMinor: 1301 },
         ])
-        expect(bill.totalMinor).toBe(54622)
+        expect(bill.totalMinor).toBe(54621)
 
         const invoice = await authed(request(httpServer).get(`/pos/v1/bills/${billId}/invoice`), ownerToken)
-        expect(invoice.body).toMatchObject({ subtotalMinor: 57800, discountMinor: 5780, taxMinor: 2602, totalMinor: 54622 })
+        expect(invoice.body).toMatchObject({ subtotalMinor: 57800, discountMinor: 5780, taxMinor: 2601, totalMinor: 54621 })
       })
 
       it('AU: the GST share is backed out of the discounted price', async () => {

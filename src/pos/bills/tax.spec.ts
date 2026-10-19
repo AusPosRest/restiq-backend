@@ -93,8 +93,8 @@ describe('computeTax', () => {
     expect(withComposition.notes).toEqual([])
   })
 
-  it('rounding: IN CGST and SGST are each rounded on their own and always equal (CU-11)', () => {
-    // 30 * 2.5% = 0.75 -> round-half-up 1 each; tax = 2.
+  it('rounding: IN total GST is rounded once, then split CGST = lower half, SGST = remainder (#244)', () => {
+    // 30 * 5% = 1.5 -> round-half-up 2; split 1 + 1.
     const result = computeTax({ country: 'IN', gstRegistered: true, taxProfile: '', compositionScheme: false, subtotalMinor: 30n })
     expect(result.taxMinor).toBe(2n)
     expect(result.breakdown).toEqual([
@@ -103,11 +103,21 @@ describe('computeTax', () => {
     ])
   })
 
-  it('rounding: IN CGST/SGST never differ by a paisa - 52020 at 5% is 1301 + 1301, not 1301 + 1300 (CU-11)', () => {
-    // 52020 * 2.5% = 1300.5 -> round-half-up 1301 per half.
+  it('rounding: Rs 289 at 5% is GST 14.45 (7.22 + 7.23), never 14.46 (#244, AP-cu-15)', () => {
+    const result = computeTax({ country: 'IN', gstRegistered: true, taxProfile: 'India GST - CGST/SGST split', compositionScheme: false, subtotalMinor: 28900n })
+    expect(result.taxMinor).toBe(1445n)
+    expect(result.breakdown).toEqual([
+      { label: 'CGST', ratePercent: 2.5, amountMinor: 722n },
+      { label: 'SGST', ratePercent: 2.5, amountMinor: 723n },
+    ])
+    expect(sumBreakdown(result.breakdown)).toBe(result.taxMinor)
+  })
+
+  it('rounding: a discounted taxable value with odd-paisa GST still splits to the rounded total (#244)', () => {
+    // 52020 * 5% = 2601 -> 1300 + 1301 (rounding each half up gave 2602).
     const result = computeTax({ country: 'IN', gstRegistered: true, taxProfile: '', compositionScheme: false, subtotalMinor: 52020n })
-    expect(result.breakdown.map((l) => l.amountMinor)).toEqual([1301n, 1301n])
-    expect(result.taxMinor).toBe(2602n)
+    expect(result.taxMinor).toBe(2601n)
+    expect(result.breakdown.map((l) => l.amountMinor)).toEqual([1300n, 1301n])
     expect(sumBreakdown(result.breakdown)).toBe(result.taxMinor)
   })
 

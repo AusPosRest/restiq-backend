@@ -254,10 +254,10 @@ describe('/pos/v1 refunds and adjustments (e2e)', () => {
 
     const created = await authed(request(httpServer).post(`/pos/v1/orders/${orderId}/bill`), owner.token).send()
     const billId = (created.body as BillBody).id
-    // IN, no tax registration: 5% as CGST + SGST, each rounded on the
-    // discounted value (SE-2) - mirrored here so the tender matches exactly.
+    // IN, no tax registration: 5% GST rounded once on the discounted value
+    // (SE-2, #244) - mirrored here so the tender matches exactly.
     const netMinor = (created.body as BillBody).subtotalMinor - (opts.discountMinor ?? 0)
-    const totalMinor = netMinor + 2 * Math.round((netMinor * 2.5) / 100)
+    const totalMinor = netMinor + Math.round((netMinor * 5) / 100)
 
     const finalized = await authed(request(httpServer).post(`/pos/v1/bills/${billId}/finalize`), owner.token).send({
       ...(opts.discountMinor && { discountMinor: opts.discountMinor, discountReason: 'Regular customer' }),

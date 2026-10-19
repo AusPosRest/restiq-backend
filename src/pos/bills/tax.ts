@@ -71,17 +71,19 @@ export function computeTax(params: ComputeTaxParams): TaxResult {
       return { taxMinor: amountMinor, pricesIncludeTax: false, breakdown: [{ label: 'IGST', ratePercent: Number(rateBasis) / 100, amountMinor }], notes: [] }
     }
 
-    // CGST/SGST split (CU-11): each is levied at half the rate on the same
-    // taxable value, so each is rounded on its own and the two are always
-    // equal - never a one-paisa mismatch between the lines. taxMinor is
-    // their sum, so the lines still add up to it exactly.
-    const halfMinor = roundHalfUp(subtotalMinor * rateBasis, 20_000n)
+    // CGST/SGST split (restiq-backend#244, AP-cu-15): total GST is rounded
+    // once, exactly like IGST, then split - CGST takes the lower half, SGST
+    // the remainder - so the lines always add up to taxMinor and rounding
+    // each half up never over-collects a paisa (289.00 at 5% is 14.45 =
+    // 7.22 + 7.23, not 7.23 + 7.23).
+    const taxMinor = roundHalfUp(subtotalMinor * rateBasis, 10_000n)
+    const cgstMinor = taxMinor / 2n
     return {
-      taxMinor: 2n * halfMinor,
+      taxMinor,
       pricesIncludeTax: false,
       breakdown: [
-        { label: 'CGST', ratePercent: Number(rateBasis) / 200, amountMinor: halfMinor },
-        { label: 'SGST', ratePercent: Number(rateBasis) / 200, amountMinor: halfMinor },
+        { label: 'CGST', ratePercent: Number(rateBasis) / 200, amountMinor: cgstMinor },
+        { label: 'SGST', ratePercent: Number(rateBasis) / 200, amountMinor: taxMinor - cgstMinor },
       ],
       notes: [],
     }
