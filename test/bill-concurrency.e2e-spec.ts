@@ -459,11 +459,12 @@ describe('bill concurrency & row locking (restiq-backend#227, G2)', () => {
       expect(tenders).toHaveLength(1)
 
       const billRow = await prisma.bill.findUniqueOrThrow({ where: { id: billId } })
-      expect(billRow.status).toBe('finalized')
 
       // Case A (cash won lock): cash finalize is 200, intent simulate is 200 with late_capture_refund_due.
-      // Case B (intent won lock): intent simulate is 200, cash finalize is 400 (tender_mismatch).
+      // Case B (intent won lock): intent simulate is 200, cash finalize is 400 (tender_mismatch); the card tender
+      // does not finalize the bill by itself, so it stays open for the cashier to finalize.
       if (tenders[0].method === 'cash') {
+        expect(billRow.status).toBe('finalized')
         expect(resCash.status).toBe(200)
         expect(resSimulate.status).toBe(200)
         const intentRow = await prisma.paymentIntent.findUniqueOrThrow({ where: { id: intentId } })
@@ -471,6 +472,7 @@ describe('bill concurrency & row locking (restiq-backend#227, G2)', () => {
         expect(intentRow.failureReason).toBe('late_capture_refund_due')
       } else {
         expect(tenders[0].method).toBe('card_terminal')
+        expect(billRow.status).toBe('open')
         expect(resSimulate.status).toBe(200)
         expect(resCash.status).toBe(400)
         expect((resCash.body as ErrorBody).error.code).toBe('tender_mismatch')
