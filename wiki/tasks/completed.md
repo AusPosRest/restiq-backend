@@ -1,5 +1,6 @@
 # Completed
 
+- **2026-10-19** - Expo keeps paid orders as Ready (issue #243, AP-cu-5): `GET /kitchen/v1/outlets/:outletId/expo` also returns an order with a finalized, unrefunded bill whose tickets were all bumped inside the Done-tab window (`BUMPED_WINDOW_MS`). Kitchen e2e covers paid counter order ready after bump, gone after the window, refunded hidden, unpaid table order unchanged.
 - **2026-10-19** - Silent-device alert sweep (issue #233, G26): one-minute background sweep, shared per-device deduplication with page reads, recovery resets alerts, shutdown cleanup, and production webhook requirement. Unit tests cover scheduling, silent-period transitions and config validation; sync-health e2e covers background sweep plus page reads.
 - **2026-10-12** - Bill row locking on guest-pay and card-intent paths (issue #227):
   - In `src/pos/payments/intent-core.ts` (`confirmIntent`), acquire `lockBill(tx, target.billId)` before checking `bill.status` and creating electronic tender, serializing with cash or other finalizations so late card captures do not write duplicate tenders.
