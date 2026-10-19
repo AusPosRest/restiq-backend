@@ -1,6 +1,8 @@
 # Completed
 
 - **2026-10-19** - GST split rounding (issue #244, AP-cu-15): `computeTax` in `src/pos/bills/tax.ts` rounds total CGST+SGST once and splits it floor-half / remainder, so the lines always add up to the rounded total. Replaces the CU-11 rule of rounding each half up. Unit tests for the Rs 289 case and a discounted odd-paisa case; pos-bills and pos-refunds e2e updated.
+- **2026-10-12** - Cashier refund manager override (issue #240, AP-pe-2): refund guard accepts authenticated staff; shared PIN verification enforces the approver's `refunds` permission, active PIN, tenant and bill outlet access. Missing cashier approval stays 403; invalid PIN stays 401; managers still need a PIN. Existing credit-note/audit approver fields retained. E2e covers approval, no PIN, wrong/unprivileged/revoked/cross-tenant/outlet PINs and permission independent of `isManager`. No migration.
+- **2026-10-12** - QR guest line notes (#231): nullable cart notes, trimmed 200-character validation on add/update, cart response and order placement propagation. Migration `20261012100100_cart_line_note`; end-to-end coverage includes kitchen visibility and separate lines.
 - **2026-10-12** - Lock only this device (issue #242, AP-cu-1): unique POS token ids and tenant-scoped revocations preserve other device sessions while rejecting logout replay. Legacy logout, PIN reset/revoke and role changes retain all-device invalidation. Migration `20261012110000_revoked_pos_tokens` adds forced RLS and tenant/operator read policies.
 - **2026-10-19** - Silent-device alert sweep (issue #233, G26): one-minute background sweep, shared per-device deduplication with page reads, recovery resets alerts, shutdown cleanup, and production webhook requirement. Unit tests cover scheduling, silent-period transitions and config validation; sync-health e2e covers background sweep plus page reads.
 - **2026-10-12** - Bill row locking on guest-pay and card-intent paths (issue #227):
@@ -1009,3 +1011,11 @@
   guest guards then refuse a token for another tenant (403 `tenant_mismatch`).
   Migration `20261007300000_tenant_slug`. Tests: `test/tenant-address.e2e-spec.ts`,
   `src/platform/tenant-slug.spec.ts`.
+
+## 2026-10-12 — #234 / AP-se-1: Protect paid bill lines
+
+Refuse removals, quantity/modifier price reductions and manager voids with `409 bill_has_payments` after payment starts. The shared transactional guard and payment-intent creation lock the bill row. E2E coverage includes unpaid controls, pending intents, partial/full captures, and allowed additions/increases.
+
+## 2026-10-12 — #234 follow-up: Allow edits after declined payments
+
+Filter the shared line guard to active intents and paid shares while retaining all tenders. Added declined-card reduction/removal regression coverage; pending and captured payment protections remain covered.
