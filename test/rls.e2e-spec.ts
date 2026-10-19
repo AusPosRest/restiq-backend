@@ -67,6 +67,23 @@ describe('row-level security on region-plane tables (e2e)', () => {
     await admin.$disconnect()
   })
 
+  it('POS token revocations are tenant-isolated, with operator read access (#242)', async () => {
+    const jti = randomUUID()
+    await admin.revokedPosToken.create({ data: { jti, tenantId, expiresAt: new Date(Date.now() + 60000) } })
+    expect(await probe.revokedPosToken.count({ where: { jti } })).toBe(0)
+    const countFor = (context: string, value: string) => probe.$transaction(async (tx) => {
+      await tx.$executeRaw`SELECT set_config(${context}, ${value}, true)`
+      return tx.revokedPosToken.count({ where: { jti } })
+    })
+    expect(await countFor('app.tenant_id', randomUUID())).toBe(0)
+    expect(await countFor('app.tenant_id', tenantId)).toBe(1)
+    expect(await countFor('app.operator_context', 'operator')).toBe(1)
+    await expect(probe.$transaction(async (tx) => {
+      await tx.$executeRaw`SELECT set_config('app.tenant_id', ${randomUUID()}, true)`
+      await tx.revokedPosToken.create({ data: { jti: randomUUID(), tenantId, expiresAt: new Date() } })
+    })).rejects.toThrow()
+  })
+
   it('returns zero rows with no tenant context (fail closed)', async () => {
     expect(await probe.tenant.count()).toBe(0)
   })

@@ -3,8 +3,8 @@
 // permissions). Keyed by system role name - roles are the fixed set Platform
 // Console seeds per tenant (ops/tenants SYSTEM_ROLES); any other name gets
 // nothing. Manager-PIN approval (ManagerAuthService) is a second gate on top
-// of these for void-after-fire, discounts over threshold and refunds - it
-// never replaces them.
+// of these for void-after-fire and discounts over threshold. For refunds,
+// the PIN approver may supply the Refunds permission (#240).
 import { SetMetadata } from '@nestjs/common'
 
 export const PERMISSIONS = [

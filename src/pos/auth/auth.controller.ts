@@ -22,7 +22,7 @@ export class PosAuthController {
     return this.auth.selectOutlet(dto)
   }
 
-  // restiq-backend#169: signs this staff member out on every device.
+  // #169/#242: signs out only this token; legacy tokens end all devices.
   @Post('logout')
   @AnyStaff()
   @HttpCode(204)

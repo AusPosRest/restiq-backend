@@ -88,6 +88,9 @@ export interface PaymentRow {
   // that predates that column, same "never null" posture as BillView.
   taxBreakdown: TaxBreakdownLineView[]
   totalMinor: number
+  // restiq-backend#241: the cash round-off settled on the bill (tenders sum
+  // to totalMinor + this); null when none. Not part of the GST figures.
+  roundOffMinor: number | null
   tenders: PaymentTenderRow[]
   creditNotes: PaymentCreditNoteRow[]
 }
@@ -98,6 +101,8 @@ export interface PaymentsTotals {
   discountMinor: number
   taxMinor: number
   totalMinor: number
+  // restiq-backend#241: sum of the bills' cash round-offs - tenderedMinor = totalMinor + roundOffMinor.
+  roundOffMinor: number
   tenderedMinor: number
   refundedMinor: number
   // PE-33: totalMinor - refundedMinor, the one "sales" figure the owner

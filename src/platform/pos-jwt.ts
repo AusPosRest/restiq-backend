@@ -15,6 +15,7 @@
 // the same "different audience, not a second secret" shape as the two real
 // realms, scoped down for a short-lived, single-purpose handoff.
 import jwt from 'jsonwebtoken'
+import { randomUUID } from 'node:crypto'
 
 export const POS_JWT_AUDIENCE = 'pos'
 export const POS_PENDING_JWT_AUDIENCE = 'pos-pending'
@@ -25,7 +26,7 @@ export const POS_PENDING_TTL_SECONDS = 5 * 60
 // restiq-backend#169: the token also carries `sv`, the staff member's
 // sessionVersion when it was issued. The guard re-reads the staff row on every
 // request and refuses the token once they differ (PIN revoked or reissued,
-// role changed, logout). A token with no `sv` - anything issued before #169 -
+// role changed, legacy logout). A token with no `sv` - anything issued before #169 -
 // is refused outright, so everyone logs in once more after that deploy. The
 // role is deliberately NOT in the token: the guard reads it from the database.
 export interface PosPrincipal {
@@ -35,6 +36,8 @@ export interface PosPrincipal {
   name: string
   /** Role name, read from the database by PosAuthGuard on every request - never from the token. */
   role: string
+  /** Verified token identity and expiry, used to end only this session. */
+  token?: { jti: string; expiresAt: number }
 }
 
 // restiq-backend#209 (SE-11): `did` - the enrolled till the session was signed in on, if any. Revoking that
@@ -58,6 +61,7 @@ export function signPosToken(principal: PosTokenClaims): string {
   const device = principal.deviceId === undefined ? {} : { did: principal.deviceId }
   return jwt.sign({ tenantId: principal.tenantId, outletId: principal.outletId, name: principal.name, sv: principal.sessionVersion, ...device }, posJwtSecret(), {
     subject: principal.id,
+    jwtid: randomUUID(),
     audience: POS_JWT_AUDIENCE,
     expiresIn: POS_SESSION_TTL_SECONDS,
   })
@@ -74,9 +78,12 @@ export function verifyPosToken(token: string): PosTokenClaims | null {
     const sv: unknown = payload.sv
     if (typeof tenantId !== 'string' || typeof outletId !== 'string' || typeof name !== 'string') return null
     if (typeof sv !== 'number' || !Number.isInteger(sv) || sv < 0) return null
+    const jti: unknown = payload.jti
+    const exp: unknown = payload.exp
+    if (jti !== undefined && (typeof jti !== 'string' || jti.length === 0 || typeof exp !== 'number' || !Number.isInteger(exp))) return null
     const did: unknown = payload.did
     if (did !== undefined && typeof did !== 'string') return null
-    return { id: payload.sub, tenantId, outletId, name, sessionVersion: sv, ...(did === undefined ? {} : { deviceId: did }) }
+    return { id: payload.sub, tenantId, outletId, name, sessionVersion: sv, ...(typeof jti === 'string' && typeof exp === 'number' ? { token: { jti, expiresAt: exp } } : {}), ...(did === undefined ? {} : { deviceId: did }) }
   } catch {
     return null
   }

@@ -148,6 +148,52 @@ async function buildTicketView(tx: Tx, ticket: { id: string; orderId: string; st
   }
 }
 
+/**
+ * Fires every line on the order the kitchen doesn't have yet, grouped by
+ * resolved station (pos/CAP-2's open->sent transition, guest placement,
+ * and - restiq-backend#210 - a later "Send to kitchen" for items added to an
+ * already-sent order, plus finalize as a backstop so a paid order always
+ * reaches the kitchen). Per station: appended as the next ADD-ON batch to
+ * that station's still-QUEUED ticket, or a brand-new ticket (batch 0) when
+ * there is none or the last one there was already bumped (documented edge,
+ * issue #67 scope). Voided lines never fire. Returns how many lines fired.
+ */
+export async function fireOnSend(tx: Tx, order: Pick<Order, 'id' | 'tenantId' | 'outletId'>): Promise<number> {
+  // A combo's parent line has no item and nothing to cook - its child lines
+  // (the chosen items) are what the kitchen gets (restiq-backend#160).
+  const lines = (
+    await tx.orderLine.findMany({ where: { orderId: order.id, voidedAt: null, ticketLines: { none: {} } }, include: { item: true }, orderBy: { createdAt: 'asc' } })
+  ).flatMap((l) => (l.item ? [{ ...l, item: l.item }] : []))
+  if (lines.length === 0) return 0
+
+  const defaultStationId = await resolveDefaultStationId(tx, order.tenantId, order.outletId)
+  const groups = new Map<string | null, typeof lines>()
+  for (const line of lines) {
+    const stationId = await routeStationId(tx, order, line.item.stationId, defaultStationId)
+    const group = groups.get(stationId)
+    if (group) group.push(line)
+    else groups.set(stationId, [line])
+  }
+
+  for (const [stationId, groupLines] of groups) {
+    const existing = await tx.ticket.findFirst({ where: { orderId: order.id, stationId }, orderBy: { firedAt: 'desc' } })
+    let ticketId: string
+    let addOnBatch = 0
+    if (existing && existing.status === 'queued') {
+      const maxBatch = await tx.ticketLine.aggregate({ where: { ticketId: existing.id }, _max: { addOnBatch: true } })
+      ticketId = existing.id
+      addOnBatch = (maxBatch._max.addOnBatch ?? 0) + 1
+      await tx.ticketEvent.create({ data: { tenantId: order.tenantId, ticketId, type: 'add_on_fired' } })
+    } else {
+      ticketId = (await tx.ticket.create({ data: { tenantId: order.tenantId, outletId: order.outletId, orderId: order.id, stationId } })).id
+    }
+    for (const line of groupLines) {
+      await tx.ticketLine.create({ data: { tenantId: order.tenantId, ticketId, orderLineId: line.id, quantity: line.quantity, addOnBatch } })
+    }
+  }
+  return lines.length
+}
+
 @Injectable()
 export class KitchenTicketsService {
   constructor(private readonly registry: RegionRegistryService) {}
@@ -158,50 +204,8 @@ export class KitchenTicketsService {
 
   // -- fire hook (invoked from pos/orders and pos/order-lines, same tx) -----
 
-  /**
-   * Fires every line on the order the kitchen doesn't have yet, grouped by
-   * resolved station (pos/CAP-2's open->sent transition, guest placement,
-   * and - restiq-backend#210 - a later "Send to kitchen" for items added to an
-   * already-sent order, plus finalize as a backstop so a paid order always
-   * reaches the kitchen). Per station: appended as the next ADD-ON batch to
-   * that station's still-QUEUED ticket, or a brand-new ticket (batch 0) when
-   * there is none or the last one there was already bumped (documented edge,
-   * issue #67 scope). Voided lines never fire. Returns how many lines fired.
-   */
   async fireOnSend(tx: Tx, order: Pick<Order, 'id' | 'tenantId' | 'outletId'>): Promise<number> {
-    // A combo's parent line has no item and nothing to cook - its child lines
-    // (the chosen items) are what the kitchen gets (restiq-backend#160).
-    const lines = (
-      await tx.orderLine.findMany({ where: { orderId: order.id, voidedAt: null, ticketLines: { none: {} } }, include: { item: true }, orderBy: { createdAt: 'asc' } })
-    ).flatMap((l) => (l.item ? [{ ...l, item: l.item }] : []))
-    if (lines.length === 0) return 0
-
-    const defaultStationId = await resolveDefaultStationId(tx, order.tenantId, order.outletId)
-    const groups = new Map<string | null, typeof lines>()
-    for (const line of lines) {
-      const stationId = await routeStationId(tx, order, line.item.stationId, defaultStationId)
-      const group = groups.get(stationId)
-      if (group) group.push(line)
-      else groups.set(stationId, [line])
-    }
-
-    for (const [stationId, groupLines] of groups) {
-      const existing = await tx.ticket.findFirst({ where: { orderId: order.id, stationId }, orderBy: { firedAt: 'desc' } })
-      let ticketId: string
-      let addOnBatch = 0
-      if (existing && existing.status === 'queued') {
-        const maxBatch = await tx.ticketLine.aggregate({ where: { ticketId: existing.id }, _max: { addOnBatch: true } })
-        ticketId = existing.id
-        addOnBatch = (maxBatch._max.addOnBatch ?? 0) + 1
-        await tx.ticketEvent.create({ data: { tenantId: order.tenantId, ticketId, type: 'add_on_fired' } })
-      } else {
-        ticketId = (await tx.ticket.create({ data: { tenantId: order.tenantId, outletId: order.outletId, orderId: order.id, stationId } })).id
-      }
-      for (const line of groupLines) {
-        await tx.ticketLine.create({ data: { tenantId: order.tenantId, ticketId, orderLineId: line.id, quantity: line.quantity, addOnBatch } })
-      }
-    }
-    return lines.length
+    return fireOnSend(tx, order)
   }
 
   // -- actions (CAP-2/CAP-4, no actor attribution) --------------------------
