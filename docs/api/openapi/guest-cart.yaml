@@ -1,0 +1,236 @@
+openapi: 3.1.0
+info:
+  title: Restiq guest cart contract
+  version: 0.1.0
+security:
+  - guestBearer: []
+paths:
+  /guest/v1/cart:
+    get:
+      responses:
+        '200':
+          description: Shared table cart, grouped by guest.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/TableCart'
+  /guest/v1/cart/lines:
+    post:
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/AddCartLineRequest'
+      responses:
+        '201':
+          description: Updated shared table cart. Each add creates a distinct line.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/TableCart'
+        '400':
+          description: Invalid input, including notes exceeding 200 characters after trimming.
+  /guest/v1/cart/lines/{id}:
+    patch:
+      parameters:
+        - in: path
+          name: id
+          required: true
+          schema:
+            type: string
+            format: uuid
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/UpdateCartLineRequest'
+      responses:
+        '200':
+          description: Updated cart. Only the line's guest may edit it.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/TableCart'
+        '400':
+          description: Invalid input.
+components:
+  securitySchemes:
+    guestBearer:
+      type: http
+      scheme: bearer
+      bearerFormat: JWT
+  schemas:
+    AddCartLineRequest:
+      type: object
+      required:
+        - itemId
+        - quantity
+      properties:
+        note:
+          type: [string, 'null']
+          maxLength: 200
+          description: Special instructions. Trimmed before validation; empty becomes null. Omit on update to preserve the note. Distinct adds remain separate lines. Copied to OrderLine.note on placement.
+        itemId:
+          type: string
+          format: uuid
+        variantId:
+          type: string
+          format: uuid
+        quantity:
+          type: integer
+          examples:
+            - 2
+          minimum: 1
+          maximum: 999
+        modifierIds:
+          type: array
+          items:
+            type: string
+            format: uuid
+          uniqueItems: true
+    UpdateCartLineRequest:
+      type: object
+      required: []
+      properties:
+        note:
+          type: [string, 'null']
+          maxLength: 200
+          description: Special instructions. Trimmed before validation; empty becomes null. Omit on update to preserve the note. Distinct adds remain separate lines. Copied to OrderLine.note on placement.
+        quantity:
+          type: integer
+          examples:
+            - 3
+          minimum: 1
+          maximum: 999
+        modifierIds:
+          type: array
+          items:
+            type: string
+            format: uuid
+          uniqueItems: true
+    CartLine:
+      type: object
+      required:
+        - note
+        - id
+        - guestId
+        - guestName
+        - itemId
+        - itemName
+        - variantId
+        - variantName
+        - quantity
+        - unitPriceMinor
+        - modifiers
+        - lineTotalMinor
+        - createdAt
+      properties:
+        note:
+          type: [string, 'null']
+          maxLength: 200
+          description: Special instructions. Trimmed before validation; empty becomes null. Omit on update to preserve the note. Distinct adds remain separate lines. Copied to OrderLine.note on placement.
+        id:
+          type: string
+          format: uuid
+        guestId:
+          type: string
+          format: uuid
+        guestName:
+          type: string
+          examples:
+            - Asha
+        itemId:
+          type: [string, 'null']
+          format: uuid
+          description: Null on a combo line; itemName is then the combo's name.
+        comboId:
+          type: [string, 'null']
+          format: uuid
+        components:
+          type: array
+          items: { type: string }
+          description: The picked items of a combo line, empty otherwise. The line price and total already include their extra charges.
+        itemName:
+          type: string
+          examples:
+            - Masala dosa
+        variantId:
+          oneOf:
+            - type: string
+              format: uuid
+            - type: 'null'
+        variantName:
+          oneOf:
+            - type: string
+            - type: 'null'
+        quantity:
+          type: integer
+          examples:
+            - 2
+        unitPriceMinor:
+          type: integer
+        modifiers:
+          type: array
+          items:
+            type: object
+            required:
+              - id
+              - name
+              - priceMinor
+            properties:
+              id:
+                type: string
+                format: uuid
+              name:
+                type: string
+                examples:
+                  - Extra cheese
+              priceMinor:
+                type: integer
+        lineTotalMinor:
+          type: integer
+        createdAt:
+          type: string
+          format: date-time
+    TableCart:
+      type: object
+      required:
+        - sessionId
+        - guests
+        - totalMinor
+        - currency
+      properties:
+        sessionId:
+          type: string
+          format: uuid
+        guests:
+          type: array
+          items:
+            type: object
+            required:
+              - guestId
+              - guestName
+              - lines
+              - subtotalMinor
+            properties:
+              guestId:
+                type: string
+                format: uuid
+              guestName:
+                type: string
+                examples:
+                  - Asha
+              lines:
+                type: array
+                items:
+                  $ref: '#/components/schemas/CartLine'
+              subtotalMinor:
+                type: integer
+        totalMinor:
+          type: integer
+        currency:
+          type: string
+          examples:
+            - INR

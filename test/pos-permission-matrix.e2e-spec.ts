@@ -71,9 +71,9 @@ function withOutlet(path: string, outletId: string): string {
 // Written by hand on purpose: the matrix below derives its expectations from each route's own
 // policy, so it cannot notice a policy that was loosened. These are the money and kitchen
 // actions whose policy must stay as the catalogue intends.
-const INTENDED_POLICY: Readonly<Record<string, Permission>> = {
+const INTENDED_POLICY: Readonly<Record<string, Permission | 'any_staff'>> = {
   'POST /pos/v1/bills/:id/finalize': 'settle_bills',
-  'POST /pos/v1/bills/:id/refund': 'refunds', // then the service still demands a manager PIN
+  'POST /pos/v1/bills/:id/refund': 'any_staff', // #240: service checks the PIN approver's refunds permission
   'POST /pos/v1/bills/:id/intents': 'settle_bills',
   'POST /pos/v1/payment-intents/:id/cancel': 'settle_bills',
   'POST /pos/v1/payment-intents/:id/simulate': 'settle_bills',

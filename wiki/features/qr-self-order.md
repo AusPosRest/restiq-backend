@@ -611,3 +611,7 @@
 - **Tests:** `test/guest-kiosk.e2e-spec.ts` (happy path with two gap-free
   tokens, status list, kitchen tickets, POS list; the 404/403/400 refusals).
 - **Not built:** kiosk-side payment (pay at the counter), CDS.
+
+## Guest special instructions (#231)
+
+Guests can send `note` on add or update of a cart line. Strings are trimmed, limited to 200 characters, and blank/null clears the note; omission on update preserves it. Cart lines return `note` as string or null. Each add remains a distinct line, including the same item with different notes. Placement copies the note to the order line for the kitchen display.

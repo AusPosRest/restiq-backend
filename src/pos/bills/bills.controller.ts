@@ -52,9 +52,9 @@ export class PosBillsController {
     return this.bills.finalize(staff, id, dto)
   }
 
-  // restiq-backend#209 (SE-29): the Refunds permission, as the owner's Staff screen says; the service then still demands a manager PIN.
+  // restiq-backend#209 (SE-29), #240: enforce Refunds in the service, allowing a PIN approver to supply the permission.
   @Post('bills/:id/refund')
-  @RequirePermission('refunds')
+  @AnyStaff()
   @HttpCode(201)
   refund(@CurrentStaff() staff: PosPrincipal, @Param('id') id: string, @Body() dto: RefundBillDto): Promise<CreditNoteView> {
     return this.bills.refund(staff, id, dto)
