@@ -192,7 +192,7 @@ export class GuestOrdersService {
           const { combo, children } = await resolveComboSelection(tx, guest.tenantId, guest.outletId, line.comboId, selections)
           const who = { seatNumber: seatByGuest.get(line.guestId) ?? null, guestId: line.guestId, guestName: line.guestName }
           const shared = { ...who, tenantId: guest.tenantId, orderId: order.id, addedByStaffId: null }
-          const parent = await tx.orderLine.create({ data: { ...shared, comboId: combo.id, quantity: line.quantity, unitPriceMinor: combo.priceMinor } })
+          const parent = await tx.orderLine.create({ data: { ...shared, comboId: combo.id, note: line.note, quantity: line.quantity, unitPriceMinor: combo.priceMinor } })
           lineViews.push({ ...who, id: parent.id, itemId: null, comboId: combo.id, parentLineId: null, itemName: combo.name, variantId: null, variantName: null, quantity: line.quantity, unitPriceMinor: Number(combo.priceMinor), modifiers: [] })
           for (const child of children) {
             const quantity = child.quantity * line.quantity
@@ -244,6 +244,7 @@ export class GuestOrdersService {
             itemId: line.itemId,
             variantId: line.variantId,
             quantity: line.quantity,
+            note: line.note,
             unitPriceMinor: price.priceMinor,
             seatNumber,
             // No staff adder - see OrderLine.addedByStaffId's schema comment.

@@ -5,11 +5,12 @@
 import { INestApplication } from '@nestjs/common'
 import { Test } from '@nestjs/testing'
 import jwt from 'jsonwebtoken'
+import * as argon2 from 'argon2'
 import request from 'supertest'
 import { afterAll, beforeAll, describe, expect, it } from 'vitest'
 import { AppModule } from '../src/app.module'
 import { createPrismaClient, PrismaClient } from '../src/db/client'
-import { signAdminToken, signPosToken, uuidv7 } from '../src/platform'
+import { signAdminToken, signPosToken, verifyPosToken, uuidv7 } from '../src/platform'
 
 // Full table list (not just this file's own tables): the e2e suite shares
 // one database and file execution order is not guaranteed, so every wipe()
@@ -184,6 +185,62 @@ describe('POS sessions and permissions (#169, e2e)', () => {
     const out = await request(server).post('/pos/v1/auth/logout').set('Authorization', `Bearer ${token}`)
     expect(out.status).toBe(204)
     expect((await menu(token)).status).toBe(401)
+  })
+
+  it('locking one device keeps the same staff member signed in on the other device (#242)', async () => {
+    const isolated = await seedTenant('Two devices')
+    const role = await prisma.role.create({ data: { tenantId: isolated.tenantId, name: 'Cashier', isSystem: true } })
+    const { id } = await prisma.staffUser.create({ data: { tenantId: isolated.tenantId, roleId: role.id, name: 'Cashier', pinHash: await argon2.hash('1234'), pinIssuedAt: new Date() } })
+    const login = async () => {
+      const res = await request(server).post('/pos/v1/auth/login').send({ tenantId: isolated.tenantId, pin: '1234' })
+      expect(res.status).toBe(200)
+      return (res.body as { token: string }).token
+    }
+    const tokenA = await login()
+    const tokenB = await login()
+    const identityA = verifyPosToken(tokenA)?.token
+    const identityB = verifyPosToken(tokenB)?.token
+    expect(identityA?.jti).toBeTruthy()
+    expect(identityA?.jti).not.toBe(identityB?.jti)
+    expect((await menu(tokenA)).status).toBe(200)
+    expect((await menu(tokenB)).status).toBe(200)
+    expect((await request(server).post('/pos/v1/auth/logout').set('Authorization', `Bearer ${tokenA}`)).status).toBe(204)
+    const revoked = await prisma.revokedPosToken.findUniqueOrThrow({ where: { jti: identityA!.jti } })
+    expect(revoked.tenantId).toBe(isolated.tenantId)
+    expect(revoked.expiresAt.getTime()).toBe(identityA!.expiresAt * 1000)
+    const replay = await menu(tokenA)
+    expect(replay.status).toBe(401)
+    expect(errorCode(replay)).toBe('session_revoked')
+    expect((await menu(tokenB)).status).toBe(200)
+    const repeated = await request(server).post('/pos/v1/auth/logout').set('Authorization', `Bearer ${tokenA}`)
+    expect(repeated.status).toBe(401)
+    expect(errorCode(repeated)).toBe('session_revoked')
+    expect((await prisma.staffUser.findUniqueOrThrow({ where: { id } })).sessionVersion).toBe(0)
+  })
+
+  it('legacy logout still invalidates every session to prevent replay', async () => {
+    const { id, token } = await staffWithToken('Cashier')
+    const legacy = jwt.sign({ tenantId, outletId, name: 'Legacy', sv: 0 }, process.env.POS_JWT_SECRET as string, { subject: id, audience: 'pos', expiresIn: '1h' })
+    expect((await menu(legacy)).status).toBe(200)
+    expect((await request(server).post('/pos/v1/auth/logout').set('Authorization', `Bearer ${legacy}`)).status).toBe(204)
+    for (const session of [legacy, token]) {
+      const res = await menu(session)
+      expect(res.status).toBe(401)
+      expect(errorCode(res)).toBe('session_revoked')
+    }
+  })
+
+  it.each(['pin', 'revoke-pin'])('owner %s still ends both device sessions', async (action) => {
+    const { id, token } = await staffWithToken('Cashier')
+    const second = signPosToken({ id, tenantId, outletId, name: 'Cashier', sessionVersion: 0 })
+    const owner = signAdminToken({ id: uuidv7(), tenantId, email: 'owner@sessions.example' })
+    const res = await request(server).post(`/admin/v1/staff/${id}/${action}`).set('Authorization', `Bearer ${owner}`).send({ reason: 'Access changed' })
+    expect(res.status).toBe(action === 'pin' ? 201 : 200)
+    for (const session of [token, second]) {
+      const refused = await menu(session)
+      expect(refused.status).toBe(401)
+      expect(errorCode(refused)).toBe('session_revoked')
+    }
   })
 
   it.each(['Waiter', 'Kitchen'])('%s cannot settle a bill or open a shift', async (role) => {

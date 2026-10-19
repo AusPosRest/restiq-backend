@@ -59,9 +59,12 @@ story by story.
     request.
   - It returns 401 `session_revoked` if the row is gone, belongs to another
     tenant, has a revoked PIN, or has a different version.
-  - The version is bumped by: PIN issue/reissue, PIN revoke, role change, and
-    `POST /pos/v1/auth/logout` (which signs that staff member out on every
-    device).
+  - The version is bumped by PIN issue/reissue, PIN revoke, and role change,
+    ending all devices.
+  - Each new token has a unique `jti`. `POST /pos/v1/auth/logout` records that
+    token in the tenant-scoped `revoked_pos_tokens` table with its expiry. The
+    guard refuses it with 401 `session_revoked`; other devices stay signed in.
+    Legacy tokens without `jti` still bump the version on logout to prevent replay.
   - A token with no `sv`, meaning anything issued before #169, is refused, so
     everyone logs in once more after that deploy.
 - **Role from the database.** The role is never in the token; the guard reads it
@@ -1148,6 +1151,14 @@ service directly rather than through an HTTP endpoint)
   transaction standing in for the caller's own mutation transaction.
 
 ## CAP-9 - Refunds and adjustments
+
+Issue #240 (AP-pe-2): authenticated cashiers may refund with a PIN approver
+whose role has `refunds`, whose PIN is active, and whose outlet assignments
+allow the bill's outlet (empty assignments mean all outlets). The refund
+service checks this permission rather than relying on `isManager`. Cashier
+without PIN: 403 `forbidden`; wrong PIN: existing 401 `invalid_credentials`.
+Managers still need a PIN (missing PIN remains 400). Credit notes and audit
+rows retain the PIN approver's ID. See [refund authorization](../../docs/api/refunds.md).
 
 - **Intent:** staff can refund one or more items against an already-
   finalized, immutable Bill (story 8), gated by story 9's manager

@@ -131,6 +131,7 @@ model Tenant {
   updatedAt         DateTime         @updatedAt @map("updated_at") @db.Timestamptz(6)
   deletedAt         DateTime?        @map("deleted_at") @db.Timestamptz(6)
 
+  revokedPosTokens    RevokedPosToken[]
   taxRegistrations    TenantTaxRegistration[]
   brands              Brand[]
   outlets             Outlet[]
@@ -980,6 +981,9 @@ model CartLine {
   // clears the carts holding it (admin combos.service.ts).
   comboOptionId String?  @map("combo_option_id") @db.Uuid
   quantity      Int
+  // restiq-backend#231: guest special instructions / allergy notes, copied to
+  // OrderLine.note at placement so the KDS shows them.
+  note          String?
   createdAt     DateTime @default(now()) @map("created_at") @db.Timestamptz(6)
 
   tenant     Tenant             @relation(fields: [tenantId], references: [id])
@@ -2149,4 +2153,16 @@ model PlanPrice {
 
   @@id([country, plan])
   @@map("plan_prices")
+}
+
+
+// #242: logged-out POS tokens cannot be replayed, without ending other devices.
+model RevokedPosToken {
+  jti       String   @id
+  tenantId  String   @map("tenant_id") @db.Uuid
+  expiresAt DateTime @map("expires_at") @db.Timestamptz(6)
+  tenant    Tenant   @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+
+  @@index([tenantId])
+  @@map("revoked_pos_tokens")
 }

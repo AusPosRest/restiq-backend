@@ -327,6 +327,47 @@ describe('/guest/v1/orders order placement into the real pipeline (e2e)', () => 
     })
   })
 
+  it('preserves normalized guest notes through cart, placement and kitchen without merging lines', async () => {
+    const tenantId = await createTenant(prisma)
+    const outletId = await createOutlet(prisma, tenantId)
+    const tableId = await createTable(prisma, tenantId, outletId)
+    await enableQrOrdering(prisma, tenantId, outletId)
+    const stationId = await createStation(prisma, tenantId, outletId, 'Kitchen')
+    const item = await createItemWithPrice(prisma, tenantId, 15000, { stationId })
+    const { tokenA } = await startAndJoin(outletId, tableId)
+    const add = (note?: unknown) => authed(request(httpServer).post('/guest/v1/cart/lines'), tokenA).send({ itemId: item, quantity: 1, note })
+    expect((await add('x'.repeat(201))).status).toBe(400)
+    expect((await add(123)).status).toBe(400)
+    const added = await add('  Peanut allergy  ')
+    expect(added.status).toBe(201)
+    const notedLine = (added.body as { guests: { lines: { id: string; note: string | null }[] }[] }).guests[0].lines[0]
+    expect(notedLine.note).toBe('Peanut allergy')
+    expect((await add()).status).toBe(201)
+    const cart = await authed(request(httpServer).get('/guest/v1/cart'), tokenA)
+    expect(cart.status).toBe(200)
+    expect((cart.body as { guests: { lines: { note: string | null }[] }[] }).guests[0].lines).toEqual([
+      expect.objectContaining({ note: 'Peanut allergy' }), expect.objectContaining({ note: null }),
+    ])
+    const patch = (note?: unknown) => authed(request(httpServer).patch(`/guest/v1/cart/lines/${notedLine.id}`), tokenA).send(note === undefined ? { quantity: 2 } : { note })
+    expect((await patch('x'.repeat(201))).status).toBe(400)
+    expect((await patch()).status).toBe(200)
+    expect((await prisma.cartLine.findUnique({ where: { id: notedLine.id } }))?.note).toBe('Peanut allergy')
+    expect((await patch('  ')).status).toBe(200)
+    expect((await prisma.cartLine.findUnique({ where: { id: notedLine.id } }))?.note).toBeNull()
+    expect((await patch(`  ${'x'.repeat(200)}  `)).status).toBe(200)
+    expect((await patch(' Peanut allergy ')).status).toBe(200)
+    const placed = await authed(request(httpServer).post('/guest/v1/orders'), tokenA).send({})
+    expect(placed.status).toBe(201)
+    const orderId = (placed.body as PlacedOrderBody).orderId
+    const lines = await prisma.orderLine.findMany({ where: { orderId } })
+    expect(lines).toHaveLength(2)
+    expect(lines).toEqual(expect.arrayContaining([expect.objectContaining({ note: 'Peanut allergy' }), expect.objectContaining({ note: null })]))
+    const staffToken = await createStaff(prisma, tenantId, outletId, 'Server')
+    const queue = await authed(request(httpServer).get(`/kitchen/v1/outlets/${outletId}/stations/${stationId}/queue`), staffToken)
+    expect(queue.status).toBe(200)
+    expect((queue.body as TicketBody[])[0]?.lines).toEqual(expect.arrayContaining([expect.objectContaining({ note: 'Peanut allergy' })]))
+  })
+
   describe('validation', () => {
     it('rejects placing an empty cart', async () => {
       const tenantId = await createTenant(prisma)
