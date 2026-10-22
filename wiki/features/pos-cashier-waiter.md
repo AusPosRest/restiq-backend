@@ -129,7 +129,7 @@ guesses never tripped it.
   tenant**. Anything else is limited by IP.
 - Enrolled devices never count toward the tenant-wide cap for unbound
   browsers, so an attacker can't lock the tills out.
-- `req.ip` is resolved through `TRUST_PROXY_HOPS`. It is 1 on Fly and 0 by
+- `req.ip` is resolved through `TRUST_PROXY_HOPS`. It is 2 on Fly (Cloudflare, then Fly - #272) and 0 by
   default, which means `X-Forwarded-For` is ignored.
 - Sign-ins reach the API through the web app's own server routes, so `req.ip`
   there is the web server. Those routes send the browser's address in
