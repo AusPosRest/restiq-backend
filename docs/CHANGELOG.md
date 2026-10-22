@@ -6,6 +6,9 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+### Changed
+- **Two trusted proxy hops** (#272): `fly.toml` sets `TRUST_PROXY_HOPS=2`, because `api.dailypos.shop` now goes through Cloudflare and then Fly. `req.ip` stays the real client instead of a shared Cloudflare address.
+
 ### Added
 - Per-tenant India CGST/SGST rounding (#244): `gstSplitRounding` (`exact_total` default, `equal_half_up`, `equal_half_even`) on `GET`/`PUT /admin/v1/tax-registration`, stored in `tenant_tax_registrations.gst_split_rounding` (migration `20261019100000_gst_split_rounding`). POS and guest bill responses add `gstSplitRounding` (null for AU, IGST and composition). Finalized bills keep their stored tax lines.
 

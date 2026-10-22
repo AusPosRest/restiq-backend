@@ -25,9 +25,11 @@ primary_region = "syd"
   # money moving. Never on in production - card is taken on the venue's own
   # terminal and recorded as an external payment until a real provider lands.
   PAYMENTS_SIMULATOR = "off"
-  # restiq-backend#171: Fly's edge proxy is the one hop in front of the app,
-  # so req.ip is the real client for sign-in throttling - never a raw header.
-  TRUST_PROXY_HOPS = "1"
+  # restiq-backend#171/#272: api.dailypos.shop goes through Cloudflare's edge,
+  # then Fly's - two hops - so req.ip is the real client for throttling,
+  # never a raw header. (Traffic sent straight to restiq-backend.fly.dev skips
+  # Cloudflare, so there the client can choose the address.)
+  TRUST_PROXY_HOPS = "2"
 
 [build]
 

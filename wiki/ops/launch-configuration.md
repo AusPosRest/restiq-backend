@@ -11,7 +11,7 @@ The API refuses to boot in production when any setting below is missing or unsaf
   - Check with `SELECT region, count(*) FROM tenant_registry GROUP BY region;`, which should give one row.
   - Setting a different value strands every existing tenant: `planeFor` throws.
 - [ ] `ALERT_WEBHOOK_URL`: the incoming-webhook URL of the on-call channel (see [alerts.md](alerts.md)).
-- [ ] `fly.toml [env]` already pins `PAYMENTS_SIMULATOR=off` and `TRUST_PROXY_HOPS=1`. Don't override either as a secret.
+- [ ] `fly.toml [env]` already pins `PAYMENTS_SIMULATOR=off` and `TRUST_PROXY_HOPS=2` (Cloudflare's edge, then Fly's - #272). Don't override either as a secret.
 
 ## Region and data placement
 - [ ] The Fly `primary_region` (`syd`) is close to the Neon region. Check it in the Neon console under Project settings, then Region.
