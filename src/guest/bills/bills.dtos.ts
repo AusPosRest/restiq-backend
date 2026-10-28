@@ -34,4 +34,6 @@ export interface BillShareView {
 
 export interface GuestBillView extends BillView {
   shares: BillShareView[]
+  /** restiq-backend#278: false when this tenant can't take payment from the phone - show "pay at the counter" up front. */
+  paymentsAvailable: boolean
 }

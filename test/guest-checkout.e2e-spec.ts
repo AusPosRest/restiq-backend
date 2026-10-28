@@ -416,6 +416,26 @@ describe('/guest/v1 checkout and split payment, simulated (e2e)', () => {
       expect((await prisma.bill.findUniqueOrThrow({ where: { id: bill.id } })).status).toBe('open')
       expect((await prisma.tableSession.findUniqueOrThrow({ where: { id: sessionId } })).status).toBe('open')
     })
+
+    // restiq-backend#278: per tenant, like the POS (#213) - a Test-mode tenant pays from the phone with the switch off.
+    it('a Test-mode tenant pays a share then the rest with the switch off, and the bill says payments are available', async () => {
+      const tenantId = await createTenant(prisma)
+      await prisma.tenant.update({ where: { id: tenantId }, data: { liveSince: null } })
+      const outletId = await createOutlet(prisma, tenantId)
+      const tableId = await createTable(prisma, tenantId, outletId)
+      await enableQrOrdering(prisma, tenantId, outletId)
+      const itemId = await createItemWithPrice(prisma, tenantId, 10000)
+      const { tokens, orderId } = await placeOrderForGuests(outletId, tableId, itemId, 10000, 2)
+      process.env.PAYMENTS_SIMULATOR = 'off'
+      const bill = (await authed(request(httpServer).post(`/guest/v1/orders/${orderId}/bill`), tokens[0]).send()).body as BillBody & { paymentsAvailable: boolean }
+      expect(bill.paymentsAvailable).toBe(true)
+
+      for (const [i, share] of bill.shares.entries()) {
+        const paid = await authed(request(httpServer).post(`/guest/v1/bills/${bill.id}/shares/${share.guestId}/pay`), tokens[i]).send({ simulatedOutcome: 'success' })
+        expect(paid.status).toBe(200)
+      }
+      expect((await prisma.bill.findUniqueOrThrow({ where: { id: bill.id } })).status).toBe('finalized')
+    })
   })
 
   describe('lines staff add to a guest order (restiq-backend#208, SE-15)', () => {
