@@ -20,7 +20,7 @@ import type { Order, Prisma, TableSession } from '../../generated/prisma/client'
 import { buildInvoiceView, commitFinalize, createOrGetBillRecord, createTenderRecord, loadBill, lockBill, refreshOpenBillTotals, toBillView } from '../../pos/bills'
 import type { BillWithTenders, InvoiceView } from '../../pos/bills'
 import { confirmIntent } from '../../pos/payments'
-import { GuestPrincipal, paymentsSimulatorEnabled, RegionRegistryService, uuidv7 } from '../../platform'
+import { GuestPrincipal, paymentsSimulatorFor, RegionRegistryService, uuidv7 } from '../../platform'
 import { isSessionInactive } from '../sessions/sessions.service'
 import { setTenantContext } from '../tenant-context'
 import { BillShareView, GuestBillView, SimulatedPaymentDto } from './bills.dtos'
@@ -59,9 +59,11 @@ async function assertSessionActive(tx: Tx, tenantId: string, sessionId: string):
  * restiq-backend#208 (SE-14): the guest pay endpoints let the caller pick its
  * own outcome - a simulation, never money. With simulated payments off (any
  * production tenant) a guest must not be able to settle their own table.
+ * restiq-backend#278: per tenant, like the POS paths (#213) - a Test-mode
+ * tenant pays from the phone with the server switch off; a Live one never does.
  */
-function assertGuestPaymentsAvailable(): void {
-  if (!paymentsSimulatorEnabled()) {
+async function assertGuestPaymentsAvailable(tx: Tx, tenantId: string): Promise<void> {
+  if (!(await paymentsSimulatorFor(tx, tenantId))) {
     throw new ConflictException({ code: 'provider_unavailable', message: 'Paying from your phone is not available here yet - please pay at the counter' })
   }
 }
@@ -116,7 +118,7 @@ export class GuestBillsService {
       })
       await this.syncShares(tx, guest.tenantId, bill)
       const shares = await this.loadShareViews(tx, bill.id)
-      return { view: { ...toBillView(bill), shares }, created }
+      return { view: { ...toBillView(bill), shares, paymentsAvailable: await paymentsSimulatorFor(tx, guest.tenantId) }, created }
     })
   }
 
@@ -132,7 +134,7 @@ export class GuestBillsService {
       const bill = await refreshOpenBillTotals(tx, await loadBill(tx, guest.tenantId, billRow.id))
       await this.syncShares(tx, guest.tenantId, bill)
       const shares = await this.loadShareViews(tx, bill.id)
-      return { ...toBillView(bill), shares }
+      return { ...toBillView(bill), shares, paymentsAvailable: await paymentsSimulatorFor(tx, guest.tenantId) }
     })
   }
 
@@ -170,10 +172,10 @@ export class GuestBillsService {
    * uses, and the table session settles (its lifecycle's normal end).
    */
   async payShare(guest: GuestPrincipal, billId: string, guestId: string, dto: SimulatedPaymentDto): Promise<GuestBillView> {
-    assertGuestPaymentsAvailable()
     const plane = this.plane()
     return plane.$transaction(async (tx) => {
       await setTenantContext(tx, guest.tenantId)
+      await assertGuestPaymentsAvailable(tx, guest.tenantId)
       // restiq-backend#227 (G2): take the bill's row lock first so concurrent
       // share payments or finalizes serialize on locked bill data.
       await lockBill(tx, billId)
@@ -225,10 +227,10 @@ export class GuestBillsService {
    * mop up whatever a partial per-share flow left outstanding.
    */
   async payAll(guest: GuestPrincipal, billId: string, dto: SimulatedPaymentDto): Promise<GuestBillView> {
-    assertGuestPaymentsAvailable()
     const plane = this.plane()
     return plane.$transaction(async (tx) => {
       await setTenantContext(tx, guest.tenantId)
+      await assertGuestPaymentsAvailable(tx, guest.tenantId)
       // restiq-backend#227 (G2): take the bill's row lock first so concurrent
       // payments or whole-bill settlements serialize on locked bill data.
       await lockBill(tx, billId)
@@ -359,7 +361,7 @@ export class GuestBillsService {
   private async buildView(tx: Tx, tenantId: string, billId: string): Promise<GuestBillView> {
     const bill = await loadBill(tx, tenantId, billId)
     const shares = await this.loadShareViews(tx, billId)
-    return { ...toBillView(bill), shares }
+    return { ...toBillView(bill), shares, paymentsAvailable: await paymentsSimulatorFor(tx, tenantId) }
   }
 
   /**
