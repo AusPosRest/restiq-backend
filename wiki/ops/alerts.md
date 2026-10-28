@@ -7,7 +7,7 @@
   - Production refuses to boot without the URL; development may omit it and only log. Tests disable the timer.
 
 ## Still to set up (needs access)
-- [ ] **Destination:** a Slack or Teams incoming webhook for the on-call channel, or a pager's generic webhook. Store it as `fly secrets set ALERT_WEBHOOK_URL=…`.
+- [ ] **Destination:** a Slack or Teams incoming webhook for the on-call channel, or a pager's generic webhook. Store it as `fly secrets set ALERT_WEBHOOK_URL=…`. Until then `ALERT_WEBHOOK_URL=off` (#274) lets production boot with alerts in the server log only.
 - [ ] **Uptime checks** from outside Fly (for example Better Stack or UptimeRobot) on:
   - `https://<api>/health` every minute, where a page means down for 3 minutes;
   - `/health/db`, where a warning means down for 5 minutes;

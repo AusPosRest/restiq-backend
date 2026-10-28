@@ -7,6 +7,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 ## [Unreleased]
 
 ### Changed
+- **Production can boot before Mailjet and an alert webhook exist** (#274): `MAIL_PROVIDER=simulator` is accepted (reset and invite mail goes to the ops dev inbox), and `ALERT_WEBHOOK_URL=off` means log-only alerts. `log` mail and an unset webhook still refuse to boot.
 - **Two trusted proxy hops** (#272): `fly.toml` sets `TRUST_PROXY_HOPS=2`, because `api.dailypos.shop` now goes through Cloudflare and then Fly. `req.ip` stays the real client instead of a shared Cloudflare address.
 
 ### Added
