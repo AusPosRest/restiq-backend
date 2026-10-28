@@ -2,7 +2,7 @@
 // Slack/pager is a later decision). CAP-6 emits through this interface only.
 // restiq-backend#175 (audit PROD-09): WebhookAlertChannel reaches a person -
 // it posts to ALERT_WEBHOOK_URL (a Slack/Teams-style incoming webhook, or a
-// pager's generic webhook) and always logs too. No URL = log only, as before.
+// pager's generic webhook) and always logs too. No URL, or `off` (#274) = log only.
 import { Injectable } from '@nestjs/common'
 
 export interface SilentDeviceAlert {
@@ -36,7 +36,7 @@ export class WebhookAlertChannel implements AlertChannel {
   async notifySilentDevice(alert: SilentDeviceAlert): Promise<void> {
     await this.log.notifySilentDevice(alert)
     const url = process.env.ALERT_WEBHOOK_URL
-    if (!url) return
+    if (!url || url === 'off') return
     const hours = Math.floor(alert.lagSeconds / 3600)
     const lastSeen = alert.lastContactAt ?? 'never'
     try {

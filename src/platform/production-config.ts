@@ -12,7 +12,8 @@ export function productionConfigProblems(env: NodeJS.ProcessEnv): string[] {
 
   if (!env.HOME_REGION) problems.push('HOME_REGION must be set explicitly (the region existing tenants are registered in)')
 
-  if (!env.ALERT_WEBHOOK_URL?.trim()) problems.push('ALERT_WEBHOOK_URL must be set so silent-device alerts reach the responder')
+  // restiq-backend#274: `off` is the explicit choice of log-only alerts until a webhook exists; unset is still a mistake.
+  if (!env.ALERT_WEBHOOK_URL?.trim()) problems.push('ALERT_WEBHOOK_URL must be set (or `off` for log-only) so silent-device alerts reach the responder')
 
   const secrets = JWT_SECRETS.map((name) => [name, env[name] ?? ''] as const)
   for (const [name, value] of secrets) {
@@ -27,12 +28,14 @@ export function productionConfigProblems(env: NodeJS.ProcessEnv): string[] {
   if (env.PAYMENTS_SIMULATOR === 'on') problems.push('PAYMENTS_SIMULATOR must not be on in production - it approves card payments with no money moving')
   if (!env.WEB_ORIGIN?.startsWith('https://')) problems.push('WEB_ORIGIN must be the https:// origin of the web app')
 
-  if (env.MAIL_PROVIDER !== 'mailjet') {
-    problems.push('MAIL_PROVIDER must be mailjet - owners reset their password by email, and the log provider sends nothing')
-  } else {
+  // restiq-backend#274: `simulator` is allowed until Mailjet exists - reset and invite mail lands in the ops
+  // dev inbox for an operator to pass on. `log` stays out: it would put reset links in the server log.
+  if (env.MAIL_PROVIDER === 'mailjet') {
     for (const name of ['MAILJET_API_KEY', 'MAILJET_API_SECRET', 'MAIL_FROM_EMAIL'] as const) {
       if (!env[name]) problems.push(`${name} must be set when MAIL_PROVIDER is mailjet`)
     }
+  } else if (env.MAIL_PROVIDER !== 'simulator') {
+    problems.push('MAIL_PROVIDER must be mailjet (or simulator) - owners reset their password by email, and the log provider sends nothing')
   }
 
   return problems

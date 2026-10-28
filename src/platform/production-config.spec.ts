@@ -48,6 +48,12 @@ describe('production config (#175)', () => {
     expect(() => assertProductionConfig({ ...GOOD, ALERT_WEBHOOK_URL: undefined })).toThrow(/ALERT_WEBHOOK_URL/)
   })
 
+  it('allows simulator mail and log-only alerts as explicit choices (#274)', () => {
+    const noMailjet = { MAILJET_API_KEY: undefined, MAILJET_API_SECRET: undefined, MAIL_FROM_EMAIL: undefined }
+    expect(productionConfigProblems({ ...GOOD, ...noMailjet, MAIL_PROVIDER: 'simulator', ALERT_WEBHOOK_URL: 'off' })).toEqual([])
+    expect(productionConfigProblems({ ...GOOD, MAIL_PROVIDER: undefined }).join(' ')).toMatch(/MAIL_PROVIDER must be mailjet/)
+  })
+
   it('only enforces in production', () => {
     expect(() => assertProductionConfig({ NODE_ENV: 'development' })).not.toThrow()
     expect(() => assertProductionConfig({ NODE_ENV: 'production' })).toThrow(/Refusing to start/)
