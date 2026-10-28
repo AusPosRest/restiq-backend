@@ -3,6 +3,7 @@
   "version": "0.1.0",
   "description": "Restiq API",
   "main": "dist/main.js",
+  "packageManager": "pnpm@10.34.4",
   "scripts": {
     "dev": "nest start --watch",
     "build": "nest build",
