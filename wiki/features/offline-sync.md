@@ -48,3 +48,15 @@ Ids made on the hub are kept, and `at` becomes the row's `createdAt` / `finalize
 - **Settle window.** Pull only shows changes older than 30 s, so a slower transaction that took a lower id is not skipped; a transaction longer than that could still be missed (upgrade path: commit-ordered feed).
 - **No FK from `sync_changes` to `tenants`** - an append-only log read by tenant; an FK would make every tenant hard-delete clear it first.
 - Pull and bootstrap filter by tenant explicitly on top of RLS, as the rest of the codebase does.
+
+## Hub mode (issue #293)
+
+The hub till runs this backend's own POS and kitchen code on an in-process PGlite store (Postgres in WebAssembly) - HUB-BUILD-PLAN H1/H7.
+
+- **Entry** `src/hub/hub-main.ts`. Env: `HUB_DATA_DIR` (PGlite data dir, required), `HUB_PORT` (default 8180), `POS_JWT_SECRET` (required; the hub's own, so a hub token is never valid in the cloud). Listens on `127.0.0.1` only, no CORS. `STRIPE_SECRET_KEY` is cleared, so any Stripe path answers 503 `payments_not_configured`.
+- **Store** `src/hub/store.ts`: opens PGlite, applies each `prisma/migrations/*/migration.sql` not yet in `hub_migrations` (one transaction each, so a restart applies only new ones), grants the `restiq_app` role every table and sequence, then `SET ROLE restiq_app` on the one connection Prisma uses (`pglite-prisma-adapter`) - PGlite's own user is a superuser and would bypass RLS. `setPrismaClient()` in `src/db/client.ts` installs that client before Nest boots.
+- **Module** `src/hub/hub.module.ts`: `PlatformModule` + `KitchenModule` + the POS controllers and services listed directly - not `PosModule`, so `OpsModule`, `GuestModule`, sync, admin and webhook controllers and the sync-health sweep timer are never created. `GuestSessionsService`, `GuestBillsService`, `GuestCardPaymentsService` and `CardReadersService` are provided only because POS services inject them.
+- **Allowlist** `src/hub/allowlist.ts`: method + path list of what the POS and KDS screens call (plan §1) plus `GET /health`; anything else answers 404 `{ error: { code: 'not_on_hub' } }`.
+- **Artifact** `pnpm build:hub` → `dist-hub/{hub.cjs, migrations/, package.json, node_modules/}`: `nest build` (decorator metadata) then esbuild bundles `dist/hub/hub-main.js`; `argon2` and `@electric-sql/pglite` stay external and are `npm install`ed next to it. Run with `node dist-hub/hub.cjs`. About 41 MB on disk (hub.cjs 14 MB, PGlite 25 MB, argon2 1 MB), 12 MB gzipped.
+- **Checks**: `src/hub/hub.spec.ts` (in-memory PGlite, in `pnpm test`): every migration applies once, PIN login + `GET /pos/v1/menu`, 404 off the allowlist, RLS under the app role. `pnpm smoke:hub` boots the built artifact on a temp dir; CI job `hub-smoke` runs it on ubuntu and windows-latest and uploads `restiq-hub` from main.
+- Not yet: bootstrap import (H2), op recorder and journal (H3), sync worker (H4), recovery (H5), lock (H6).

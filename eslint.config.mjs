@@ -4,7 +4,7 @@ import tseslint from 'typescript-eslint'
 export default tseslint.config(
   // src/generated is Prisma's output, rewritten by `npm run db:generate`;
   // linting it would only report on code we never touch.
-  { ignores: ['dist/**', 'node_modules/**', 'eslint.config.mjs', 'src/generated/**'] },
+  { ignores: ['dist/**', 'dist-hub/**', 'node_modules/**', 'eslint.config.mjs', 'src/generated/**'] },
   js.configs.recommended,
   // Type-aware rules: this is the point of having eslint here at all. The one
   // that earns its keep is no-floating-promises - an un-awaited promise in an
@@ -60,6 +60,25 @@ export default tseslint.config(
             {
               group: ['**/kitchen/*', '!**/kitchen/index'],
               message: 'Import the kitchen module through its barrel (src/kitchen)',
+            },
+          ],
+        },
+      ],
+    },
+  },
+  // Hub mode (#293) composes POS, kitchen and the few guest/ops services they
+  // inject into one module without PosModule's imports, so it reaches into
+  // those modules' parts by design. Platform still goes through its barrel.
+  {
+    files: ['src/hub/**'],
+    rules: {
+      'no-restricted-imports': [
+        'error',
+        {
+          patterns: [
+            {
+              group: ['**/platform/*', '!**/platform/index'],
+              message: 'Import the platform module through its barrel (src/platform)',
             },
           ],
         },
