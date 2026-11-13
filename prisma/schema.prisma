@@ -1190,6 +1190,10 @@ model Device {
   lastSyncAt     DateTime? @map("last_sync_at") @db.Timestamptz(6)
   // Highest push seq applied; the next op must be exactly this + 1.
   lastAppliedSeq Int       @default(0) @map("last_applied_seq")
+  // restiq-backend#301 (B4): the hub's announced LAN base URLs, for the
+  // outlet's thin clients to find it (GET /sync/v1/hub).
+  lanUrls        String[]  @default([]) @map("lan_urls")
+  lanAnnouncedAt DateTime? @map("lan_announced_at") @db.Timestamptz(6)
 
   tenant                 Tenant           @relation(fields: [tenantId], references: [id])
   outlet                 Outlet?          @relation(fields: [outletId], references: [id])
