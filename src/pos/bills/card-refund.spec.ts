@@ -58,6 +58,14 @@ describe('card refunds (#284)', () => {
     expect(short.refundsCreate).not.toHaveBeenCalled()
   })
 
+  it('#286: a card reader (card_terminal) payment refunds too, whichever card method the refund names', async () => {
+    const { tx, refundsCreate, refund } = setup({ pi_reader: { amount_received: 2400, refunded: 0 } })
+    await refund(2400n)
+    const query = (tx.paymentIntent.findMany.mock.calls as unknown as [{ where: { rail: unknown } }][])[0][0]
+    expect(query.where.rail).toEqual({ in: ['card_online', 'card_terminal'] })
+    expect(refundsCreate).toHaveBeenCalledWith({ payment_intent: 'pi_reader', amount: 2400, metadata: { creditNoteId: 'note-1' } }, { stripeAccount: 'acct_1', idempotencyKey: 'note-1' })
+  })
+
   it('does nothing for a bill with no Stripe card payment', async () => {
     const { refundsCreate, refund } = setup({})
     await refund(500n)

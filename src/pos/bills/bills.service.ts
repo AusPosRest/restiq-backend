@@ -510,9 +510,10 @@ export class BillsService {
       })
 
       const view = toCreditNoteView(created, bill.pricesIncludeTax)
-      // #284: a card refund on a bill paid by card on the guest's phone goes back through Stripe. Inside
-      // this transaction on purpose - if Stripe refuses, the credit note above is rolled back.
-      if (method === 'card_online') await this.refundToCard(tx, staff.tenantId, billId, created.id, BigInt(view.totalMinor))
+      // #284/#286: a card refund on a bill paid through Stripe (on the guest's phone, or on a card reader)
+      // goes back through Stripe. Inside this transaction on purpose - if Stripe refuses, the credit note
+      // above is rolled back.
+      if (method === 'card_online' || method === 'card_terminal') await this.refundToCard(tx, staff.tenantId, billId, created.id, BigInt(view.totalMinor))
 
       await this.managerAuth.recordApproval(tx, approval, { actorId: staff.id, actorEmail: staff.name, occurredAt: new Date() })
 
@@ -521,15 +522,17 @@ export class BillsService {
   }
 
   /**
-   * #284: refunds `amountMinor` to the card(s) this bill was paid with on the guest's phone (Stripe
-   * card_online tenders). Nothing to do for a bill with none (e.g. a Test-mode simulated card).
+   * #284: refunds `amountMinor` to the card(s) this bill was paid with through Stripe - on the guest's
+   * phone (card_online) or on a card reader (card_terminal, #286). Both rails count whichever card method
+   * the refund names: the till's one "Card" choice sends card_online for a reader-paid bill too. Nothing to
+   * do for a bill with none (e.g. a Test-mode or simulated-terminal card).
    * ponytail: what each payment can still give back is read live from Stripe and the refund goes to the
    * fullest first, split over several only when one can't cover it. Ceiling: a split refund is several
    * Stripe refunds - if a later one fails, the earlier ones stand while this credit note is not written
    * (a retry sees the smaller refundable balance). Record refunds per tender if that ever bites.
    */
   private async refundToCard(tx: Prisma.TransactionClient, tenantId: string, billId: string, creditNoteId: string, amountMinor: bigint): Promise<void> {
-    const intents = await tx.paymentIntent.findMany({ where: { billId, provider: 'stripe', rail: 'card_online', tender: { isNot: null } }, orderBy: { createdAt: 'asc' } })
+    const intents = await tx.paymentIntent.findMany({ where: { billId, provider: 'stripe', rail: { in: ['card_online', 'card_terminal'] }, tender: { isNot: null } }, orderBy: { createdAt: 'asc' } })
     const refs = intents.flatMap((i) => (i.providerRef ? [i.providerRef] : []))
     if (refs.length === 0 || amountMinor <= 0n) return
     const stripeAccount = (await tx.tenantPaymentAccount.findUnique({ where: { tenantId } }))?.stripeAccountId
