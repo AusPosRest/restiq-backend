@@ -10,7 +10,7 @@ import request from 'supertest'
 import { afterAll, beforeAll, beforeEach, describe, expect, it } from 'vitest'
 import { AppModule } from '../src/app.module'
 import { createPrismaClient, PrismaClient } from '../src/db/client'
-import { SyncService } from '../src/pos'
+import { OPEN_SALES_TABLES, SyncService } from '../src/pos'
 import { signingString, signOpsToken, uuidv7 } from '../src/platform'
 
 const EMAIL = 'sync-operator@restiq.example'
@@ -188,13 +188,13 @@ describe('/sync/v1 (e2e)', () => {
     return { deviceId, privateKey }
   }
 
-  function signed(hub: Hub, method: 'GET' | 'POST', path: string, body?: unknown, opts?: { timestamp?: number; tamper?: boolean }) {
+  function signed(hub: Hub, method: 'GET' | 'POST' | 'PUT', path: string, body?: unknown, opts?: { timestamp?: number; tamper?: boolean }) {
     const raw = body === undefined ? undefined : JSON.stringify(body)
     const timestamp = String(opts?.timestamp ?? Date.now())
     const message = signingString(method, path, timestamp, raw === undefined ? undefined : Buffer.from(raw))
     const signature = sign(null, Buffer.from(message), hub.privateKey).toString('base64')
     const sent = opts?.tamper && raw ? raw.replace('"', '" ') : raw
-    const req = method === 'GET' ? request(httpServer).get(path) : request(httpServer).post(path)
+    const req = method === 'GET' ? request(httpServer).get(path) : method === 'PUT' ? request(httpServer).put(path) : request(httpServer).post(path)
     req.set('X-Device-Id', hub.deviceId).set('X-Device-Timestamp', timestamp).set('X-Device-Signature', signature)
     if (sent !== undefined) req.set('Content-Type', 'application/json').send(sent)
     return req
@@ -374,6 +374,98 @@ describe('/sync/v1 (e2e)', () => {
       const hours = (new Date(status.mustSyncBefore).getTime() - Date.now()) / 3600_000
       expect(hours).toBeGreaterThan(23.9)
       expect(hours).toBeLessThanOrEqual(24)
+    })
+  })
+
+  describe('hub address and open sales (#301)', () => {
+    it('lets the hub announce its LAN address and any device in its outlet look it up', async () => {
+      const seed = await seedTenant('Spice Route')
+      const hub = await enrolHub(seed)
+      const till = await enrolHub(seed, true, false)
+      const otherSeed = await seedTenant('Other Place')
+      const otherOutletTill = await enrolHub(otherSeed, true, false)
+
+      const none = await signed(till, 'GET', '/sync/v1/hub')
+      expect(none.status).toBe(404)
+      expect((none.body as { error: { code: string } }).error.code).toBe('no_hub')
+
+      const urls = ['http://192.168.1.20:8080', 'http://till-1.local:8080']
+      expect((await signed(hub, 'PUT', '/sync/v1/hub-address', { urls })).status).toBe(204)
+      const found = await signed(till, 'GET', '/sync/v1/hub')
+      expect(found.status).toBe(200)
+      expect(found.body).toMatchObject({ deviceId: hub.deviceId, urls })
+      expect(Math.abs(Date.parse((found.body as { announcedAt: string }).announcedAt) - Date.now())).toBeLessThan(60_000)
+
+      const elsewhere = await signed(otherOutletTill, 'GET', '/sync/v1/hub')
+      expect(elsewhere.status).toBe(404)
+      expect((elsewhere.body as { error: { code: string } }).error.code).toBe('no_hub')
+    })
+
+    it('refuses a public IP, a missing port, too many URLs and a non-hub device', async () => {
+      const seed = await seedTenant('Spice Route')
+      const hub = await enrolHub(seed)
+      const till = await enrolHub(seed, true, false)
+      for (const urls of [['http://8.8.8.8:8080'], ['http://192.168.1.20'], [], ['http://10.0.0.1:1', 'http://10.0.0.1:2', 'http://10.0.0.1:3', 'http://10.0.0.1:4', 'http://10.0.0.1:5']]) {
+        expect((await signed(hub, 'PUT', '/sync/v1/hub-address', { urls })).status).toBe(400)
+      }
+      const notHub = await signed(till, 'PUT', '/sync/v1/hub-address', { urls: ['http://10.0.0.9:8080'] })
+      expect(notHub.status).toBe(403)
+      expect((notHub.body as { error: { code: string } }).error.code).toBe('not_hub')
+      expect(await prisma.device.count({ where: { tenantId: seed.tenantId, lanAnnouncedAt: { not: null } } })).toBe(0)
+    })
+
+    it('bootstrap?include=open_sales adds the outlet\'s open orders, bills, queued tickets and open shift; plain bootstrap is unchanged', async () => {
+      seq = 0
+      const seed = await seedTenant('Spice Route')
+      const hub = await enrolHub(seed)
+      const openOrderId = uuidv7()
+      const openLineId = uuidv7()
+      const openBillId = uuidv7()
+      const closedOrderId = uuidv7()
+      const closedBillId = uuidv7()
+      const shiftId = uuidv7()
+      const movementId = uuidv7()
+      const ops = [
+        op('shift.open', seed.cashierId, { shiftId, outletId: seed.outletId, floatMinor: 5000 }),
+        op('shift.cash_movement', seed.cashierId, { shiftId, movementId, type: 'paid_out', amountMinor: 1200, reason: 'Milk' }),
+        op('order.create', seed.cashierId, { orderId: openOrderId, tableId: seed.tableId }),
+        op('order.line.add', seed.cashierId, { orderId: openOrderId, lineId: openLineId, itemId: seed.itemId, quantity: 1, unitPriceMinor: '10000' }),
+        op('order.status', seed.cashierId, { orderId: openOrderId, status: 'sent' }),
+        op('bill.create', seed.cashierId, { orderId: openOrderId, billId: openBillId }),
+        op('order.create', seed.cashierId, { orderId: closedOrderId, tokenNumber: 7 }),
+        op('order.line.add', seed.cashierId, { orderId: closedOrderId, lineId: uuidv7(), itemId: seed.itemId, quantity: 1, unitPriceMinor: '10000' }),
+        op('bill.create', seed.cashierId, { orderId: closedOrderId, billId: closedBillId }),
+      ]
+      expect((await push(hub, ops)).map((r) => r.status)).toEqual(ops.map(() => 'accepted'))
+      const closedBill = await prisma.bill.findUniqueOrThrow({ where: { id: closedBillId } })
+      const total = Number(closedBill.pricesIncludeTax ? closedBill.subtotalMinor : closedBill.subtotalMinor + closedBill.taxMinor)
+      const finalize = op('bill.finalize', seed.cashierId, { billId: closedBillId, tenders: [{ method: 'cash', amountMinor: total }], tenderIds: [uuidv7()] })
+      expect((await push(hub, [finalize])).map((r) => r.status)).toEqual(['accepted'])
+      expect((await prisma.order.findUniqueOrThrow({ where: { id: closedOrderId } })).status).toBe('closed')
+
+      const plain = await signed(hub, 'GET', '/sync/v1/bootstrap')
+      expect(Object.keys(plain.body as object).sort()).toEqual(['cursor', 'data', 'outletId', 'permissions', 'policy'])
+      expect(Object.keys((plain.body as { data: object }).data)).not.toContain('orders')
+
+      const boot = await signed(hub, 'GET', '/sync/v1/bootstrap?include=open_sales')
+      expect(boot.status).toBe(200)
+      const open = (boot.body as { openSales: Record<string, Record<string, unknown>[]> }).openSales
+      const ids = (table: string) => open[table].map((r) => r.id)
+      expect(Object.keys(open)).toEqual([...OPEN_SALES_TABLES])
+      expect(ids('orders')).toEqual([openOrderId])
+      expect(ids('order_lines')).toEqual([openLineId])
+      expect(ids('bills')).toEqual([openBillId])
+      expect(open.tenders).toEqual([])
+      // Queued tickets go by ticket, not order: a paid counter order still cooking keeps its ticket.
+      const ticket = open.tickets.find((r) => r.order_id === openOrderId)
+      expect(ticket).toMatchObject({ status: 'queued' })
+      expect(open.tickets.every((r) => r.status === 'queued')).toBe(true)
+      expect(open.ticket_lines.filter((r) => r.ticket_id === ticket?.id).map((r) => r.order_line_id)).toEqual([openLineId])
+      expect(ids('shifts')).toEqual([shiftId])
+      expect(ids('cash_movements')).toEqual([movementId])
+      expect(open.token_number_counters.every((r) => r.outlet_id === seed.outletId)).toBe(true)
+      // The rest of the payload is the plain bootstrap's.
+      expect((boot.body as { data: object }).data).toEqual((plain.body as { data: object }).data)
     })
   })
 
