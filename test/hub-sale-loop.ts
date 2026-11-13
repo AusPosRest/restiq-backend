@@ -1,7 +1,8 @@
 // The child process src/hub/recovery.spec.ts kills (#306, the PGlite spike's
 // crash test on the real hub): boots the hub on a data dir the way hub-main
 // does (recovery included), prints "ready", then rings up counter sales -
-// order, line, bill, cash finalize - through the hub's HTTP API until killed.
+// order, line, bill, cash finalize - through the hub's HTTP API until killed,
+// printing "sold" after each finalized sale.
 // Run: node -r ./test/swc-register.cjs test/hub-sale-loop.ts <dataDir> <tenantId> <outletId> <itemId>
 import { join } from 'node:path'
 import request from 'supertest'
@@ -24,6 +25,7 @@ async function main(): Promise<void> {
     await post(`/pos/v1/orders/${order.id}/lines`, { itemId, quantity: 1 }).expect(201)
     const bill = (await post(`/pos/v1/orders/${order.id}/bill`).expect(201)).body as { id: string; totalMinor: number }
     await post(`/pos/v1/bills/${bill.id}/finalize`, { tenders: [{ method: 'cash', amountMinor: bill.totalMinor }] }).expect(200)
+    console.log('sold')
   }
 }
 

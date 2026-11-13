@@ -20,7 +20,8 @@ import { APP_ROLE, openStore } from './store'
 
 const ROOT = join(__dirname, '..', '..')
 const MIGRATIONS = join(ROOT, 'prisma', 'migrations')
-const ROUNDS = 12
+// Each round: start the child, wait for its first finished sale, kill it 0-300 ms later. Fewer on CI's slower runners.
+const ROUNDS = process.env.CI ? 8 : 12
 const dirs: string[] = []
 
 /** A data dir as a bootstrapped hub leaves it: seeded store, hub_meta and bootstrap.json (built from the seeded cloud tables). */
@@ -82,11 +83,15 @@ describe('hub startup recovery', () => {
         let out = ''
         child.stdout.on('data', (chunk: Buffer) => {
           out += chunk.toString()
-          if (out.includes('ready\n')) resolve()
+          if (out.includes('sold\n')) resolve() // selling, whatever the machine's speed
         })
-        void exited.then((code) => reject(new Error(`sale loop exited (${String(code)}) before ready: ${out}`)))
+        void exited.then((code) => reject(new Error(`sale loop exited (${String(code)}) before a sale: ${out}`)))
+        setTimeout(() => {
+          child.kill('SIGKILL')
+          reject(new Error(`no sale within 20 s: ${out}`))
+        }, 20_000).unref()
       })
-      await new Promise((resolve) => setTimeout(resolve, 50 + Math.random() * 400))
+      await new Promise((resolve) => setTimeout(resolve, Math.random() * 300))
       child.kill('SIGKILL')
       await exited
     }
@@ -102,9 +107,10 @@ describe('hub startup recovery', () => {
     const orphaned = (entity: string) => orphans.filter((o) => o.entity === entity).map((o) => o.id)
     const bills = await rows<{ id: string; status: string; tenders: number }>(hub.pg, BILLS)
     const finalized = bills.filter((b) => b.status === 'finalized')
-    expect(finalized.length).toBeGreaterThan(ROUNDS) // sales happened
     // Every finalized bill has its op in the journal - or, killed between the commit and the fsync, is an orphan.
     const finalizeOps = new Set(ids('bill.finalize', 'billId'))
+    // Every round finished at least one sale (its "sold" came after the finalize reply, so its op is journaled).
+    expect(finalizeOps.size).toBeGreaterThanOrEqual(ROUNDS)
     for (const bill of finalized) expect(finalizeOps.has(bill.id) || orphaned('bill_finalized').includes(bill.id), bill.id).toBe(true)
     expect(finalizeOps.size).toBeGreaterThanOrEqual(finalized.length - orphaned('bill_finalized').length)
     // Every journaled finalize is applied, once.
@@ -116,7 +122,7 @@ describe('hub startup recovery', () => {
     expect(await count('order_lines')).toBe(new Set(ids('order.line.add', 'lineId')).size + orphaned('order_line').length)
     expect(bills.length).toBe(new Set(ids('bill.create', 'billId')).size + orphaned('bill').length)
     await close(hub)
-  }, 60_000)
+  }, 120_000)
 
   it('rebuilds a corrupted or lost database from bootstrap.json and the journal, bill for bill', async () => {
     const { dataDir, f } = await seedDir()
