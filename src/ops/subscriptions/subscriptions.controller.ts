@@ -19,6 +19,13 @@ export class OpsSubscriptionsController {
     return this.subscriptions.listInvoices(tenantId)
   }
 
+  // #282: Stripe Checkout link where the owner sets up card billing.
+  @Post('billing-link')
+  @HttpCode(200)
+  billingLink(@Param('tenantId', ParseUUIDPipe) tenantId: string): Promise<{ url: string; expiresAt: string }> {
+    return this.subscriptions.billingLink(tenantId)
+  }
+
   @Post('suspend')
   @HttpCode(200)
   suspend(

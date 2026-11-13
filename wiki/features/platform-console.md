@@ -208,3 +208,14 @@ See `wiki/features/tenant-admin.md`'s CAP-108 section for the
   product (add when "already imported" badges or push-updates are wanted),
   allergens/modifier groups on products (tags cover dietary labels), bulk
   CSV upload into the directory, a GIN index on `tags`.
+
+## #282 - Stripe Connect and card billing
+
+- `src/ops/payments/` - `GET`/`PATCH /ops/v1/tenants/:tenantId/payments`, `POST .../payments/onboarding-link`.
+  The connected account is created with Stripe Accounts v2 (dashboard `none`, Stripe collects fees and
+  carries losses - the only settings this platform is allowed). Its status is read live from Stripe on
+  every view (`accountStatus`), never stored. Wallet list and platform fee live in `tenant_payment_accounts`.
+- `SubscriptionsService.billingLink` - Stripe Checkout (mode=subscription) on the platform account; the
+  amount is inline from PlanPrice at link time, so a price edit applies to the next link only.
+- `POST /webhooks/stripe` (`subscriptions/stripe-webhook.controller.ts`) - public by path (no realm guard
+  matches `/webhooks`), trusted only by signature. Unknown events and unknown tenants are acknowledged (200).

@@ -13,6 +13,9 @@ import { OpsDlqController } from './dlq/dlq.controller'
 import { OpsPlanPricesController } from './plan-prices/plan-prices.controller'
 import { PlanPricesService } from './plan-prices/plan-prices.service'
 import { DlqService } from './dlq/dlq.service'
+import { OpsPaymentsController } from './payments/payments.controller'
+import { PaymentsService } from './payments/payments.service'
+import { StripeWebhookController } from './subscriptions/stripe-webhook.controller'
 import { OpsSubscriptionsController } from './subscriptions/subscriptions.controller'
 import { SubscriptionsService } from './subscriptions/subscriptions.service'
 import { ALERT_CHANNEL, WebhookAlertChannel } from './sync-health/alert-channel'
@@ -36,6 +39,8 @@ import { OpsTenantsService } from './tenants/tenants.service'
     OpsAgreementsController,
     OpsCatalogController,
     OpsPlanPricesController,
+    OpsPaymentsController,
+    StripeWebhookController,
   ],
   providers: [
     OpsAuthService,
@@ -48,6 +53,7 @@ import { OpsTenantsService } from './tenants/tenants.service'
     AgreementsService,
     CatalogService,
     PlanPricesService,
+    PaymentsService,
     { provide: ALERT_CHANNEL, useClass: WebhookAlertChannel },
   ],
   // DevicesService is exported for tenant-admin/CAP-6 (AD-12: one enrolment

@@ -16,7 +16,7 @@ async function bootstrap(): Promise<void> {
     throw new Error('WEB_ORIGIN is not set - it must name the site allowed to call this API')
   }
 
-  const app = await NestFactory.create<NestExpressApplication>(AppModule)
+  const app = await NestFactory.create<NestExpressApplication>(AppModule, { rawBody: true })
   // restiq-backend#171: sign-in throttling keys on the client IP (req.ip).
   // Behind a proxy that address is in X-Forwarded-For, which a client can
   // also write itself - so trust exactly the proxy hops we run behind (Fly's
@@ -32,6 +32,7 @@ async function bootstrap(): Promise<void> {
   // Uploaded item photos travel inline as data:image URLs (issue #142, up to
   // ~280 KB of base64) - above Express's 100 KB JSON default.
   app.useBodyParser('json', { limit: '512kb' })
+  // #282: rawBody (above) keeps req.rawBody for Stripe webhook signature checks.
   // credentials: the operator's session cookie rides this same path.
   app.enableCors({ origin: webOrigin, credentials: true })
 

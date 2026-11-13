@@ -5,6 +5,7 @@ import { INestApplication } from '@nestjs/common'
 import { Test } from '@nestjs/testing'
 import * as argon2 from 'argon2'
 import request from 'supertest'
+import Stripe from 'stripe'
 import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it } from 'vitest'
 import { AppModule } from '../src/app.module'
 import { createPrismaClient, PrismaClient } from '../src/db/client'
@@ -37,6 +38,7 @@ async function wipe(prisma: PrismaClient): Promise<void> {
   // wiped first for the same reason invoice/subscription is below.
   await prisma.cashMovement.deleteMany()
   await prisma.shift.deleteMany()
+  await prisma.tenantPaymentAccount.deleteMany()
   await prisma.invoice.deleteMany()
   await prisma.subscription.deleteMany()
   await prisma.appliedOp.deleteMany()
@@ -111,12 +113,15 @@ describe('/ops/v1/tenants/:tenantId/subscription (e2e)', () => {
     token = signOpsToken({ id: operator.id, email: operator.email })
 
     const moduleRef = await Test.createTestingModule({ imports: [AppModule] }).compile()
-    app = moduleRef.createNestApplication()
+    // rawBody: as main.ts - the Stripe webhook verifies its signature over the raw bytes.
+    app = moduleRef.createNestApplication({ rawBody: true })
     await app.init()
     httpServer = app.getHttpServer() as Parameters<typeof request>[0]
   })
 
   afterAll(async () => {
+    // Other suites delete tenants; a leftover payments row would block them (FK).
+    await prisma.tenantPaymentAccount.deleteMany()
     await app.close()
     await prisma.$disconnect()
   })
@@ -314,6 +319,150 @@ describe('/ops/v1/tenants/:tenantId/subscription (e2e)', () => {
     it('404s for an unknown tenant', async () => {
       const res = await authed(request(httpServer).post(`/ops/v1/tenants/${uuidv7()}/subscription/reactivate`)).send({ reason: 'x' })
       expect(res.status).toBe(404)
+    })
+  })
+
+  // #282 Stripe Connect + card billing. Nothing here reaches Stripe: the routes
+  // tested either never call it, or fail before the first call.
+  describe('Stripe card billing and payments (#282)', () => {
+    const saved = { key: process.env.STRIPE_SECRET_KEY, secret: process.env.STRIPE_WEBHOOK_SECRET }
+    let savedPrice: { monthlyPriceMinor: bigint | null; annualDiscountPercent: number } | null
+
+    beforeEach(async () => {
+      savedPrice = await prisma.planPrice.findUnique({ where: { country_plan: { country: 'IN', plan: 'standard' } } })
+    })
+
+    afterEach(async () => {
+      for (const [name, value] of [['STRIPE_SECRET_KEY', saved.key], ['STRIPE_WEBHOOK_SECRET', saved.secret]] as const) {
+        if (value === undefined) delete process.env[name]
+        else process.env[name] = value
+      }
+      if (savedPrice) {
+        const { monthlyPriceMinor, annualDiscountPercent } = savedPrice
+        await prisma.planPrice.update({ where: { country_plan: { country: 'IN', plan: 'standard' } }, data: { monthlyPriceMinor, annualDiscountPercent } })
+      } else {
+        await prisma.planPrice.deleteMany({ where: { country: 'IN', plan: 'standard' } })
+      }
+    })
+
+    function setPrice(monthlyPriceMinor: bigint | null, annualDiscountPercent = 20) {
+      const data = { monthlyPriceMinor, annualDiscountPercent }
+      return prisma.planPrice.upsert({ where: { country_plan: { country: 'IN', plan: 'standard' } }, create: { country: 'IN', plan: 'standard', ...data }, update: data })
+    }
+
+    it('the subscription view carries cardBilling from PlanPrice, per billing period', async () => {
+      await setPrice(null)
+      let res = await authed(request(httpServer).get(`/ops/v1/tenants/${tenantId}/subscription`))
+      expect((res.body as { cardBilling: unknown }).cardBilling).toEqual({ status: 'not_set_up', amountMinor: null, currency: 'INR' })
+
+      await setPrice(99900n, 20)
+      res = await authed(request(httpServer).get(`/ops/v1/tenants/${tenantId}/subscription`))
+      expect((res.body as { cardBilling: { amountMinor: string } }).cardBilling.amountMinor).toBe('99900')
+
+      await prisma.tenant.update({ where: { id: tenantId }, data: { billingPeriod: 'annual' } })
+      res = await authed(request(httpServer).get(`/ops/v1/tenants/${tenantId}/subscription`))
+      expect((res.body as { cardBilling: { amountMinor: string } }).cardBilling.amountMinor).toBe('959040')
+    })
+
+    it('billing-link: 503 without a Stripe key, 409 price_not_set without a monthly price', async () => {
+      delete process.env.STRIPE_SECRET_KEY
+      let res = await authed(request(httpServer).post(`/ops/v1/tenants/${tenantId}/subscription/billing-link`)).send({})
+      expect(res.status).toBe(503)
+      expect(errorCodeOf(res)).toBe('payments_not_configured')
+
+      process.env.STRIPE_SECRET_KEY = 'sk_test_never_called'
+      await setPrice(null)
+      res = await authed(request(httpServer).post(`/ops/v1/tenants/${tenantId}/subscription/billing-link`)).send({})
+      expect(res.status).toBe(409)
+      expect(errorCodeOf(res)).toBe('price_not_set')
+    })
+
+    it('billing-link: 409 conflict once card billing is active', async () => {
+      process.env.STRIPE_SECRET_KEY = 'sk_test_never_called'
+      await prisma.subscription.create({
+        data: { tenantId, currentPeriodStart: new Date(), currentPeriodEnd: new Date(), cardBillingStatus: 'active' },
+      })
+      const res = await authed(request(httpServer).post(`/ops/v1/tenants/${tenantId}/subscription/billing-link`)).send({})
+      expect(res.status).toBe(409)
+      expect(errorCodeOf(res)).toBe('conflict')
+    })
+
+    it('a signed webhook updates the tenant on its region plane; a bad signature is 400', async () => {
+      process.env.STRIPE_SECRET_KEY = 'sk_test_never_called'
+      process.env.STRIPE_WEBHOOK_SECRET = 'whsec_e2e'
+      const payload = JSON.stringify({
+        id: 'evt_e2e',
+        object: 'event',
+        type: 'checkout.session.completed',
+        data: { object: { object: 'checkout.session', mode: 'subscription', subscription: 'sub_e2e', customer: 'cus_e2e', metadata: { tenantId } } },
+      })
+      const stripe = new Stripe('sk_test_never_called')
+      const bad = await request(httpServer)
+        .post('/webhooks/stripe')
+        .set('Content-Type', 'application/json')
+        .set('Stripe-Signature', stripe.webhooks.generateTestHeaderString({ payload, secret: 'whsec_wrong' }))
+        .send(payload)
+      expect(bad.status).toBe(400)
+      expect(await prisma.subscription.count({ where: { tenantId } })).toBe(0)
+
+      const ok = await request(httpServer)
+        .post('/webhooks/stripe')
+        .set('Content-Type', 'application/json')
+        .set('Stripe-Signature', stripe.webhooks.generateTestHeaderString({ payload, secret: 'whsec_e2e' }))
+        .send(payload)
+      expect(ok.status).toBe(200)
+      expect(await prisma.subscription.findUniqueOrThrow({ where: { tenantId } })).toMatchObject({
+        stripeSubscriptionId: 'sub_e2e',
+        stripeCustomerId: 'cus_e2e',
+        cardBillingStatus: 'active',
+        status: 'active',
+      })
+    })
+
+    it('GET payments defaults to not_connected with all methods and no fee, without touching Stripe', async () => {
+      delete process.env.STRIPE_SECRET_KEY
+      const res = await authed(request(httpServer).get(`/ops/v1/tenants/${tenantId}/payments`))
+      expect(res.status).toBe(200)
+      expect((res.body as { payments: unknown }).payments).toEqual({
+        tenantId,
+        stripeAccountId: null,
+        status: 'not_connected',
+        requirementsDue: 0,
+        allowedMethods: ['card', 'apple_pay', 'google_pay'],
+        feePercentBps: 0,
+        feeFixedMinor: '0',
+        currency: 'INR',
+      })
+    })
+
+    it('PATCH payments saves the settings with an audited reason', async () => {
+      const res = await authed(request(httpServer).patch(`/ops/v1/tenants/${tenantId}/payments`)).send({
+        allowedMethods: ['card'],
+        feePercentBps: 250,
+        feeFixedMinor: '30',
+        reason: 'Agreed platform fee',
+      })
+      expect(res.status).toBe(200)
+      expect((res.body as { payments: unknown }).payments).toMatchObject({ allowedMethods: ['card'], feePercentBps: 250, feeFixedMinor: '30' })
+      const audit = await prisma.auditEvent.findMany({ where: { tenantId, action: 'payments.updated' } })
+      expect(audit).toHaveLength(1)
+      expect(audit[0]).toMatchObject({ reason: 'Agreed platform fee', actorId: operatorId })
+    })
+
+    it('PATCH payments rejects a missing reason, no methods, or a bad fee', async () => {
+      const url = `/ops/v1/tenants/${tenantId}/payments`
+      for (const body of [
+        { feePercentBps: 100 },
+        { allowedMethods: [], reason: 'x' },
+        { allowedMethods: ['cash'], reason: 'x' },
+        { feePercentBps: 10_001, reason: 'x' },
+        { feeFixedMinor: '-1', reason: 'x' },
+        { feeFixedMinor: '1.5', reason: 'x' },
+      ]) {
+        const res = await authed(request(httpServer).patch(url)).send(body)
+        expect(res.status, JSON.stringify(body)).toBe(400)
+      }
+      expect(await prisma.tenantPaymentAccount.count({ where: { tenantId } })).toBe(0)
     })
   })
 })
