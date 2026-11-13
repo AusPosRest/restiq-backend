@@ -245,7 +245,7 @@ export class SyncPushService {
           unitPriceMinor: minor(p.unitPriceMinor),
           modifierPriceMinor: Object.fromEntries((p.modifierIds ?? []).map((id) => [id, minor(modifierPrices[id])])),
         }
-        const dto = { itemId: p.itemId, variantId: p.variantId, quantity: p.quantity, modifierIds: p.modifierIds, seatNumber: p.seatNumber }
+        const dto = { itemId: p.itemId, variantId: p.variantId, quantity: p.quantity, modifierIds: p.modifierIds, seatNumber: p.seatNumber, note: p.note }
         await this.ignoreRepeat(() => this.orderLines.addLine(staff, p.orderId, dto, replay))
         return
       }

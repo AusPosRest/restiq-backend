@@ -13,6 +13,8 @@ export interface DevicePrincipal {
   deviceId: string
   tenantId: string
   outletId: string
+  /** restiq-backend#292: only the outlet's hub may bootstrap and push. */
+  isHub: boolean
 }
 
 type SyncRequest = Request & { device?: DevicePrincipal; rawBody?: Buffer }
@@ -60,7 +62,7 @@ export class DeviceSyncGuard implements CanActivate {
     // the same operator_read policy the ops console reads devices with.
     const device = await plane.$transaction(async (tx) => {
       await tx.$executeRaw`SELECT set_config('app.operator_context', 'operator', true)`
-      return tx.device.findUnique({ where: { id: deviceId }, select: { tenantId: true, outletId: true, status: true, publicKey: true } })
+      return tx.device.findUnique({ where: { id: deviceId }, select: { tenantId: true, outletId: true, status: true, publicKey: true, role: true } })
     })
     const key = device?.publicKey ? parseEd25519PublicKey(device.publicKey) : null
     if (!device || !key) refuse()
@@ -80,7 +82,7 @@ export class DeviceSyncGuard implements CanActivate {
       await tx.$executeRaw`SELECT set_config('app.tenant_id', ${device.tenantId}, true)`
       await tx.device.update({ where: { id: deviceId }, data: { lastContactAt: new Date() } })
     })
-    request.device = { deviceId, tenantId: device.tenantId, outletId: device.outletId }
+    request.device = { deviceId, tenantId: device.tenantId, outletId: device.outletId, isHub: device.role === 'hub' }
     return true
   }
 }

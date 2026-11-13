@@ -3,16 +3,21 @@
 // in the database) for the cloud-owned tables, so the hub can load them into
 // its own copy of the schema with one generic path, and pull is just "the
 // rows that changed since the cursor".
-import { BadRequestException, Injectable, NotFoundException } from '@nestjs/common'
+import { BadRequestException, GoneException, Injectable, Logger, NotFoundException, OnModuleDestroy, OnModuleInit } from '@nestjs/common'
 import type { Prisma } from '../../generated/prisma/client'
+import { heartbeatData, type HeartbeatDto } from '../../ops'
 import { DevicePrincipal, permissionsFor, RegionRegistryService } from '../../platform'
 import { setTenantContext } from '../tenant-context'
 
 type Tx = Prisma.TransactionClient
 type Row = Record<string, unknown>
 
-/** The tables the cloud owns (same list as the sync_record_change trigger). */
+/** The tables the cloud owns (same list as the sync_record_change trigger), parents first. */
 export const CLOUD_TABLES = [
+  // restiq-backend#292: the hub's own tenant row and brands, so its guards,
+  // tax and receipts read the same tenant the cloud does.
+  'tenants',
+  'brands',
   'outlets',
   'menu_categories',
   'menu_items',
@@ -47,6 +52,10 @@ const SYNC_INTERVAL_SECONDS = 30
 const SETTLE_SECONDS = 30
 const PULL_LIMIT_DEFAULT = 500
 const PULL_LIMIT_MAX = 1000
+// restiq-backend#292 (SYNC-DESIGN §6): sync_changes keeps 30 days; a hub
+// further behind than that gets cursor_expired and bootstraps again.
+const RETAIN_DAYS = 30
+const PRUNE_EVERY_MS = 24 * 3600 * 1000
 
 export interface SyncPolicy {
   maxOfflineHours: number
@@ -69,6 +78,7 @@ function isCloudTable(name: string): name is CloudTable {
 // $1 = tenant, $2 = outlet. The explicit tenant filter sits on top of RLS, as
 // everywhere else in this codebase.
 function scopeSql(table: CloudTable): string {
+  if (table === 'tenants') return 't.id = $1::uuid AND $2::uuid IS NOT NULL'
   const tenant = 't.tenant_id = $1::uuid'
   if (table === 'outlets') return `${tenant} AND t.id = $2::uuid`
   if (table === 'dining_tables') return `${tenant} AND t.floor_id IN (SELECT id FROM floors WHERE outlet_id = $2::uuid)`
@@ -78,8 +88,46 @@ function scopeSql(table: CloudTable): string {
 }
 
 @Injectable()
-export class SyncService {
+export class SyncService implements OnModuleInit, OnModuleDestroy {
+  private readonly logger = new Logger(SyncService.name)
+  private timer?: ReturnType<typeof setInterval>
+
   constructor(private readonly registry: RegionRegistryService) {}
+
+  // Same timer shape as SyncHealthService's sweep. A hub runs this backend
+  // against its own local database (RESTIQ_HUB=1), whose feed is not pruned.
+  onModuleInit(): void {
+    if (process.env.NODE_ENV === 'test' || process.env.RESTIQ_HUB === '1') return
+    const run = () => {
+      void this.prune().catch((error: unknown) => this.logger.error('sync_changes prune failed', error instanceof Error ? error.message : error))
+    }
+    run()
+    this.timer = setInterval(run, PRUNE_EVERY_MS)
+  }
+
+  onModuleDestroy(): void {
+    if (this.timer) clearInterval(this.timer)
+  }
+
+  /** Deletes changes older than RETAIN_DAYS, tenant by tenant (sync_changes has tenant RLS only). */
+  async prune(): Promise<void> {
+    const plane = this.plane()
+    const tenants = await plane.$transaction(async (tx) => {
+      await tx.$executeRaw`SELECT set_config('app.operator_context', 'operator', true)`
+      return tx.tenant.findMany({ select: { id: true } })
+    })
+    for (const { id } of tenants) {
+      await plane.$transaction(async (tx) => {
+        await setTenantContext(tx, id)
+        // ponytail: each tenant's newest change is always kept, so a quiet
+        // tenant's caught-up hub (cursor = that row) never reads as expired.
+        await tx.$executeRaw`
+          DELETE FROM sync_changes WHERE tenant_id = ${id}::uuid
+            AND changed_at < now() - make_interval(days => ${RETAIN_DAYS})
+            AND id < (SELECT max(id) FROM sync_changes WHERE tenant_id = ${id}::uuid)`
+      })
+    }
+  }
 
   private plane() {
     return this.registry.planeFor(this.registry.homeRegion())
@@ -138,6 +186,14 @@ export class SyncService {
 
     return this.plane().$transaction(async (tx) => {
       await setTenantContext(tx, device.tenantId)
+      // A hub's cursor is always one of its tenant's own change ids (or 0), so
+      // one below the oldest kept means changes it never saw were pruned.
+      if (cursor > 0n) {
+        const [{ min }] = await tx.$queryRaw<[{ min: bigint | null }]>`SELECT min(id) AS min FROM sync_changes WHERE tenant_id = ${device.tenantId}::uuid`
+        if (min !== null && cursor < min) {
+          throw new GoneException({ code: 'cursor_expired', message: 'This cursor is older than the kept change history; bootstrap again' })
+        }
+      }
       const upper = await this.settledCursor(tx, device.tenantId)
       const rows = await tx.$queryRaw<{ id: bigint; entity: string; entity_id: string; action: string }[]>`
         SELECT id, entity, entity_id, action FROM sync_changes
@@ -186,7 +242,15 @@ export class SyncService {
       const mustSyncBefore = new Date(since.getTime() + policy.maxOfflineHours * 3600 * 1000)
       // The guard already refused a revoked device; these stay in the shape
       // the planned contract gives so a hub reads one answer either way.
-      return { active: row.status === 'active', revoked: row.status !== 'active', policy, mustSyncBefore: mustSyncBefore.toISOString() }
+      return { active: row.status === 'active', revoked: row.status !== 'active', isHub: device.isHub, policy, mustSyncBefore: mustSyncBefore.toISOString() }
+    })
+  }
+
+  /** restiq-backend#292: the signed heartbeat - the same snapshot columns the ops heartbeat writes. */
+  async heartbeat(device: DevicePrincipal, dto: HeartbeatDto): Promise<void> {
+    await this.plane().$transaction(async (tx) => {
+      await setTenantContext(tx, device.tenantId)
+      await tx.device.update({ where: { id: device.deviceId }, data: heartbeatData(dto) })
     })
   }
 
