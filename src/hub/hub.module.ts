@@ -75,10 +75,10 @@ import type { PGlite } from '@electric-sql/pglite'
 })
 export class HubModule {}
 
-/** The hub's Nest app, not yet listening, recording every write as an op in pg's outbox and dataDir's journal. The caller must have called setPrismaClient() first. */
-export async function createHubApp(pg: PGlite, dataDir: string): Promise<NestExpressApplication> {
+/** The hub's Nest app, not yet listening, recording every write as an op in pg's outbox and dataDir's journal, calling onOp after each. The caller must have called setPrismaClient() first. */
+export async function createHubApp(pg: PGlite, dataDir: string, onOp?: () => void): Promise<NestExpressApplication> {
   const app = await NestFactory.create<NestExpressApplication>(HubModule, { logger: ['error', 'warn'] })
   app.use(hubAllowlist)
-  app.useGlobalInterceptors(new OpRecorderInterceptor(pg, dataDir))
+  app.useGlobalInterceptors(new OpRecorderInterceptor(pg, dataDir, onOp))
   return app
 }

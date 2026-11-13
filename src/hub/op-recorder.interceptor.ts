@@ -23,6 +23,8 @@ export class OpRecorderInterceptor implements NestInterceptor {
   constructor(
     private readonly pg: PGlite,
     private readonly dataDir: string,
+    /** H4: called after each op is recorded - the sync worker's kick. */
+    private readonly onOp: () => void = () => undefined,
   ) {}
 
   intercept(context: ExecutionContext, next: CallHandler): Observable<unknown> {
@@ -56,6 +58,7 @@ export class OpRecorderInterceptor implements NestInterceptor {
     const op: HubOp = { opId: uuidv7(), seq: await nextSeq(this.pg), at: startedAt.toISOString(), ...built }
     appendOp(this.dataDir, op)
     await insertOp(this.pg, op)
+    this.onOp()
     return result
   }
 
