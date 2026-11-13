@@ -6,7 +6,7 @@ import { BillsService } from './bills.service'
 // #284: a card_online credit note on a bill paid by card on the phone refunds through Stripe.
 type RefundToCard = (tx: unknown, tenantId: string, billId: string, creditNoteId: string, amountMinor: bigint) => Promise<void>
 
-function setup(payments: Record<string, { amount_received: number; refunded: number }>, refundError?: Error) {
+function setup(payments: Record<string, { amount_received: number; refunded: number; fee?: number }>, refundError?: Error) {
   const tx = {
     paymentIntent: { findMany: vi.fn(() => Promise.resolve(Object.keys(payments).map((providerRef) => ({ providerRef })))) },
     tenantPaymentAccount: { findUnique: vi.fn(() => Promise.resolve({ stripeAccountId: 'acct_1' })) },
@@ -14,7 +14,7 @@ function setup(payments: Record<string, { amount_received: number; refunded: num
   const refundsCreate = vi.fn(() => (refundError ? Promise.reject(refundError) : Promise.resolve({ id: 're_1' })))
   const api = {
     paymentIntents: {
-      retrieve: vi.fn((id: string) => Promise.resolve({ id, amount_received: payments[id].amount_received, latest_charge: { amount_refunded: payments[id].refunded } })),
+      retrieve: vi.fn((id: string) => Promise.resolve({ id, amount_received: payments[id].amount_received, application_fee_amount: payments[id].fee ?? null, latest_charge: { amount_refunded: payments[id].refunded } })),
     },
     refunds: { create: refundsCreate },
   }
@@ -25,13 +25,19 @@ function setup(payments: Record<string, { amount_received: number; refunded: num
 
 describe('card refunds (#284)', () => {
   it('refunds the whole amount from one payment that covers it, keyed by the credit note', async () => {
-    const { refundsCreate, refund } = setup({ pi_a: { amount_received: 1000, refunded: 0 }, pi_b: { amount_received: 3000, refunded: 0 } })
+    const { refundsCreate, refund } = setup({ pi_a: { amount_received: 1000, refunded: 0 }, pi_b: { amount_received: 3000, refunded: 0, fee: 75 } })
     await refund(2500n)
     expect(refundsCreate).toHaveBeenCalledOnce()
     expect(refundsCreate).toHaveBeenCalledWith(
       { payment_intent: 'pi_b', amount: 2500, refund_application_fee: true, metadata: { creditNoteId: 'note-1' } },
       { stripeAccount: 'acct_1', idempotencyKey: 'note-1' },
     )
+  })
+
+  it('with no platform fee on the payment (fee 0) it does not ask Stripe to refund one - Stripe refuses that', async () => {
+    const { refundsCreate, refund } = setup({ pi_a: { amount_received: 550, refunded: 0 } })
+    await refund(550n)
+    expect(refundsCreate).toHaveBeenCalledWith({ payment_intent: 'pi_a', amount: 550, metadata: { creditNoteId: 'note-1' } }, { stripeAccount: 'acct_1', idempotencyKey: 'note-1' })
   })
 
   it('splits over several payments only when one cannot cover it, net of earlier refunds', async () => {
