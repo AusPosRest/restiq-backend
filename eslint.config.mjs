@@ -4,7 +4,7 @@ import tseslint from 'typescript-eslint'
 export default tseslint.config(
   // src/generated is Prisma's output, rewritten by `npm run db:generate`;
   // linting it would only report on code we never touch.
-  { ignores: ['dist/**', 'dist-hub/**', 'node_modules/**', 'eslint.config.mjs', 'src/generated/**'] },
+  { ignores: ['dist/**', 'dist-hub/**', 'node_modules/**', 'eslint.config.mjs', 'src/generated/**', 'test/swc-register.cjs'] },
   js.configs.recommended,
   // Type-aware rules: this is the point of having eslint here at all. The one
   // that earns its keep is no-floating-promises - an un-awaited promise in an

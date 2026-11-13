@@ -48,10 +48,20 @@ export function readAck(dataDir: string): number {
   return existsSync(path) ? Number(readFileSync(path, 'utf8')) : 0
 }
 
-/** At startup only: empties the journal when the cloud has acknowledged every op in it. Returns whether it did. */
+/**
+ * At startup only: once the cloud has acknowledged every op in the journal, cuts it down to the
+ * last op - kept so a store rebuilt from the journal (H5) still knows the next seq. Returns whether it did.
+ */
 export function compactJournal(dataDir: string): boolean {
   const ops = readJournal(dataDir)
-  if (ops.length === 0 || ops[ops.length - 1].seq > readAck(dataDir)) return false
-  writeDurably(join(dataDir, LOG), '')
+  if (ops.length < 2 || ops[ops.length - 1].seq > readAck(dataDir)) return false
+  writeDurably(join(dataDir, LOG), `${JSON.stringify(ops[ops.length - 1])}\n`)
   return true
+}
+
+/** At startup only (H5): cuts a torn last line (power cut mid-append) so the next append starts a line of its own. */
+export function repairJournal(dataDir: string): void {
+  const path = join(dataDir, LOG)
+  const text = existsSync(path) ? readFileSync(path, 'utf8') : ''
+  if (text !== '' && !text.endsWith('\n')) writeDurably(path, text.slice(0, text.lastIndexOf('\n') + 1))
 }

@@ -21,7 +21,7 @@ import { UpdateOrderLineDto, UpdateOrderStatusDto } from '../pos/orders/orders.d
 import * as dtos from '../pos/sync/sync.dtos'
 import { ROUTES } from './allowlist'
 import { createHubApp } from './hub.module'
-import { appendOp, compactJournal, readAck, readJournal, writeAck } from './journal'
+import { appendOp, compactJournal, readAck, readJournal, repairJournal, writeAck } from './journal'
 import { OP_MAP, routeKey } from './op-map'
 import { readOutbox, type HubOp } from './outbox'
 import { APP_ROLE, openStore } from './store'
@@ -178,22 +178,28 @@ describe('hub op recorder on PGlite', () => {
     expect(await readOutbox(pg)).toHaveLength(before)
   })
 
-  it('compacts the journal at startup only once every op is acknowledged', () => {
+  it('compacts the journal at startup to its last op, only once every op is acknowledged', () => {
     const last = readJournal(dataDir).at(-1)!.seq
     writeAck(dataDir, last - 1)
     expect(compactJournal(dataDir)).toBe(false)
     expect(readJournal(dataDir).length).toBeGreaterThan(0)
     writeAck(dataDir, last)
     expect(readAck(dataDir)).toBe(last)
+    const kept = readJournal(dataDir).at(-1)
     expect(compactJournal(dataDir)).toBe(true)
-    expect(readJournal(dataDir)).toEqual([])
+    expect(readJournal(dataDir)).toEqual([kept]) // the last op stays: the seq high-water mark for a rebuilt store
+    expect(compactJournal(dataDir)).toBe(false)
   })
 
-  it('skips a torn last journal line (power cut mid-append), but no other', () => {
+  it('skips a torn last journal line (power cut mid-append), but no other; repair cuts it', () => {
     appendOp(dataDir, ops[0])
     appendFileSync(join(dataDir, 'outbox.log'), '{"opId":"torn')
-    expect(readJournal(dataDir)).toEqual([ops[0]])
-    appendFileSync(join(dataDir, 'outbox.log'), '\n{}\n')
+    expect(readJournal(dataDir).at(-1)).toEqual(ops[0])
+    repairJournal(dataDir)
+    expect(readFileSync(join(dataDir, 'outbox.log'), 'utf8').endsWith('}\n')).toBe(true)
+    appendOp(dataDir, ops[1])
+    expect(readJournal(dataDir).slice(-2)).toEqual([ops[0], ops[1]])
+    appendFileSync(join(dataDir, 'outbox.log'), '{"opId":"torn\n{}\n')
     expect(() => readJournal(dataDir)).toThrow()
   })
 })

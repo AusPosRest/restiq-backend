@@ -13,6 +13,7 @@
 import { HttpException, Injectable, Logger } from '@nestjs/common'
 import { plainToInstance } from 'class-transformer'
 import { validate } from 'class-validator'
+import type { PrismaClient } from '../../db/client'
 import type { Prisma } from '../../generated/prisma/client'
 import { DevicePrincipal, PosPrincipal, RegionRegistryService, roleHasPermission } from '../../platform'
 import type { Permission } from '../../platform'
@@ -114,9 +115,21 @@ function hasCode(error: unknown, code: string): boolean {
   return typeof body === 'object' && body !== null && (body as { code?: unknown }).code === code
 }
 
+const logger = new Logger('SyncPushService')
+
+/** What applyOp needs: the tenant's data plane and the services the online endpoints call. */
+export interface OpServices {
+  plane: PrismaClient
+  orders: OrdersService
+  orderLines: OrderLinesService
+  bills: BillsService
+  shifts: ShiftsService
+  clock: ClockService
+  tickets: KitchenTicketsService
+}
+
 @Injectable()
 export class SyncPushService {
-  private readonly logger = new Logger(SyncPushService.name)
   // ponytail: one push at a time per device in this process; the seq CAS below
   // still guards two API machines. Move to a per-device advisory lock if a hub
   // ever has two pushes in flight across machines often enough to matter.
@@ -134,6 +147,10 @@ export class SyncPushService {
 
   private plane() {
     return this.registry.planeFor(this.registry.homeRegion())
+  }
+
+  private services(): OpServices {
+    return { plane: this.plane(), orders: this.orders, orderLines: this.orderLines, bills: this.bills, shifts: this.shifts, clock: this.clock, tickets: this.tickets }
   }
 
   push(device: DevicePrincipal, batchId: string, ops: SyncOpDto[]): Promise<SyncOpResult[]> {
@@ -185,10 +202,10 @@ export class SyncPushService {
 
     let outcome: SyncOpResult
     try {
-      await this.apply(device, op)
+      await applyOp(this.services(), device, op)
       outcome = { opId: op.opId, status: 'accepted' }
     } catch (error) {
-      const rejection = this.asRejection(error)
+      const rejection = asRejection(error)
       if (!rejection) throw error
       outcome = { opId: op.opId, status: 'rejected', code: rejection.code, message: rejection.message }
     }
@@ -225,236 +242,242 @@ export class SyncPushService {
       }
     })
   }
+}
 
-  private asRejection(error: unknown): Rejection | null {
-    if (error instanceof Rejection) return error
-    if (error instanceof HttpException && error.getStatus() < 500) {
-      const body = error.getResponse()
-      const code = typeof body === 'object' && body !== null && 'code' in body ? String((body).code) : 'rejected'
-      const message = typeof body === 'object' && body !== null && 'message' in body ? String((body).message) : error.message
-      return new Rejection(code, message)
-    }
-    return null
+function asRejection(error: unknown): Rejection | null {
+  if (error instanceof Rejection) return error
+  if (error instanceof HttpException && error.getStatus() < 500) {
+    const body = error.getResponse()
+    const code = typeof body === 'object' && body !== null && 'code' in body ? String((body).code) : 'rejected'
+    const message = typeof body === 'object' && body !== null && 'message' in body ? String((body).message) : error.message
+    return new Rejection(code, message)
   }
+  return null
+}
 
-  private async staffFor(device: DevicePrincipal, op: SyncOpDto): Promise<PosPrincipal> {
-    const staff = await this.plane().$transaction(async (tx: Tx) => {
+async function staffFor(s: OpServices, device: DevicePrincipal, op: SyncOpDto): Promise<PosPrincipal> {
+  const staff = await s.plane.$transaction(async (tx: Tx) => {
+    await setTenantContext(tx, device.tenantId)
+    return tx.staffUser.findFirst({ where: { id: op.actorStaffId, tenantId: device.tenantId }, select: { name: true, role: { select: { name: true } } } })
+  })
+  if (!staff) throw new Rejection('unknown_staff', 'No such staff member at this restaurant')
+
+  const permission = OP_PERMISSION[op.type]
+  if (permission && !roleHasPermission(staff.role.name, permission)) {
+    // Decision S3: the sale already happened on the till, so it is kept; the
+    // owner sees it in the audit log instead.
+    await s.plane.$transaction(async (tx: Tx) => {
       await setTenantContext(tx, device.tenantId)
-      return tx.staffUser.findFirst({ where: { id: op.actorStaffId, tenantId: device.tenantId }, select: { name: true, role: { select: { name: true } } } })
-    })
-    if (!staff) throw new Rejection('unknown_staff', 'No such staff member at this restaurant')
-
-    const permission = OP_PERMISSION[op.type]
-    if (permission && !roleHasPermission(staff.role.name, permission)) {
-      // Decision S3: the sale already happened on the till, so it is kept; the
-      // owner sees it in the audit log instead.
-      await this.plane().$transaction(async (tx: Tx) => {
-        await setTenantContext(tx, device.tenantId)
-        await tx.auditEvent.create({
-          data: { tenantId: device.tenantId, actorId: op.actorStaffId, actorEmail: staff.name, action: 'sync.permission_lapsed', reason: `${op.type} ${op.opId} needs ${permission}`, occurredAt: new Date(op.at) },
-        })
+      await tx.auditEvent.create({
+        data: { tenantId: device.tenantId, actorId: op.actorStaffId, actorEmail: staff.name, action: 'sync.permission_lapsed', reason: `${op.type} ${op.opId} needs ${permission}`, occurredAt: new Date(op.at) },
       })
-    }
-    return { id: op.actorStaffId, tenantId: device.tenantId, outletId: device.outletId, name: staff.name, role: staff.role.name }
-  }
-
-  private async apply(device: DevicePrincipal, op: SyncOpDto): Promise<void> {
-    if (!(op.type in OP_PERMISSION)) throw new Rejection('unsupported_op', `Operation type ${op.type} is not supported`)
-    const staff = await this.staffFor(device, op)
-    const at = new Date(op.at)
-
-    switch (op.type) {
-      case 'order.create': {
-        const p = await parse(SyncOrderCreatePayload, op.payload)
-        if (p.tableId) {
-          await this.orders.openOrClaimTable(staff, device.outletId, p.tableId, { id: p.orderId, at })
-          return
-        }
-        if (p.tokenNumber === undefined) throw new Rejection('invalid_payload', 'A counter order needs the tokenNumber the hub issued')
-        await this.ignoreRepeat(() => this.orders.createCounterOrder(staff, device.outletId, { id: p.orderId, at, tokenNumber: p.tokenNumber as number }))
-        return
-      }
-      case 'order.line.add': {
-        const p = await parse(SyncLineAddPayload, op.payload)
-        const modifierPrices = p.modifierPriceMinor ?? {}
-        for (const id of p.modifierIds ?? []) {
-          const price = modifierPrices[id]
-          if (typeof price !== 'string' || !/^\d{1,15}$/.test(price)) {
-            throw new Rejection('invalid_payload', `modifierPriceMinor is missing a price for modifier ${id}`)
-          }
-        }
-        const replay = {
-          id: p.lineId,
-          at,
-          unitPriceMinor: minor(p.unitPriceMinor),
-          modifierPriceMinor: Object.fromEntries((p.modifierIds ?? []).map((id) => [id, minor(modifierPrices[id])])),
-        }
-        const dto = { itemId: p.itemId, variantId: p.variantId, quantity: p.quantity, modifierIds: p.modifierIds, seatNumber: p.seatNumber, note: p.note }
-        await this.ignoreRepeat(() => this.orderLines.addLine(staff, p.orderId, dto, replay))
-        return
-      }
-      case 'order.line.update': {
-        const ref = await parse(SyncLineUpdatePayload, op.payload)
-        const dto = await parse(UpdateOrderLineDto, op.payload)
-        const prices = minorMap(ref.modifierPriceMinor)
-        for (const id of dto.modifierIds ?? []) {
-          if (prices[id] === undefined) throw new Rejection('invalid_payload', `modifierPriceMinor is missing a price for modifier ${id}`)
-        }
-        await this.orderLines.updateLine(staff, ref.orderId, ref.lineId, dto, dto.modifierIds && { modifierPriceMinor: prices })
-        return
-      }
-      case 'order.line.remove': {
-        const ref = await parse(SyncLineRefPayload, op.payload)
-        try {
-          await this.orderLines.removeLine(staff, ref.orderId, ref.lineId)
-        } catch (error) {
-          // Removed by an earlier send of this same op whose ledger write was lost.
-          if (!(error instanceof HttpException && error.getStatus() === 404 && (await this.lineGone(device, ref.orderId, ref.lineId)))) throw error
-        }
-        return
-      }
-      case 'order.status': {
-        const ref = await parse(SyncOrderRefPayload, op.payload)
-        const dto = await parse(UpdateOrderStatusDto, op.payload)
-        const current = await this.orders.getOrder(staff, ref.orderId)
-        if (current.status === dto.status) return // re-send after a lost ledger write
-        await this.orders.updateStatus(staff, ref.orderId, dto)
-        return
-      }
-      case 'bill.create': {
-        const p = await parse(SyncBillCreatePayload, op.payload)
-        await this.bills.createBill(staff, p.orderId, { id: p.billId, at })
-        return
-      }
-      case 'bill.finalize': {
-        const p = await parse(SyncBillFinalizePayload, op.payload)
-        if (p.tenderIds.length !== p.tenders.length) throw new Rejection('invalid_payload', 'tenderIds must have one id per tender')
-        const dto = { discountMinor: p.discountMinor, discountReason: p.discountReason, tenders: p.tenders }
-        try {
-          await this.bills.finalize(staff, p.billId, dto, { tenderIds: p.tenderIds, at })
-        } catch (error) {
-          if (error instanceof HttpException && this.asRejection(error)?.code === 'already_finalized') return
-          throw error
-        }
-        return
-      }
-      case 'order.combo.add': {
-        const p = await parse(SyncComboAddPayload, op.payload)
-        const replay = {
-          id: p.lineId,
-          at,
-          unitPriceMinor: minor(p.unitPriceMinor),
-          children: p.children.map((c) => ({
-            id: c.lineId,
-            itemId: c.itemId,
-            variantId: c.variantId ?? null,
-            quantity: c.quantity,
-            unitPriceMinor: minor(c.unitPriceMinor),
-            modifierPriceMinor: minorMap(c.modifierPriceMinor),
-          })),
-        }
-        await this.ignoreRepeat(() => this.orderLines.addCombo(staff, p.orderId, { comboId: p.comboId, quantity: p.quantity, seatNumber: p.seatNumber, selections: [] }, replay))
-        return
-      }
-      case 'order.line.void': {
-        const p = await parse(SyncLineVoidPayload, op.payload)
-        // Voided by an earlier send of this same op whose ledger write was lost.
-        if (await this.inTenant(device, (tx) => tx.orderLine.count({ where: { id: p.lineId, orderId: p.orderId, voidedAt: { not: null } } }))) return
-        // ponytail: managerPin is never read on replay - the PIN was checked on the hub.
-        await this.orderLines.voidLine(staff, p.orderId, p.lineId, { managerPin: '', reason: p.reason }, { at, approverId: p.approvedByStaffId })
-        return
-      }
-      case 'order.transfer': {
-        const p = await parse(SyncOrderTransferPayload, op.payload)
-        await this.orders.transfer(staff, p.orderId, { newOwnerStaffId: p.newOwnerStaffId, reason: p.reason }, { at })
-        return
-      }
-      case 'order.discard': {
-        const p = await parse(SyncOrderRefPayload, op.payload)
-        try {
-          await this.orders.discard(staff, p.orderId, { at })
-        } catch (error) {
-          // Discarded by an earlier send of this same op whose ledger write was lost.
-          const done = await this.inTenant(device, (tx) => tx.auditEvent.count({ where: { tenantId: device.tenantId, action: 'order.discarded', reason: { endsWith: p.orderId } } }))
-          if (!(error instanceof HttpException && done > 0)) throw error
-        }
-        return
-      }
-      case 'shift.open': {
-        const p = await parse(SyncShiftOpenPayload, op.payload)
-        if (p.outletId !== device.outletId) throw new Rejection('invalid_payload', 'A hub opens shifts only at its own outlet')
-        await this.shifts.openShift(staff, { outletId: p.outletId, floatMinor: p.floatMinor }, { id: p.shiftId, at })
-        return
-      }
-      case 'shift.cash_movement': {
-        const p = await parse(SyncCashMovementPayload, op.payload)
-        await this.ignoreRepeat(() => this.shifts.logCashMovement(staff, p.shiftId, { type: p.type, amountMinor: p.amountMinor, reason: p.reason }, { id: p.movementId, at }))
-        return
-      }
-      case 'shift.close': {
-        const p = await parse(SyncShiftClosePayload, op.payload)
-        try {
-          await this.shifts.closeShift(staff, p.shiftId, { countedMinor: p.countedMinor }, { at })
-        } catch (error) {
-          if (!hasCode(error, 'shift_already_closed')) throw error
-        }
-        return
-      }
-      case 'clock.in': {
-        const p = await parse(SyncClockPayload, op.payload)
-        await this.clock.clockIn(staff, { id: p.clockEventId, at })
-        return
-      }
-      case 'clock.out': {
-        const p = await parse(SyncClockPayload, op.payload)
-        await this.ignoreRepeat(() => this.clock.clockOut(staff, { id: p.clockEventId, at }))
-        return
-      }
-      case 'ticket.bump':
-      case 'ticket.recall': {
-        const p = await parse(SyncTicketPayload, op.payload)
-        const bump = op.type === 'ticket.bump'
-        // fireOnSend keeps at most one queued ticket per order and station, so
-        // a bump means that one and a recall the one bumped last. None left in
-        // that state means an earlier send of this op already applied.
-        const where = { tenantId: device.tenantId, orderId: p.orderId, stationId: p.stationId }
-        const [any, ticket] = await this.inTenant(device, (tx) =>
-          Promise.all([
-            tx.ticket.count({ where }),
-            tx.ticket.findFirst({ where: { ...where, status: bump ? 'queued' : 'bumped' }, orderBy: bump ? { firedAt: 'desc' } : { bumpedAt: 'desc' }, select: { id: true } }),
-          ]),
-        )
-        if (any === 0) throw new Rejection('not_found', 'No kitchen ticket for this order and station')
-        if (!ticket) return
-        await (bump ? this.tickets.bump(staff, ticket.id, { at }) : this.tickets.recall(staff, ticket.id, { at }))
-        return
-      }
-    }
-  }
-
-  private inTenant<T>(device: DevicePrincipal, read: (tx: Tx) => Promise<T>): Promise<T> {
-    return this.plane().$transaction(async (tx: Tx) => {
-      await setTenantContext(tx, device.tenantId)
-      return read(tx)
     })
   }
+  return { id: op.actorStaffId, tenantId: device.tenantId, outletId: device.outletId, name: staff.name, role: staff.role.name }
+}
 
-  // A create re-sent after its ledger write was lost hits the hub's own id.
-  private async ignoreRepeat(create: () => Promise<unknown>): Promise<void> {
-    try {
-      await create()
-    } catch (error) {
-      if (!isUniqueViolation(error)) throw error
-      this.logger.log('Replayed create already applied; treating as accepted')
+/**
+ * Applies one op through the same service methods the online endpoints call,
+ * with the op's ids, time and prices. Shared by the cloud's push (above) and
+ * the hub's startup replay (src/hub/recovery.ts, H5). Throws a Rejection (or a
+ * 4xx HttpException) when the services refuse it.
+ */
+export async function applyOp(s: OpServices, device: DevicePrincipal, op: SyncOpDto): Promise<void> {
+  if (!(op.type in OP_PERMISSION)) throw new Rejection('unsupported_op', `Operation type ${op.type} is not supported`)
+  const staff = await staffFor(s, device, op)
+  const at = new Date(op.at)
+
+  switch (op.type) {
+    case 'order.create': {
+      const p = await parse(SyncOrderCreatePayload, op.payload)
+      if (p.tableId) {
+        await s.orders.openOrClaimTable(staff, device.outletId, p.tableId, { id: p.orderId, at })
+        return
+      }
+      if (p.tokenNumber === undefined) throw new Rejection('invalid_payload', 'A counter order needs the tokenNumber the hub issued')
+      await ignoreRepeat(() => s.orders.createCounterOrder(staff, device.outletId, { id: p.orderId, at, tokenNumber: p.tokenNumber as number }))
+      return
+    }
+    case 'order.line.add': {
+      const p = await parse(SyncLineAddPayload, op.payload)
+      const modifierPrices = p.modifierPriceMinor ?? {}
+      for (const id of p.modifierIds ?? []) {
+        const price = modifierPrices[id]
+        if (typeof price !== 'string' || !/^\d{1,15}$/.test(price)) {
+          throw new Rejection('invalid_payload', `modifierPriceMinor is missing a price for modifier ${id}`)
+        }
+      }
+      const replay = {
+        id: p.lineId,
+        at,
+        unitPriceMinor: minor(p.unitPriceMinor),
+        modifierPriceMinor: Object.fromEntries((p.modifierIds ?? []).map((id) => [id, minor(modifierPrices[id])])),
+      }
+      const dto = { itemId: p.itemId, variantId: p.variantId, quantity: p.quantity, modifierIds: p.modifierIds, seatNumber: p.seatNumber, note: p.note }
+      await ignoreRepeat(() => s.orderLines.addLine(staff, p.orderId, dto, replay))
+      return
+    }
+    case 'order.line.update': {
+      const ref = await parse(SyncLineUpdatePayload, op.payload)
+      const dto = await parse(UpdateOrderLineDto, op.payload)
+      const prices = minorMap(ref.modifierPriceMinor)
+      for (const id of dto.modifierIds ?? []) {
+        if (prices[id] === undefined) throw new Rejection('invalid_payload', `modifierPriceMinor is missing a price for modifier ${id}`)
+      }
+      await s.orderLines.updateLine(staff, ref.orderId, ref.lineId, dto, dto.modifierIds && { modifierPriceMinor: prices })
+      return
+    }
+    case 'order.line.remove': {
+      const ref = await parse(SyncLineRefPayload, op.payload)
+      try {
+        await s.orderLines.removeLine(staff, ref.orderId, ref.lineId)
+      } catch (error) {
+        // Removed by an earlier send of this same op whose ledger write was lost.
+        if (!(error instanceof HttpException && error.getStatus() === 404 && (await lineGone(s, device, ref.orderId, ref.lineId)))) throw error
+      }
+      return
+    }
+    case 'order.status': {
+      const ref = await parse(SyncOrderRefPayload, op.payload)
+      const dto = await parse(UpdateOrderStatusDto, op.payload)
+      const current = await s.orders.getOrder(staff, ref.orderId)
+      if (current.status === dto.status) return // re-send after a lost ledger write
+      await s.orders.updateStatus(staff, ref.orderId, dto)
+      return
+    }
+    case 'bill.create': {
+      const p = await parse(SyncBillCreatePayload, op.payload)
+      await s.bills.createBill(staff, p.orderId, { id: p.billId, at })
+      return
+    }
+    case 'bill.finalize': {
+      const p = await parse(SyncBillFinalizePayload, op.payload)
+      if (p.tenderIds.length !== p.tenders.length) throw new Rejection('invalid_payload', 'tenderIds must have one id per tender')
+      const dto = { discountMinor: p.discountMinor, discountReason: p.discountReason, tenders: p.tenders }
+      try {
+        await s.bills.finalize(staff, p.billId, dto, { tenderIds: p.tenderIds, at })
+      } catch (error) {
+        if (error instanceof HttpException && asRejection(error)?.code === 'already_finalized') return
+        throw error
+      }
+      return
+    }
+    case 'order.combo.add': {
+      const p = await parse(SyncComboAddPayload, op.payload)
+      const replay = {
+        id: p.lineId,
+        at,
+        unitPriceMinor: minor(p.unitPriceMinor),
+        children: p.children.map((c) => ({
+          id: c.lineId,
+          itemId: c.itemId,
+          variantId: c.variantId ?? null,
+          quantity: c.quantity,
+          unitPriceMinor: minor(c.unitPriceMinor),
+          modifierPriceMinor: minorMap(c.modifierPriceMinor),
+        })),
+      }
+      await ignoreRepeat(() => s.orderLines.addCombo(staff, p.orderId, { comboId: p.comboId, quantity: p.quantity, seatNumber: p.seatNumber, selections: [] }, replay))
+      return
+    }
+    case 'order.line.void': {
+      const p = await parse(SyncLineVoidPayload, op.payload)
+      // Voided by an earlier send of this same op whose ledger write was lost.
+      if (await inTenant(s, device, (tx) => tx.orderLine.count({ where: { id: p.lineId, orderId: p.orderId, voidedAt: { not: null } } }))) return
+      // ponytail: managerPin is never read on replay - the PIN was checked on the hub.
+      await s.orderLines.voidLine(staff, p.orderId, p.lineId, { managerPin: '', reason: p.reason }, { at, approverId: p.approvedByStaffId })
+      return
+    }
+    case 'order.transfer': {
+      const p = await parse(SyncOrderTransferPayload, op.payload)
+      await s.orders.transfer(staff, p.orderId, { newOwnerStaffId: p.newOwnerStaffId, reason: p.reason }, { at })
+      return
+    }
+    case 'order.discard': {
+      const p = await parse(SyncOrderRefPayload, op.payload)
+      try {
+        await s.orders.discard(staff, p.orderId, { at })
+      } catch (error) {
+        // Discarded by an earlier send of this same op whose ledger write was lost.
+        const done = await inTenant(s, device, (tx) => tx.auditEvent.count({ where: { tenantId: device.tenantId, action: 'order.discarded', reason: { endsWith: p.orderId } } }))
+        if (!(error instanceof HttpException && done > 0)) throw error
+      }
+      return
+    }
+    case 'shift.open': {
+      const p = await parse(SyncShiftOpenPayload, op.payload)
+      if (p.outletId !== device.outletId) throw new Rejection('invalid_payload', 'A hub opens shifts only at its own outlet')
+      await s.shifts.openShift(staff, { outletId: p.outletId, floatMinor: p.floatMinor }, { id: p.shiftId, at })
+      return
+    }
+    case 'shift.cash_movement': {
+      const p = await parse(SyncCashMovementPayload, op.payload)
+      await ignoreRepeat(() => s.shifts.logCashMovement(staff, p.shiftId, { type: p.type, amountMinor: p.amountMinor, reason: p.reason }, { id: p.movementId, at }))
+      return
+    }
+    case 'shift.close': {
+      const p = await parse(SyncShiftClosePayload, op.payload)
+      try {
+        await s.shifts.closeShift(staff, p.shiftId, { countedMinor: p.countedMinor }, { at })
+      } catch (error) {
+        if (!hasCode(error, 'shift_already_closed')) throw error
+      }
+      return
+    }
+    case 'clock.in': {
+      const p = await parse(SyncClockPayload, op.payload)
+      await s.clock.clockIn(staff, { id: p.clockEventId, at })
+      return
+    }
+    case 'clock.out': {
+      const p = await parse(SyncClockPayload, op.payload)
+      await ignoreRepeat(() => s.clock.clockOut(staff, { id: p.clockEventId, at }))
+      return
+    }
+    case 'ticket.bump':
+    case 'ticket.recall': {
+      const p = await parse(SyncTicketPayload, op.payload)
+      const bump = op.type === 'ticket.bump'
+      // fireOnSend keeps at most one queued ticket per order and station, so
+      // a bump means that one and a recall the one bumped last. None left in
+      // that state means an earlier send of this op already applied.
+      const where = { tenantId: device.tenantId, orderId: p.orderId, stationId: p.stationId }
+      const [any, ticket] = await inTenant(s, device, (tx) =>
+        Promise.all([
+          tx.ticket.count({ where }),
+          tx.ticket.findFirst({ where: { ...where, status: bump ? 'queued' : 'bumped' }, orderBy: bump ? { firedAt: 'desc' } : { bumpedAt: 'desc' }, select: { id: true } }),
+        ]),
+      )
+      if (any === 0) throw new Rejection('not_found', 'No kitchen ticket for this order and station')
+      if (!ticket) return
+      await (bump ? s.tickets.bump(staff, ticket.id, { at }) : s.tickets.recall(staff, ticket.id, { at }))
+      return
     }
   }
+}
 
-  private async lineGone(device: DevicePrincipal, orderId: string, lineId: string): Promise<boolean> {
-    return this.plane().$transaction(async (tx: Tx) => {
-      await setTenantContext(tx, device.tenantId)
-      const order = await tx.order.count({ where: { id: orderId, tenantId: device.tenantId } })
-      const line = await tx.orderLine.count({ where: { id: lineId } })
-      return order === 1 && line === 0
-    })
+function inTenant<T>(s: OpServices, device: DevicePrincipal, read: (tx: Tx) => Promise<T>): Promise<T> {
+  return s.plane.$transaction(async (tx: Tx) => {
+    await setTenantContext(tx, device.tenantId)
+    return read(tx)
+  })
+}
+
+// A create re-sent after its ledger write was lost hits the hub's own id.
+async function ignoreRepeat(create: () => Promise<unknown>): Promise<void> {
+  try {
+    await create()
+  } catch (error) {
+    if (!isUniqueViolation(error)) throw error
+    logger.log('Replayed create already applied; treating as accepted')
   }
+}
+
+async function lineGone(s: OpServices, device: DevicePrincipal, orderId: string, lineId: string): Promise<boolean> {
+  return s.plane.$transaction(async (tx: Tx) => {
+    await setTenantContext(tx, device.tenantId)
+    const order = await tx.order.count({ where: { id: orderId, tenantId: device.tenantId } })
+    const line = await tx.orderLine.count({ where: { id: lineId } })
+    return order === 1 && line === 0
+  })
 }
