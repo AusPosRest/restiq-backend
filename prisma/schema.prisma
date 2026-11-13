@@ -190,6 +190,8 @@ model Tenant {
   ticketEvents        TicketEvent[]
   cartLines           CartLine[]
   cartLineModifiers   CartLineModifier[]
+  cardReaders         CardReader[]
+  readerOrders        ReaderOrder[]
 
   // The directory list is served from these: filter columns plus the
   // created_at ordering the default sort and cursor walk.
@@ -270,18 +272,22 @@ enum OutletType {
 }
 
 model Outlet {
-  id        String     @id @default(uuid(7)) @db.Uuid
-  tenantId  String     @map("tenant_id") @db.Uuid
-  brandId   String     @map("brand_id") @db.Uuid
-  name      String
-  address   String
-  type      OutletType
-  timezone  String
-  createdAt DateTime   @default(now()) @map("created_at") @db.Timestamptz(6)
-  deletedAt DateTime?  @map("deleted_at") @db.Timestamptz(6)
+  id                       String     @id @default(uuid(7)) @db.Uuid
+  tenantId                 String     @map("tenant_id") @db.Uuid
+  brandId                  String     @map("brand_id") @db.Uuid
+  name                     String
+  address                  String
+  type                     OutletType
+  timezone                 String
+  createdAt                DateTime   @default(now()) @map("created_at") @db.Timestamptz(6)
+  deletedAt                DateTime?  @map("deleted_at") @db.Timestamptz(6)
+  // #286: this outlet's Stripe Terminal Location on the tenant's connected account, made on first reader registration.
+  stripeTerminalLocationId String?    @map("stripe_terminal_location_id")
 
   tenant              Tenant               @relation(fields: [tenantId], references: [id])
   brand               Brand                @relation(fields: [brandId], references: [id])
+  cardReaders         CardReader[]
+  readerOrders        ReaderOrder[]
   devices             Device[]
   enrolmentCodes      EnrolmentCode[]
   itemPrices          ItemPrice[]
@@ -1234,18 +1240,18 @@ enum SubscriptionStatus {
 }
 
 model Subscription {
-  id                 String             @id @default(uuid(7)) @db.Uuid
-  tenantId           String             @unique @map("tenant_id") @db.Uuid
-  status             SubscriptionStatus @default(active)
-  currentPeriodStart DateTime           @map("current_period_start") @db.Timestamptz(6)
-  currentPeriodEnd   DateTime           @map("current_period_end") @db.Timestamptz(6)
-  suspendedAt        DateTime?          @map("suspended_at") @db.Timestamptz(6)
+  id                   String             @id @default(uuid(7)) @db.Uuid
+  tenantId             String             @unique @map("tenant_id") @db.Uuid
+  status               SubscriptionStatus @default(active)
+  currentPeriodStart   DateTime           @map("current_period_start") @db.Timestamptz(6)
+  currentPeriodEnd     DateTime           @map("current_period_end") @db.Timestamptz(6)
+  suspendedAt          DateTime?          @map("suspended_at") @db.Timestamptz(6)
   // #282: card billing on the platform's own Stripe account. null status = not set up.
   stripeCustomerId     String?            @map("stripe_customer_id")
   stripeSubscriptionId String?            @unique @map("stripe_subscription_id")
   cardBillingStatus    CardBillingStatus? @map("card_billing_status")
-  createdAt          DateTime           @default(now()) @map("created_at") @db.Timestamptz(6)
-  updatedAt          DateTime           @updatedAt @map("updated_at") @db.Timestamptz(6)
+  createdAt            DateTime           @default(now()) @map("created_at") @db.Timestamptz(6)
+  updatedAt            DateTime           @updatedAt @map("updated_at") @db.Timestamptz(6)
 
   tenant   Tenant    @relation(fields: [tenantId], references: [id])
   invoices Invoice[]
@@ -1267,15 +1273,15 @@ enum InvoiceStatus {
 }
 
 model Invoice {
-  id             String        @id @default(uuid(7)) @db.Uuid
-  tenantId       String        @map("tenant_id") @db.Uuid
-  subscriptionId String        @map("subscription_id") @db.Uuid
-  period         String
-  amountMinor    BigInt        @map("amount_minor_units")
-  status         InvoiceStatus @default(pending)
+  id              String        @id @default(uuid(7)) @db.Uuid
+  tenantId        String        @map("tenant_id") @db.Uuid
+  subscriptionId  String        @map("subscription_id") @db.Uuid
+  period          String
+  amountMinor     BigInt        @map("amount_minor_units")
+  status          InvoiceStatus @default(pending)
   // #282: the Stripe invoice this row mirrors - webhook redeliveries upsert on it.
-  stripeInvoiceId String?      @unique @map("stripe_invoice_id")
-  createdAt      DateTime      @default(now()) @map("created_at") @db.Timestamptz(6)
+  stripeInvoiceId String?       @unique @map("stripe_invoice_id")
+  createdAt       DateTime      @default(now()) @map("created_at") @db.Timestamptz(6)
 
   tenant       Tenant       @relation(fields: [tenantId], references: [id])
   subscription Subscription @relation(fields: [subscriptionId], references: [id])
@@ -1389,25 +1395,25 @@ model Order {
 // pos/orders/orders.service.ts's updateStatus, the sole enforcer of that
 // gate, same posture as the status column itself.
 model OrderLine {
-  id             String   @id @default(uuid(7)) @db.Uuid
-  tenantId       String   @map("tenant_id") @db.Uuid
-  orderId        String   @map("order_id") @db.Uuid
+  id             String    @id @default(uuid(7)) @db.Uuid
+  tenantId       String    @map("tenant_id") @db.Uuid
+  orderId        String    @map("order_id") @db.Uuid
   // Null only on a combo's parent line (comboId set) - restiq-backend#160.
-  itemId         String?  @map("item_id") @db.Uuid
-  variantId      String?  @map("variant_id") @db.Uuid
+  itemId         String?   @map("item_id") @db.Uuid
+  variantId      String?   @map("variant_id") @db.Uuid
   // restiq-backend#160 combos: the parent line carries comboId and the combo
   // price; each chosen item is a child line (parentLineId) whose
   // unitPriceMinor is only that option's upcharge. The bill's plain line sum
   // therefore already totals a combo correctly.
-  comboId        String?  @map("combo_id") @db.Uuid
-  parentLineId   String?  @map("parent_line_id") @db.Uuid
+  comboId        String?   @map("combo_id") @db.Uuid
+  parentLineId   String?   @map("parent_line_id") @db.Uuid
   quantity       Int
-  unitPriceMinor BigInt   @map("unit_price_minor")
-  seatNumber     Int?     @map("seat_number")
+  unitPriceMinor BigInt    @map("unit_price_minor")
+  seatNumber     Int?      @map("seat_number")
   // Nullable as of qr-self-order/CAP-4 (issue #77): a guest-placed line has
   // no staff adder - see guestId/guestName below for its attribution
   // instead. Every pos-created line still always sets this.
-  addedByStaffId String?  @map("added_by_staff_id") @db.Uuid
+  addedByStaffId String?   @map("added_by_staff_id") @db.Uuid
   // qr-self-order/CAP-4 (AD-18): per-guest label on a guest-placed line,
   // carried straight over from CartLine.guestId/guestName at placement (see
   // guest/orders/orders.service.ts's placeOrder) - null for every pos-source
@@ -1415,8 +1421,8 @@ model OrderLine {
   // OrderLine.unitPriceMinor) so it survives regardless of any later Guest
   // row change, and so KDS/POS reads never need a join back to Guest just to
   // render a label.
-  guestId        String?  @map("guest_id") @db.Uuid
-  guestName      String?  @map("guest_name")
+  guestId        String?   @map("guest_id") @db.Uuid
+  guestName      String?   @map("guest_name")
   // restiq-backend#210: the till's "special instructions" ("less spicy") -
   // shown on the order and the kitchen ticket. Null when none was typed.
   note           String?
@@ -1427,7 +1433,7 @@ model OrderLine {
   // through (TicketLine.voided).
   voidedAt       DateTime? @map("voided_at") @db.Timestamptz(6)
   voidReason     String?   @map("void_reason")
-  createdAt      DateTime @default(now()) @map("created_at") @db.Timestamptz(6)
+  createdAt      DateTime  @default(now()) @map("created_at") @db.Timestamptz(6)
 
   tenant          Tenant              @relation(fields: [tenantId], references: [id])
   order           Order               @relation(fields: [orderId], references: [id])
@@ -1898,27 +1904,27 @@ model BillNumberCounter {
 // ---------------------------------------------------------------------------
 
 model CreditNote {
-  id                String   @id @default(uuid(7)) @db.Uuid
-  tenantId          String   @map("tenant_id") @db.Uuid
-  originalBillId    String   @map("original_bill_id") @db.Uuid
+  id                String        @id @default(uuid(7)) @db.Uuid
+  tenantId          String        @map("tenant_id") @db.Uuid
+  originalBillId    String        @map("original_bill_id") @db.Uuid
   reason            String
   // The manager who approved this refund (platform/manager-auth's
   // ManagerApproval.approverId) - distinct from createdByStaffId below, same
   // actor/approver split Bill already draws between createdByStaffId and
   // finalizedByStaffId.
-  approvedByStaffId String   @map("approved_by_staff_id") @db.Uuid
-  createdByStaffId  String   @map("created_by_staff_id") @db.Uuid
+  approvedByStaffId String        @map("approved_by_staff_id") @db.Uuid
+  createdByStaffId  String        @map("created_by_staff_id") @db.Uuid
   // Sum of this note's lines' amountMinor, and that subtotal's tax reversed
   // at the same TAX_RATE_PLACEHOLDER_PERCENT the original bill's tax was
   // computed with (bills.service.ts) - never re-derived or re-guessed.
   // totalMinor (subtotal + tax) is derived in CreditNoteView, same
   // never-persisted-derived-total convention as BillView.totalMinor.
-  subtotalMinor     BigInt   @map("subtotal_minor")
-  taxMinor          BigInt   @map("tax_minor")
+  subtotalMinor     BigInt        @map("subtotal_minor")
+  taxMinor          BigInt        @map("tax_minor")
   // restiq-backend#221: how the money went back. Null only on notes issued
   // before this column existed - shift close treats those as cash first.
   method            TenderMethod?
-  createdAt         DateTime @default(now()) @map("created_at") @db.Timestamptz(6)
+  createdAt         DateTime      @default(now()) @map("created_at") @db.Timestamptz(6)
 
   tenant          Tenant           @relation(fields: [tenantId], references: [id])
   originalBill    Bill             @relation(fields: [originalBillId], references: [id])
@@ -2206,6 +2212,81 @@ model PlanPrice {
   @@map("plan_prices")
 }
 
+// #286: Stripe Terminal smart readers (S700 / WisePOS E) on the tenant's connected account. Live
+// online/offline status is read from Stripe, never stored.
+model CardReader {
+  id             String   @id @default(uuid(7)) @db.Uuid
+  tenantId       String   @map("tenant_id") @db.Uuid
+  outletId       String   @map("outlet_id") @db.Uuid
+  stripeReaderId String   @unique @map("stripe_reader_id")
+  label          String
+  // Stripe's device_type, e.g. stripe_s700, bbpos_wisepos_e, simulated_wisepos_e.
+  deviceType     String   @map("device_type")
+  serialNumber   String   @map("serial_number")
+  createdAt      DateTime @default(now()) @map("created_at") @db.Timestamptz(6)
+
+  tenant Tenant @relation(fields: [tenantId], references: [id])
+  outlet Outlet @relation(fields: [outletId], references: [id])
+
+  @@index([tenantId])
+  @@index([outletId])
+  @@map("card_readers")
+}
+
+enum ReaderModel {
+  s700
+  wisepos_e
+}
+
+// #286: reader list prices per country, platform-level like PlanPrice. priceMinor null = not for sale.
+model ReaderPrice {
+  country     Country
+  model       ReaderModel
+  displayName String      @map("display_name")
+  priceMinor  BigInt?     @map("price_minor")
+  updatedAt   DateTime    @default(now()) @updatedAt @map("updated_at") @db.Timestamptz(6)
+
+  @@id([country, model])
+  @@map("reader_prices")
+}
+
+enum ReaderOrderStatus {
+  payment_failed
+  paid
+  ordered
+  shipped
+  delivered
+  cancelled
+}
+
+// #286: an owner's order for card readers, charged straight away to the subscription's card on the
+// platform account (a one-off Stripe invoice). Operators then move it forward as it ships.
+model ReaderOrder {
+  id              String            @id @default(uuid(7)) @db.Uuid
+  tenantId        String            @map("tenant_id") @db.Uuid
+  outletId        String            @map("outlet_id") @db.Uuid
+  model           ReaderModel
+  quantity        Int
+  unitPriceMinor  BigInt            @map("unit_price_minor")
+  totalMinor      BigInt            @map("total_minor")
+  currency        String
+  // { name, line1, line2?, city, state, postcode, phone }
+  shipping        Json
+  status          ReaderOrderStatus
+  failureMessage  String?           @map("failure_message")
+  stripeInvoiceId String?           @unique @map("stripe_invoice_id")
+  trackingRef     String?           @map("tracking_ref")
+  opsNote         String?           @map("ops_note")
+  createdAt       DateTime          @default(now()) @map("created_at") @db.Timestamptz(6)
+  updatedAt       DateTime          @updatedAt @map("updated_at") @db.Timestamptz(6)
+
+  tenant Tenant @relation(fields: [tenantId], references: [id])
+  outlet Outlet @relation(fields: [outletId], references: [id])
+
+  @@index([tenantId])
+  @@index([status, createdAt])
+  @@map("reader_orders")
+}
 
 // #242: logged-out POS tokens cannot be replayed, without ending other devices.
 model RevokedPosToken {

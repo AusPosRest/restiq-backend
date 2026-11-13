@@ -29,6 +29,7 @@ import { GuestSessionsService } from './sessions/sessions.service'
   providers: [GuestSessionsService, GuestMenuService, CartService, GuestOrdersService, GuestBillsService, GuestCardPaymentsService],
   // GuestSessionsService is consumed by pos/tables/tables.controller.ts for
   // the staff-side close (AD-2: cross-module reach only via this barrel).
-  exports: [GuestSessionsService],
+  // #286: GuestCardPaymentsService is pos/payments' Stripe settlement path too (POS card readers).
+  exports: [GuestSessionsService, GuestCardPaymentsService],
 })
 export class GuestModule {}

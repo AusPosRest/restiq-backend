@@ -182,7 +182,9 @@ export class GuestCardPaymentsService {
         return 'applied'
       }
       if (failed) {
-        await failIntent(tx, row.id, pi.last_payment_error?.decline_code ?? pi.last_payment_error?.code ?? 'card_declined')
+        // #286: a POS reader shows staff Stripe's own words; the phone path keeps the decline code.
+        const error = pi.last_payment_error
+        await failIntent(tx, row.id, (row.rail === 'card_terminal' ? error?.message : undefined) ?? error?.decline_code ?? error?.code ?? 'card_declined')
         return 'applied'
       }
       if (pi.status === 'canceled') {
@@ -240,6 +242,12 @@ export class GuestCardPaymentsService {
           occurredAt: new Date(),
         },
       })
+      return
+    }
+
+    // #286: a POS card-reader payment is one whole-bill tender like the simulated terminal - no shares to settle.
+    if (row.rail === 'card_terminal') {
+      await confirmIntent(tx, { tenantId, intentId: row.id })
       return
     }
 

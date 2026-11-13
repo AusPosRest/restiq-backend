@@ -6,6 +6,7 @@ import { AdminAuthController } from './auth.controller'
 import { AdminAuthService } from './auth.service'
 import { AdminBrandingController } from './branding/branding.controller'
 import { BrandingService } from './branding/branding.service'
+import { AdminCardReadersController } from './card-readers/card-readers.controller'
 import { AdminChecklistController } from './checklist/checklist.controller'
 import { ChecklistService } from './checklist/checklist.service'
 import { AdminDashboardController } from './dashboard/dashboard.controller'
@@ -62,6 +63,7 @@ import { AdminTenantController } from './tenant.controller'
     AdminTaxController,
     AdminAgreementController,
     AdminTenantController,
+    AdminCardReadersController,
   ],
   providers: [
     AdminAuthService,

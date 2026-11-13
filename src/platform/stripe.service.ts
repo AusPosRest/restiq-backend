@@ -6,6 +6,11 @@ import Stripe from 'stripe'
 
 export const STRIPE_API_VERSION = '2026-10-28.endive'
 
+/** #286: sandbox-only features (simulated readers, test-helper card taps) need a Stripe test key. */
+export function stripeTestKey(): boolean {
+  return process.env.STRIPE_SECRET_KEY?.startsWith('sk_test_') === true
+}
+
 function notConfigured(): ServiceUnavailableException {
   return new ServiceUnavailableException({ code: 'payments_not_configured', message: 'Card payments are not set up on this server' })
 }

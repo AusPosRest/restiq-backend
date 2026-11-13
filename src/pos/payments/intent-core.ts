@@ -24,7 +24,7 @@ export function isIntentActive(intent: Pick<IntentRow, 'status'>): boolean {
 }
 
 export function toPaymentIntentView(intent: IntentRow): PaymentIntentView {
-  const client = typeof intent.clientPayload === 'object' && intent.clientPayload !== null && !Array.isArray(intent.clientPayload) ? (intent.clientPayload as { simulated?: boolean }) : {}
+  const client = typeof intent.clientPayload === 'object' && intent.clientPayload !== null && !Array.isArray(intent.clientPayload) ? (intent.clientPayload as { simulated?: boolean; readerId?: string; readerLabel?: string }) : {}
   return {
     id: intent.id,
     billId: intent.billId,
@@ -42,6 +42,8 @@ export function toPaymentIntentView(intent: IntentRow): PaymentIntentView {
     expiresAt: intent.expiresAt.toISOString(),
     succeededAt: intent.succeededAt?.toISOString() ?? null,
     tenderId: intent.tender?.id ?? null,
+    readerId: client.readerId ?? null,
+    readerLabel: client.readerLabel ?? null,
   }
 }
 
