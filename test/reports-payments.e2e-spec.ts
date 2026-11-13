@@ -445,4 +445,49 @@ describe('/admin/v1/reports/payments (e2e)', () => {
       expect(b3Row.slice(2)).toEqual(['CSV Export Main', 'pos', 'T1', '', 'Asha', '300.00', '0.00', '', '15.00', '315.00', 'cash=315.00', 'Sent back=315.00', '0.00'])
     })
   })
+
+  // restiq-backend#288: top-selling items over the same finalized-bills filter.
+  describe('GET /admin/v1/reports/top-items', () => {
+    it('groups sold lines of finalized bills by item, excluding open bills and voided lines, quantity desc', async () => {
+      const seed = await seedTenant('Top Items')
+      const res = await authed(request(httpServer).get(`/admin/v1/reports/top-items?outletId=${seed.outlet1}`), seed.token)
+      expect(res.status).toBe(200)
+      const body = res.body as { currency: string; items: { name: string; portionName: string | null; quantity: number; salesMinor: number }[] }
+      expect(body.currency).toBe('INR')
+      // b3 (3 x 100.00), b2 (2 x 100.00), b1 (1 x 100.00) - each its own item; the open bill's item is absent.
+      expect(body.items.map((i) => [i.quantity, i.salesMinor, i.portionName])).toEqual([
+        [3, 30000, null],
+        [2, 20000, null],
+        [1, 10000, null],
+      ])
+    })
+
+    it('drops a voided line', async () => {
+      const seed = await seedTenant('Top Items Void')
+      await prisma.orderLine.updateMany({ where: { orderId: seed.b2.orderId }, data: { voidedAt: new Date(), voidReason: 'test' } })
+      const res = await authed(request(httpServer).get(`/admin/v1/reports/top-items?outletId=${seed.outlet1}`), seed.token)
+      expect((res.body as { items: { quantity: number }[] }).items.map((i) => i.quantity)).toEqual([3, 1])
+    })
+
+    it('404s on another tenant\'s outlet', async () => {
+      const seedA = await seedTenant('Top Items A')
+      const seedB = await seedTenant('Top Items B')
+      const res = await authed(request(httpServer).get(`/admin/v1/reports/top-items?outletId=${seedA.outlet1}`), seedB.token)
+      expect(res.status).toBe(404)
+    })
+
+    it('exports a CSV with rank, item, portion, quantity, sales', async () => {
+      const seed = await seedTenant('Top Items CSV')
+      const res = await authed(request(httpServer).get(`/admin/v1/reports/top-items/export?outletId=${seed.outlet1}`), seed.token)
+      expect(res.status).toBe(200)
+      expect(res.headers['content-disposition']).toContain('top-items.csv')
+      const rows = res.text.trim().split('\r\n').map((line) => line.split(','))
+      expect(rows[0]).toEqual(['rank', 'item', 'portion', 'quantity', 'sales'])
+      expect(rows.slice(1).map((r) => [r[0], r[2], r[3], r[4]])).toEqual([
+        ['1', '', '3', '300.00'],
+        ['2', '', '2', '200.00'],
+        ['3', '', '1', '100.00'],
+      ])
+    })
+  })
 })

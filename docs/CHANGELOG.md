@@ -7,6 +7,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 ## [Unreleased]
 
 ### Added
+- **Top-selling items report** (#288): `GET /admin/v1/reports/top-items` and `/top-items/export` (CSV) over the payments filter (finalized bills, outlet, from/to). One row per item + portion (combos as their own row), quantity sold and sales = line totals incl. modifiers, before bill discount and refunds; highest quantity first. `listPayments`/`exportPaymentsCsv` now share `inFilteredBills()`.
 - **Dev environment** (#280): Fly app `restiq-backend-dev` (`fly.dev.toml`, region iad, own Neon database and secrets, Stripe sandbox keys only) behind https://dev.niftypos.com.au. `pnpm stripe:check` verifies the Stripe keys in `.env` (refuses live keys; creates and cancels a test PaymentIntent).
 
 ### Changed
