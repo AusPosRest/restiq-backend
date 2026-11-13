@@ -5,7 +5,7 @@
 // (once the app exists, for its services) reconcile.
 import type { PGlite } from '@electric-sql/pglite'
 import { Logger, type INestApplicationContext } from '@nestjs/common'
-import { copyFileSync, existsSync, mkdirSync, readFileSync, renameSync } from 'node:fs'
+import { copyFileSync, existsSync, mkdirSync, readFileSync, renameSync, statSync, utimesSync } from 'node:fs'
 import { join } from 'node:path'
 import { getPrisma } from '../db/client'
 import { KitchenTicketsService } from '../kitchen'
@@ -42,16 +42,31 @@ export async function openOrRebuild(dataDir: string, migrationsDir: string): Pro
   }
   await store?.pg.close().catch(() => undefined)
 
+  const KEEP_CONTACT = ['bootstrap.json', 'outbox.ack']
   const broken = `${dataDir}.broken-${Date.now()}`
   renameSync(dataDir, broken)
   mkdirSync(dataDir)
   const fresh = await openStore(dataDir, migrationsDir)
-  for (const name of KEEP) if (existsSync(join(broken, name))) copyFileSync(join(broken, name), join(dataDir, name))
+  for (const name of KEEP) {
+    if (!existsSync(join(broken, name))) continue
+    copyFileSync(join(broken, name), join(dataDir, name))
+    const { atime, mtime } = statSync(join(broken, name))
+    utimesSync(join(dataDir, name), atime, mtime) // keep the times: they date the last real contact with the cloud
+  }
   const bootstrap = join(dataDir, 'bootstrap.json')
   if (existsSync(bootstrap)) {
+    // The rebuild must not restart the O1 offline clock: the last real contact with the cloud is the newer of
+    // bootstrap.json (written on each bootstrap) and outbox.ack (written on each acked push). Read it before the
+    // import below rewrites bootstrap.json, and put that time back on the file so a later rebuild dates the same.
+    const lastContact = new Date(Math.max(...KEEP_CONTACT.filter((n) => existsSync(join(dataDir, n))).map((n) => statSync(join(dataDir, n)).mtimeMs)))
     await importBootstrap(fresh.pg, JSON.parse(readFileSync(bootstrap, 'utf8')) as BootstrapPayload, dataDir)
+    utimesSync(bootstrap, lastContact, lastContact)
     // bootstrap.json predates every open sale whose op was already acked (the journal replays only unacked ones).
-    await fresh.pg.query('UPDATE hub_meta SET open_sales_resync = true')
+    await fresh.pg.query(
+      `UPDATE hub_meta SET open_sales_resync = true, last_sync_at = $1,
+         must_sync_before = $1::timestamptz + make_interval(hours => (policy->>'maxOfflineHours')::int)`,
+      [lastContact.toISOString()],
+    )
     logger.warn(`RECOVERY: moved the broken database to ${broken} and rebuilt it from bootstrap.json; the journal is replayed next`)
   } else {
     logger.error(`RECOVERY: moved the broken database to ${broken}; no bootstrap.json, so the hub bootstraps from the cloud when it next syncs`)

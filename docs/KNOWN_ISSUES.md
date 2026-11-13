@@ -10,7 +10,3 @@ What remains, only between the rebuild and that resync (that is, while the rebui
 - Closed sales are not affected (they live in the cloud).
 
 Workaround: if the cloud is reachable, wait for the till's sync before taking new sales after a crash recovery.
-
-## Hub: a store rebuild restarts the O1 offline clock
-
-`importBootstrap` sets `hub_meta.last_sync_at = now()`, and the rebuild calls it with `bootstrap.json`, so a hub rebuilt while offline gets a fresh `maxOfflineHours` window. Fix: keep the old `last_sync_at` (or `bootstrap.json`'s import time) when importing from the file. Found while writing #310; not fixed.

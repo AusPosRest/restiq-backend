@@ -4,7 +4,7 @@
 import type { PGlite } from '@electric-sql/pglite'
 import type { INestApplication } from '@nestjs/common'
 import { spawn } from 'node:child_process'
-import { existsSync, mkdtempSync, readdirSync, rmSync, writeFileSync } from 'node:fs'
+import { existsSync, mkdtempSync, readdirSync, rmSync, utimesSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { basename, dirname, join } from 'node:path'
 import request from 'supertest'
@@ -140,10 +140,21 @@ describe('hub startup recovery', () => {
     await close(hub)
     const broken = () => readdirSync(dirname(dataDir)).filter((n) => n.startsWith(`${basename(dataDir)}.broken-`))
 
+    // The last real contact with the cloud was 20 hours ago: a rebuild must not restart the O1 offline clock,
+    // so the 24-hour limit runs out about 4 hours from now, not 24.
+    const lastContact = new Date(Date.now() - 20 * 3600_000)
+    for (const name of ['bootstrap.json', 'outbox.ack']) if (existsSync(join(dataDir, name))) utimesSync(join(dataDir, name), lastContact, lastContact)
+    const offlineClockKept = async () => {
+      const meta = await readMeta(hub.pg)
+      expect(Math.abs(new Date(meta?.lastSyncAt ?? 0).getTime() - lastContact.getTime())).toBeLessThan(2000)
+      expect(new Date(meta?.mustSyncBefore ?? 0).getTime()).toBeLessThan(Date.now() + 5 * 3600_000)
+    }
+
     // 1. PGlite will not open: pg_control is garbage.
     writeFileSync(join(dataDir, 'global', 'pg_control'), Buffer.alloc(8192, 7))
     hub = await bootHub(dataDir, MIGRATIONS)
     expect(broken()).toHaveLength(1)
+    await offlineClockKept()
     expect((await readMeta(hub.pg))?.openSalesResync).toBe(true)
     expect(await rows(hub.pg, BILLS)).toEqual(before)
     expect(await readOutbox(hub.pg)).toEqual(readJournal(dataDir))
@@ -154,6 +165,7 @@ describe('hub startup recovery', () => {
     for (const name of readdirSync(dataDir)) if (!['outbox.log', 'outbox.ack', 'bootstrap.json'].includes(name)) rmSync(join(dataDir, name), { recursive: true })
     hub = await bootHub(dataDir, MIGRATIONS)
     expect(broken()).toHaveLength(2)
+    await offlineClockKept() // a second rebuild still dates from the real contact
     expect(await rows(hub.pg, BILLS)).toEqual(before)
     // ...and it keeps selling on the next seq.
     const next = await login(hub.app, f)
