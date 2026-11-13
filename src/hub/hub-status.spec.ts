@@ -108,6 +108,7 @@ describe('hub status, O1 lock and rejections', () => {
       lockReason: null,
       rejections: 0,
       orphans: 0,
+      openSalesResync: false,
     })
     await request(http).get('/pos/v1/hub/status').expect(401)
   })

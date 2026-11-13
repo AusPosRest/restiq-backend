@@ -4,36 +4,27 @@
 // signed HTTP exactly as on a till.
 import type { PGlite } from '@electric-sql/pglite'
 import type { INestApplication } from '@nestjs/common'
-import { Test } from '@nestjs/testing'
-import { generateKeyPairSync } from 'node:crypto'
-import type { Server } from 'node:http'
-import type { AddressInfo } from 'node:net'
 import { mkdtempSync, rmSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import request from 'supertest'
 import { afterAll, beforeAll, describe, expect, it, vi } from 'vitest'
-import { AppModule } from '../src/app.module'
-import { createPrismaClient, setPrismaClient, type PrismaClient } from '../src/db/client'
+import { setPrismaClient, type PrismaClient } from '../src/db/client'
 import { createHubApp } from '../src/hub/hub.module'
 import { readAck, readJournal } from '../src/hub/journal'
 import { readMeta } from '../src/hub/meta'
 import { insertOp, outboxDepth, readOutbox } from '../src/hub/outbox'
-import { devicePrivateKey } from '../src/hub/signer'
 import { openStore } from '../src/hub/store'
 import { SyncWorker } from '../src/hub/sync-worker'
-import { PrismaService, uuidv7 } from '../src/platform'
+import { deleteCloudTenant, enrolHub, hubRows as rowsOf, settle as settleOf, startCloud, type Cloud, type Row } from './hub-cloud'
 import { HUB_PIN, ringUpSale, seedSaleFixture, seedTenantRows, type SaleFixture } from './hub-seed'
 
 const MIGRATIONS = join(__dirname, '..', 'prisma', 'migrations')
-type Row = Record<string, unknown>
 type Http = Parameters<typeof request>[0]
 
 describe('hub sync worker against the cloud (e2e)', () => {
+  let c: Cloud
   let cloud: PrismaClient
-  let cloudApp: INestApplication
-  let server: Server
-  let port: number
   let hub: PGlite
   let hubApp: INestApplication
   let http: Http
@@ -43,58 +34,25 @@ describe('hub sync worker against the cloud (e2e)', () => {
   let kicks = true
   const dataDir = mkdtempSync(join(tmpdir(), 'restiq-hub-sync-e2e-'))
 
-  // Changes become visible to pull once settled (30 s); age them.
-  const settle = () => cloud.$executeRaw`UPDATE sync_changes SET changed_at = now() - interval '1 minute' WHERE tenant_id = ${f.tenantId}::uuid`
-
-  async function hubRows(sql: string, params: unknown[] = []): Promise<Row[]> {
-    return hub.transaction(async (tx) => {
-      await tx.exec('SET LOCAL ROLE NONE')
-      return (await tx.query<Row>(sql, params)).rows
-    })
-  }
+  const settle = () => settleOf(cloud, f.tenantId)
+  const hubRows = (sql: string, params: unknown[] = []) => rowsOf(hub, sql, params)
 
   async function auth(): Promise<{ Authorization: string }> {
     const login = await request(http).post('/pos/v1/auth/login').send({ tenantId: f.tenantId, pin: HUB_PIN }).expect(200)
     return { Authorization: `Bearer ${(login.body as { token: string }).token}` }
   }
 
-  const listen = () => new Promise<void>((resolve) => server.listen(port, '127.0.0.1', resolve))
-
   beforeAll(async () => {
-    cloud = createPrismaClient()
-    // The cloud app on its own client; the process-wide one (setPrismaClient) is the hub's.
-    const moduleRef = await Test.createTestingModule({ imports: [AppModule] })
-      .overrideProvider(PrismaService)
-      .useValue({ client: cloud, onModuleDestroy: () => Promise.resolve() })
-      .compile()
-    // rawBody, as main.ts: the device signature covers the exact bytes.
-    cloudApp = moduleRef.createNestApplication({ rawBody: true })
-    await cloudApp.listen(0, '127.0.0.1')
-    server = cloudApp.getHttpServer() as Server
-    port = (server.address() as AddressInfo).port
-
+    c = await startCloud()
+    cloud = c.prisma
     f = await seedSaleFixture(cloud, await seedTenantRows(cloud, 'Hub Sync'))
-    const { publicKey, privateKey } = generateKeyPairSync('ed25519')
-    deviceId = (
-      await cloud.device.create({
-        data: {
-          tenantId: f.tenantId,
-          outletId: f.outletId,
-          label: 'Hub',
-          type: 'pos',
-          role: 'hub',
-          hardwareKeyFingerprint: `hub-${uuidv7()}`,
-          enrolledAt: new Date(),
-          publicKey: publicKey.export({ format: 'der', type: 'spki' }).toString('base64'),
-        },
-      })
-    ).id
+    const device = await enrolHub(cloud, f)
+    deviceId = device.deviceId
 
     const store = await openStore(undefined, MIGRATIONS)
     hub = store.pg
     setPrismaClient(store.prisma)
-    const pem = privateKey.export({ format: 'pem', type: 'pkcs8' }).toString()
-    worker = new SyncWorker({ pg: hub, dataDir, cloudUrl: `http://127.0.0.1:${port}`, deviceId, key: devicePrivateKey(pem), appVersion: 'hub-e2e' })
+    worker = new SyncWorker({ pg: hub, dataDir, cloudUrl: c.url, deviceId, key: device.key, appVersion: 'hub-e2e' })
     hubApp = await createHubApp(hub, dataDir, () => kicks && worker.kick())
     await hubApp.init()
     http = hubApp.getHttpServer() as Http
@@ -104,48 +62,9 @@ describe('hub sync worker against the cloud (e2e)', () => {
     await worker?.stop()
     await hubApp?.close()
     await hub?.close()
-    await cloudApp?.close()
+    await c?.app.close()
     rmSync(dataDir, { recursive: true, force: true })
-    if (f) {
-      const where = { tenantId: f.tenantId }
-      await cloud.appliedOp.deleteMany({ where: { deviceId } })
-      await cloud.syncDeadLetter.deleteMany({ where })
-      await cloud.tender.deleteMany({ where })
-      await cloud.bill.deleteMany({ where })
-      await cloud.billNumberCounter.deleteMany({ where })
-      await cloud.tokenNumberCounter.deleteMany({ where })
-      await cloud.ticketLine.deleteMany({ where })
-      await cloud.ticketEvent.deleteMany({ where })
-      await cloud.ticket.deleteMany({ where })
-      await cloud.orderLineModifier.deleteMany({ where })
-      await cloud.orderLine.deleteMany({ where: { ...where, parentLineId: { not: null } } })
-      await cloud.orderLine.deleteMany({ where })
-      await cloud.order.deleteMany({ where })
-      await cloud.cashMovement.deleteMany({ where })
-      await cloud.shift.deleteMany({ where })
-      await cloud.clockEvent.deleteMany({ where })
-      await cloud.auditEvent.deleteMany({ where })
-      await cloud.device.deleteMany({ where })
-      await cloud.staffUser.deleteMany({ where })
-      await cloud.role.deleteMany({ where })
-      await cloud.comboSlotOption.deleteMany({ where })
-      await cloud.comboSlot.deleteMany({ where })
-      await cloud.combo.deleteMany({ where })
-      await cloud.itemModifierGroup.deleteMany({ where })
-      await cloud.modifier.deleteMany({ where })
-      await cloud.modifierGroup.deleteMany({ where })
-      await cloud.itemPrice.deleteMany({ where })
-      await cloud.menuItem.deleteMany({ where })
-      await cloud.menuCategory.deleteMany({ where })
-      await cloud.station.deleteMany({ where })
-      await cloud.diningTable.deleteMany({ where })
-      await cloud.floor.deleteMany({ where })
-      await cloud.outlet.deleteMany({ where })
-      await cloud.brand.deleteMany({ where })
-      await cloud.syncChange.deleteMany({ where })
-      await cloud.tenant.deleteMany({ where: { id: f.tenantId } })
-      await cloud.tenantRegistryEntry.deleteMany({ where: { tenantId: f.tenantId } })
-    }
+    if (f) await deleteCloudTenant(cloud, f.tenantId, deviceId)
     await cloud?.$disconnect()
   })
 
@@ -261,8 +180,7 @@ describe('hub sync worker against the cloud (e2e)', () => {
   })
 
   it('backs off while the cloud is unreachable, then drains on reconnect', async () => {
-    server.closeAllConnections()
-    await new Promise((resolve) => server.close(resolve))
+    await c.down()
     worker.start() // the timer from here on: backoff while down
     await request(http).post(`/pos/v1/orders/${openOrderId}/lines`).set(await auth()).send({ itemId: f.itemId, quantity: 1 }).expect(201)
     await vi.waitFor(() => expect(worker.failures).toBeGreaterThanOrEqual(2), { timeout: 10_000, interval: 50 })
@@ -270,7 +188,7 @@ describe('hub sync worker against the cloud (e2e)', () => {
     expect((await readMeta(hub))?.online).toBe(false)
     expect(await outboxDepth(hub)).toBeGreaterThan(0)
 
-    await listen()
+    await c.up()
     await vi.waitFor(async () => expect(await outboxDepth(hub)).toBe(0), { timeout: 15_000, interval: 100 })
     await vi.waitFor(() => expect(worker.online).toBe(true), { timeout: 5_000, interval: 50 })
     expect(worker.failures).toBe(0)
