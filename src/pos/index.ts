@@ -6,3 +6,5 @@ export { SyncService } from './sync/sync.service'
 export { confirmIntent } from './payments/intent-core'
 // An outlet's own calendar day (issue #189: the owner dashboard's "today").
 export { localDateKey } from './clock/clock.util'
+// Offline sync op payloads (#297): the hub's op recorder validates what it records against these.
+export * from './sync/sync.dtos'

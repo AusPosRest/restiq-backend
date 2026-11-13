@@ -12,11 +12,16 @@ import {
   IsString,
   IsUUID,
   Matches,
+  Max,
+  MaxLength,
   Min,
+  MinLength,
+  ValidateIf,
   ValidateNested,
 } from 'class-validator'
 import { FinalizeBillDto } from '../bills/bills.dtos'
-import { AddOrderLineDto } from '../orders/orders.dtos'
+import { AddOrderLineDto, TransferOrderDto } from '../orders/orders.dtos'
+import { CloseShiftDto, LogCashMovementDto, OpenShiftDto } from '../shifts/shifts.dtos'
 
 export const SYNC_BATCH_MAX = 200
 
@@ -108,6 +113,102 @@ export class SyncBillFinalizePayload extends FinalizeBillDto {
   // One id per entry in tenders, same order.
   @IsArray() @IsUUID('all', { each: true })
   tenderIds!: string[]
+}
+
+// restiq-backend#297 (B5a): a combo as the hub wrote it - the lines and the
+// prices on them are the sale; the cloud does not re-pick the slots.
+export class SyncComboChildPayload {
+  @IsUUID()
+  lineId!: string
+
+  @IsUUID()
+  itemId!: string
+
+  @IsOptional() @IsUUID()
+  variantId?: string
+
+  // For the whole child line, as on the hub's OrderLineView.
+  @IsInt() @Min(1)
+  quantity!: number
+
+  @Matches(MINOR)
+  unitPriceMinor!: string
+
+  // modifierId -> price charged (decimal string of minor units).
+  @IsOptional() @IsObject()
+  modifierPriceMinor?: Record<string, string>
+}
+
+export class SyncComboAddPayload {
+  @IsUUID()
+  orderId!: string
+
+  /** The combo's parent line. */
+  @IsUUID()
+  lineId!: string
+
+  @IsUUID()
+  comboId!: string
+
+  @IsInt() @Min(1) @Max(999)
+  quantity!: number
+
+  @Matches(MINOR)
+  unitPriceMinor!: string
+
+  @IsOptional() @IsInt() @Min(1)
+  seatNumber?: number
+
+  @IsArray() @ValidateNested({ each: true }) @Type(() => SyncComboChildPayload)
+  children!: SyncComboChildPayload[]
+}
+
+// The manager approved on the hub with their PIN; only who it was travels.
+export class SyncLineVoidPayload extends SyncLineRefPayload {
+  @IsString() @MinLength(1) @MaxLength(200)
+  reason!: string
+
+  @IsUUID()
+  approvedByStaffId!: string
+}
+
+export class SyncOrderTransferPayload extends TransferOrderDto {
+  @IsUUID()
+  orderId!: string
+}
+
+// restiq-backend#297 (B5b).
+export class SyncShiftOpenPayload extends OpenShiftDto {
+  @IsUUID()
+  shiftId!: string
+}
+
+export class SyncCashMovementPayload extends LogCashMovementDto {
+  @IsUUID()
+  shiftId!: string
+
+  @IsUUID()
+  movementId!: string
+}
+
+export class SyncShiftClosePayload extends CloseShiftDto {
+  @IsUUID()
+  shiftId!: string
+}
+
+export class SyncClockPayload {
+  @IsUUID()
+  clockEventId!: string
+}
+
+// The hub cannot know the cloud's ticket ids, so a bump or recall names the
+// order and station (null = unrouted) instead.
+export class SyncTicketPayload {
+  @IsUUID()
+  orderId!: string
+
+  @ValidateIf((o: SyncTicketPayload) => o.stationId !== null) @IsUUID()
+  stationId!: string | null
 }
 
 export interface SyncOpResult {

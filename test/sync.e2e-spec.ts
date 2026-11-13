@@ -120,6 +120,8 @@ describe('/sync/v1 (e2e)', () => {
 
   afterAll(async () => {
     await app.close()
+    // #297: shifts and clock events left behind would block other suites' staff wipe.
+    await wipe(prisma)
     await prisma.$disconnect()
   })
 
@@ -457,7 +459,7 @@ describe('/sync/v1 (e2e)', () => {
       seq = 0
       const seed = await seedTenant('Spice Route')
       const hub = await enrolHub(seed)
-      const results = await push(hub, [op('order.create', uuidv7(), { orderId: uuidv7(), tableId: seed.tableId }), op('ticket.bump', seed.cashierId, { ticketId: uuidv7() })])
+      const results = await push(hub, [op('order.create', uuidv7(), { orderId: uuidv7(), tableId: seed.tableId }), op('bill.refund', seed.cashierId, { billId: uuidv7() })])
       expect(results.map((r) => [r.status, r.code])).toEqual([
         ['rejected', 'unknown_staff'],
         ['rejected', 'unsupported_op'],
@@ -469,7 +471,7 @@ describe('/sync/v1 (e2e)', () => {
       const rejections = list.body as { opId: string; type: string; code: string; acknowledged: boolean }[]
       expect(rejections.map((r) => [r.type, r.code])).toEqual([
         ['order.create', 'unknown_staff'],
-        ['ticket.bump', 'unsupported_op'],
+        ['bill.refund', 'unsupported_op'],
       ])
       expect((await signed(hub, 'POST', `/sync/v1/rejections/${rejections[0]?.opId}/acknowledge`)).status).toBe(204)
       expect(((await signed(hub, 'GET', '/sync/v1/rejections')).body as unknown[]).length).toBe(1)
@@ -495,6 +497,201 @@ describe('/sync/v1 (e2e)', () => {
       const res = await signed(hub, 'POST', '/sync/v1/push', { batchId: uuidv7(), ops })
       expect(res.status).toBe(413)
       expect((res.body as { error: { code: string } }).error.code).toBe('batch_too_large')
+    })
+  })
+
+  // restiq-backend#297 (B5a/B5b): every other write the hub makes.
+  describe('push: combos, voids, transfers, discards, shifts, clock, tickets', () => {
+    async function staffWithRole(seed: Seed, role: string, name: string): Promise<string> {
+      const r = await prisma.role.create({ data: { tenantId: seed.tenantId, name: role, isSystem: true, isManager: role === 'Manager' } })
+      return (await prisma.staffUser.create({ data: { tenantId: seed.tenantId, roleId: r.id, name, pinHash: 'x' } })).id
+    }
+
+    async function comboFixture(seed: Seed) {
+      const combo = await prisma.combo.create({ data: { tenantId: seed.tenantId, name: 'Thali', priceMinor: 30000n, currency: 'INR' } })
+      const group = await prisma.modifierGroup.create({ data: { tenantId: seed.tenantId, name: 'Extras', minSelections: 0, maxSelections: 2 } })
+      const modifier = await prisma.modifier.create({ data: { tenantId: seed.tenantId, groupId: group.id, name: 'Ghee', priceMinor: 2000n, sortOrder: 0 } })
+      return { comboId: combo.id, modifierId: modifier.id }
+    }
+
+    it('applies a combo, a void, a transfer and a discard with the hub\'s ids, time and prices; a re-send is all duplicate', async () => {
+      seq = 0
+      const seed = await seedTenant('Spice Route')
+      const hub = await enrolHub(seed)
+      const managerId = await staffWithRole(seed, 'Manager', 'Meera')
+      const { comboId, modifierId } = await comboFixture(seed)
+      // The combo was taken off the menu in the cloud after the hub sold it (S3: kept).
+      await prisma.combo.update({ where: { id: comboId }, data: { archivedAt: new Date() } })
+      const at = '2026-10-07T10:15:00.000Z'
+      const orderId = uuidv7()
+      const parentId = uuidv7()
+      const childId = uuidv7()
+      const lineId = uuidv7()
+      const counterId = uuidv7()
+      const ops = [
+        op('order.create', seed.cashierId, { orderId, tableId: seed.tableId }, at),
+        op('order.combo.add', seed.cashierId, {
+          orderId, lineId: parentId, comboId, quantity: 2, unitPriceMinor: '28000',
+          children: [{ lineId: childId, itemId: seed.itemId, quantity: 2, unitPriceMinor: '500', modifierPriceMinor: { [modifierId]: '1500' } }],
+        }, at),
+        op('order.line.add', seed.cashierId, { orderId, lineId, itemId: seed.itemId, quantity: 1, unitPriceMinor: '10000' }, at),
+        op('order.status', seed.cashierId, { orderId, status: 'sent' }, at),
+        op('order.line.void', seed.cashierId, { orderId, lineId, reason: 'Guest changed mind', approvedByStaffId: managerId }, at),
+        op('order.transfer', seed.cashierId, { orderId, newOwnerStaffId: seed.waiterId }, at),
+        op('order.create', seed.cashierId, { orderId: counterId, tokenNumber: 9 }, at),
+        op('order.discard', seed.cashierId, { orderId: counterId }, at),
+      ]
+      expect((await push(hub, ops)).map((r) => [r.status, r.code])).toEqual(ops.map(() => ['accepted', undefined]))
+
+      const parent = await prisma.orderLine.findUniqueOrThrow({ where: { id: parentId } })
+      expect(parent).toMatchObject({ comboId, quantity: 2, unitPriceMinor: 28000n })
+      expect(parent.createdAt.toISOString()).toBe(at)
+      const child = await prisma.orderLine.findUniqueOrThrow({ where: { id: childId }, include: { modifiers: true } })
+      expect(child).toMatchObject({ parentLineId: parentId, quantity: 2, unitPriceMinor: 500n })
+      expect(child.modifiers.map((m) => [m.modifierId, m.priceMinor])).toEqual([[modifierId, 1500n]])
+
+      const voided = await prisma.orderLine.findUniqueOrThrow({ where: { id: lineId } })
+      expect(voided.voidedAt?.toISOString()).toBe(at)
+      expect(voided.voidReason).toBe('Guest changed mind')
+      const approval = await prisma.auditEvent.findFirstOrThrow({ where: { tenantId: seed.tenantId, action: 'sync.void_approved_offline' } })
+      expect(approval).toMatchObject({ actorId: seed.cashierId, approverId: managerId, approverName: 'Meera', reason: 'Guest changed mind' })
+      expect(approval.occurredAt.toISOString()).toBe(at)
+
+      expect((await prisma.order.findUniqueOrThrow({ where: { id: orderId } })).ownerId).toBe(seed.waiterId)
+      const transferred = await prisma.auditEvent.findFirstOrThrow({ where: { tenantId: seed.tenantId, action: 'order.ownership_transferred' } })
+      expect(transferred.occurredAt.toISOString()).toBe(at)
+      expect(await prisma.order.count({ where: { id: counterId } })).toBe(0)
+      expect((await prisma.auditEvent.findFirstOrThrow({ where: { tenantId: seed.tenantId, action: 'order.discarded' } })).occurredAt.toISOString()).toBe(at)
+
+      const again = await push(hub, ops)
+      expect(again.map((r) => r.status)).toEqual(ops.map(() => 'duplicate'))
+      expect(await prisma.orderLine.count({ where: { orderId } })).toBe(3)
+      expect(await prisma.auditEvent.count({ where: { tenantId: seed.tenantId, action: { in: ['sync.void_approved_offline', 'order.ownership_transferred', 'order.discarded'] } } })).toBe(3)
+    })
+
+    it('rejects a void approved by someone who is not staff here', async () => {
+      seq = 0
+      const seed = await seedTenant('Spice Route')
+      const other = await seedTenant('Other Place')
+      const hub = await enrolHub(seed)
+      const orderId = uuidv7()
+      const lineId = uuidv7()
+      const results = await push(hub, [
+        op('order.create', seed.cashierId, { orderId, tokenNumber: 3 }),
+        op('order.line.add', seed.cashierId, { orderId, lineId, itemId: seed.itemId, quantity: 1, unitPriceMinor: '10000' }),
+        op('order.status', seed.cashierId, { orderId, status: 'sent' }),
+        op('order.line.void', seed.cashierId, { orderId, lineId, reason: 'Wrong item', approvedByStaffId: other.cashierId }),
+        op('order.line.void', seed.cashierId, { orderId, lineId, reason: 'Wrong item' }),
+      ])
+      expect(results.map((r) => [r.status, r.code])).toEqual([
+        ['accepted', undefined],
+        ['accepted', undefined],
+        ['accepted', undefined],
+        ['rejected', 'validation_failed'],
+        ['rejected', 'invalid_payload'],
+      ])
+      expect((await prisma.orderLine.findUniqueOrThrow({ where: { id: lineId } })).voidedAt).toBeNull()
+    })
+
+    it('applies a shift, cash movement, clock in/out and a ticket bump and recall at the hub\'s time; a re-send is all duplicate', async () => {
+      seq = 0
+      const seed = await seedTenant('Spice Route')
+      const hub = await enrolHub(seed)
+      const at = '2026-10-07T11:00:00.000Z'
+      const later = '2026-10-07T11:05:00.000Z'
+      const shiftId = uuidv7()
+      const movementId = uuidv7()
+      const clockInId = uuidv7()
+      const clockOutId = uuidv7()
+      const orderId = uuidv7()
+      const ops = [
+        op('shift.open', seed.cashierId, { shiftId, outletId: seed.outletId, floatMinor: 5000 }, at),
+        op('clock.in', seed.cashierId, { clockEventId: clockInId }, at),
+        op('order.create', seed.cashierId, { orderId, tokenNumber: 5 }, at),
+        op('order.line.add', seed.cashierId, { orderId, lineId: uuidv7(), itemId: seed.itemId, quantity: 1, unitPriceMinor: '10000' }, at),
+        op('order.status', seed.cashierId, { orderId, status: 'sent' }, at),
+        op('ticket.bump', seed.cashierId, { orderId, stationId: null }, at),
+        op('ticket.recall', seed.cashierId, { orderId, stationId: null }, later),
+        op('shift.cash_movement', seed.cashierId, { shiftId, movementId, type: 'paid_out', amountMinor: 1200, reason: 'Milk' }, at),
+        op('shift.close', seed.cashierId, { shiftId, countedMinor: 3800 }, later),
+        op('clock.out', seed.cashierId, { clockEventId: clockOutId }, later),
+      ]
+      expect((await push(hub, ops)).map((r) => [r.status, r.code])).toEqual(ops.map(() => ['accepted', undefined]))
+
+      const shift = await prisma.shift.findUniqueOrThrow({ where: { id: shiftId } })
+      expect(shift.openedAt.toISOString()).toBe(at)
+      expect(shift.closedAt?.toISOString()).toBe(later)
+      expect(shift).toMatchObject({ floatMinor: 5000n, countedMinor: 3800n, expectedMinor: 3800n, overShortMinor: 0n })
+      const movement = await prisma.cashMovement.findUniqueOrThrow({ where: { id: movementId } })
+      expect(movement.createdAt.toISOString()).toBe(at)
+      const clock = await prisma.clockEvent.findMany({ where: { staffId: seed.cashierId }, orderBy: { occurredAt: 'asc' } })
+      expect(clock.map((c) => [c.id, c.type, c.occurredAt.toISOString()])).toEqual([
+        [clockInId, 'clock_in', at],
+        [clockOutId, 'clock_out', later],
+      ])
+      // Synced weeks after the cloud's own recall window (now - bumpedAt) - still kept.
+      const ticket = await prisma.ticket.findFirstOrThrow({ where: { orderId } })
+      expect(ticket).toMatchObject({ status: 'queued', recallCount: 1 })
+      expect(ticket.bumpedAt?.toISOString()).toBe(at)
+      expect(ticket.recalledAt?.toISOString()).toBe(later)
+
+      const again = await push(hub, ops)
+      expect(again.map((r) => r.status)).toEqual(ops.map(() => 'duplicate'))
+      expect(await prisma.clockEvent.count({ where: { staffId: seed.cashierId } })).toBe(2)
+      expect(await prisma.ticketEvent.count({ where: { ticketId: ticket.id } })).toBe(2)
+    })
+
+    it('rejects a bump for an order with no ticket and a shift for another outlet', async () => {
+      seq = 0
+      const seed = await seedTenant('Spice Route')
+      const hub = await enrolHub(seed)
+      const results = await push(hub, [
+        op('ticket.bump', seed.cashierId, { orderId: uuidv7(), stationId: null }),
+        op('ticket.bump', seed.cashierId, { orderId: uuidv7() }),
+        op('shift.open', seed.cashierId, { shiftId: uuidv7(), outletId: uuidv7(), floatMinor: 0 }),
+      ])
+      expect(results.map((r) => [r.status, r.code])).toEqual([
+        ['rejected', 'not_found'],
+        ['rejected', 'invalid_payload'],
+        ['rejected', 'invalid_payload'],
+      ])
+    })
+
+    it('keeps every one of these done by someone who lost the permission, and audits each (decision S3)', async () => {
+      seq = 0
+      const seed = await seedTenant('Spice Route')
+      const hub = await enrolHub(seed)
+      // Kitchen: fire_kitchen only - no take_orders, no settle_bills.
+      const cookId = await staffWithRole(seed, 'Kitchen', 'Kiran')
+      const managerId = await staffWithRole(seed, 'Manager', 'Meera')
+      const { comboId } = await comboFixture(seed)
+      const orderId = uuidv7()
+      const lineId = uuidv7()
+      const shiftId = uuidv7()
+      const ops = [
+        op('order.create', cookId, { orderId, tableId: seed.tableId }),
+        op('order.combo.add', cookId, { orderId, lineId: uuidv7(), comboId, quantity: 1, unitPriceMinor: '30000', children: [{ lineId: uuidv7(), itemId: seed.itemId, quantity: 1, unitPriceMinor: '0' }] }),
+        op('order.line.add', cookId, { orderId, lineId, itemId: seed.itemId, quantity: 1, unitPriceMinor: '10000' }),
+        op('order.status', cookId, { orderId, status: 'sent' }),
+        op('ticket.bump', cookId, { orderId, stationId: null }),
+        op('order.line.void', cookId, { orderId, lineId, reason: 'Burnt', approvedByStaffId: managerId }),
+        op('shift.open', cookId, { shiftId, outletId: seed.outletId, floatMinor: 0 }),
+        op('shift.cash_movement', cookId, { shiftId, movementId: uuidv7(), type: 'bank_drop', amountMinor: 1, reason: 'Drop' }),
+        op('shift.close', cookId, { shiftId, countedMinor: 0 }),
+        op('order.transfer', cookId, { orderId, newOwnerStaffId: seed.waiterId }),
+      ]
+      expect((await push(hub, ops)).map((r) => [r.status, r.code])).toEqual(ops.map(() => ['accepted', undefined]))
+      const lapsed = await prisma.auditEvent.findMany({ where: { tenantId: seed.tenantId, action: 'sync.permission_lapsed' } })
+      // Everything but order.status and ticket.bump needs take_orders or settle_bills.
+      expect(lapsed.map((a) => a.reason.split(' ')[0]).sort()).toEqual(
+        ['order.create', 'order.combo.add', 'order.line.add', 'order.line.void', 'shift.open', 'shift.cash_movement', 'shift.close', 'order.transfer'].sort(),
+      )
+
+      // Discard needs every line gone; a fresh counter order shows it too.
+      const counterId = uuidv7()
+      const discard = await push(hub, [op('order.create', cookId, { orderId: counterId, tokenNumber: 2 }), op('order.discard', cookId, { orderId: counterId })])
+      expect(discard.map((r) => r.status)).toEqual(['accepted', 'accepted'])
+      expect(await prisma.auditEvent.count({ where: { tenantId: seed.tenantId, action: 'sync.permission_lapsed', reason: { startsWith: 'order.discard ' } } })).toBe(1)
     })
   })
 })

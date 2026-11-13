@@ -4,6 +4,7 @@
 import { BadRequestException, ConflictException, Injectable, NotFoundException, UnauthorizedException } from '@nestjs/common'
 import type { CashMovement, Prisma, Shift } from '../../generated/prisma/client'
 import { PosPrincipal, RegionRegistryService, uuidv7 } from '../../platform'
+import type { Replay } from '../sync/replay'
 import { setTenantContext } from '../tenant-context'
 import { CloseShiftDto, LogCashMovementDto, OpenShiftDto } from './shifts.dtos'
 
@@ -153,7 +154,9 @@ export class ShiftsService {
     return this.registry.planeFor(this.registry.homeRegion())
   }
 
-  async openShift(staff: PosPrincipal, dto: OpenShiftDto): Promise<ShiftView> {
+  // `replay` on the three writes below (restiq-backend#297): a shift action
+  // the hub already took - its ids and time are kept.
+  async openShift(staff: PosPrincipal, dto: OpenShiftDto, replay?: Replay): Promise<ShiftView> {
     const plane = this.plane()
     try {
       return await plane.$transaction(async (tx) => {
@@ -165,18 +168,20 @@ export class ShiftsService {
         // partial unique index (shifts_one_open_per_outlet, see this
         // model's migration) is what actually stops a concurrent race - the
         // catch block below translates that into the same response.
-        const alreadyOpen = await tx.shift.findFirst({ where: { outletId: dto.outletId, closedAt: null } })
+        const alreadyOpen = await tx.shift.findFirst({ where: { outletId: dto.outletId, closedAt: null }, include: SHIFT_INCLUDE })
+        if (alreadyOpen && alreadyOpen.id === replay?.id) return toShiftView(alreadyOpen) // a re-sent replay
         if (alreadyOpen) {
           throw new ConflictException({ code: 'shift_already_open', message: 'This outlet already has an open shift' })
         }
 
         const shift = await tx.shift.create({
           data: {
-            id: uuidv7(),
+            id: replay?.id ?? uuidv7(),
             tenantId: staff.tenantId,
             outletId: dto.outletId,
             openedByStaffId: staff.id,
             floatMinor: BigInt(dto.floatMinor),
+            ...(replay && { openedAt: replay.at }),
           },
           include: SHIFT_INCLUDE,
         })
@@ -212,7 +217,7 @@ export class ShiftsService {
     })
   }
 
-  async logCashMovement(staff: PosPrincipal, shiftId: string, dto: LogCashMovementDto): Promise<ShiftView> {
+  async logCashMovement(staff: PosPrincipal, shiftId: string, dto: LogCashMovementDto, replay?: Replay): Promise<ShiftView> {
     const plane = this.plane()
     return plane.$transaction(async (tx) => {
       await setTenantContext(tx, staff.tenantId)
@@ -221,9 +226,10 @@ export class ShiftsService {
 
       await tx.cashMovement.create({
         data: {
-          id: uuidv7(),
+          id: replay?.id ?? uuidv7(),
           tenantId: staff.tenantId,
           shiftId,
+          ...(replay && { createdAt: replay.at }),
           type: dto.type,
           amountMinor: BigInt(dto.amountMinor),
           reason: dto.reason,
@@ -240,7 +246,7 @@ export class ShiftsService {
   // expectedMinor/overShortMinor are computed and written in this same call
   // - never before it, never by a separate endpoint. There is no
   // "peek at expected" method anywhere in this service.
-  async closeShift(staff: PosPrincipal, shiftId: string, dto: CloseShiftDto): Promise<ShiftView> {
+  async closeShift(staff: PosPrincipal, shiftId: string, dto: CloseShiftDto, replay?: Pick<Replay, 'at'>): Promise<ShiftView> {
     const plane = this.plane()
     return plane.$transaction(async (tx) => {
       await setTenantContext(tx, staff.tenantId)
@@ -269,7 +275,7 @@ export class ShiftsService {
         where: { id: shiftId },
         data: {
           closedByStaffId: staff.id,
-          closedAt: new Date(),
+          closedAt: replay?.at ?? new Date(),
           countedMinor,
           expectedMinor,
           overShortMinor,

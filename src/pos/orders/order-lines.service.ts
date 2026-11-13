@@ -161,6 +161,31 @@ async function assertBillHasNoPayments(tx: Tx, orderId: string): Promise<void> {
   }
 }
 
+/** One child line of a combo: as resolved online, or as the hub wrote it (with its id) on replay. */
+export interface ReplayComboChild {
+  id?: string
+  itemId: string
+  variantId: string | null
+  /** For the whole line (already multiplied by the combo quantity). */
+  quantity: number
+  unitPriceMinor: bigint
+  modifierPriceMinor: Record<string, bigint>
+}
+
+/** A replayed combo skips the menu checks, but everything it names must still be this tenant's. */
+async function assertReplayedComboInTenant(tx: Tx, tenantId: string, comboId: string, children: ReplayComboChild[]): Promise<void> {
+  const itemIds = [...new Set(children.map((c) => c.itemId))]
+  const modifierIds = [...new Set(children.flatMap((c) => Object.keys(c.modifierPriceMinor)))]
+  const [combos, items, modifiers] = await Promise.all([
+    tx.combo.count({ where: { id: comboId, tenantId } }),
+    tx.menuItem.count({ where: { id: { in: itemIds }, tenantId } }),
+    tx.modifier.count({ where: { id: { in: modifierIds }, tenantId } }),
+  ])
+  if (combos !== 1 || items !== itemIds.length || modifiers !== modifierIds.length) {
+    throw new BadRequestException({ code: 'validation_failed', message: 'No such combo, item or modifier' })
+  }
+}
+
 @Injectable()
 export class OrderLinesService {
   constructor(
@@ -236,24 +261,49 @@ export class OrderLinesService {
     })
   }
 
-  /** restiq-backend#160: adds a combo - a parent line at the combo price plus one child line per chosen item. */
-  async addCombo(staff: PosPrincipal, orderId: string, dto: AddComboLineDto): Promise<OrderView> {
+  /**
+   * restiq-backend#160: adds a combo - a parent line at the combo price plus one child line per chosen item.
+   * `replay` (restiq-backend#297): a combo the hub already rang up. Its lines,
+   * ids and prices are taken as the hub wrote them - the cloud does not
+   * re-check slots or availability, a past sale is never re-decided (S3).
+   */
+  async addCombo(staff: PosPrincipal, orderId: string, dto: AddComboLineDto, replay?: Replay & { unitPriceMinor: bigint; children: ReplayComboChild[] }): Promise<OrderView> {
     return this.plane().$transaction(async (tx) => {
       await setTenantContext(tx, staff.tenantId)
       const order = await loadOrder(tx, staff.tenantId, orderId)
       await assertOwner(tx, order, staff)
       assertOrderNotClosed(order)
 
-      const { combo, children } = await resolveComboSelection(tx, staff.tenantId, order.outletId, dto.comboId, dto.selections)
-      const shared = { tenantId: staff.tenantId, orderId, seatNumber: dto.seatNumber ?? null, addedByStaffId: staff.id }
-      const parent = await tx.orderLine.create({ data: { ...shared, comboId: combo.id, quantity: dto.quantity, unitPriceMinor: combo.priceMinor } })
+      let priceMinor: bigint
+      let children: ReplayComboChild[]
+      if (replay) {
+        await assertReplayedComboInTenant(tx, staff.tenantId, dto.comboId, replay.children)
+        priceMinor = replay.unitPriceMinor
+        children = replay.children
+      } else {
+        const resolved = await resolveComboSelection(tx, staff.tenantId, order.outletId, dto.comboId, dto.selections)
+        priceMinor = resolved.combo.priceMinor
+        children = []
+        for (const child of resolved.children) {
+          const prices = await resolveModifierPrices(tx, staff.tenantId, child.modifierIds)
+          children.push({
+            itemId: child.itemId,
+            variantId: child.variantId,
+            quantity: child.quantity * dto.quantity,
+            unitPriceMinor: child.upchargeMinor,
+            modifierPriceMinor: Object.fromEntries(child.modifierIds.map((id) => [id, prices.get(id) ?? 0n])),
+          })
+        }
+      }
+
+      const shared = { tenantId: staff.tenantId, orderId, seatNumber: dto.seatNumber ?? null, addedByStaffId: staff.id, ...(replay && { createdAt: replay.at }) }
+      const parent = await tx.orderLine.create({ data: { ...shared, ...(replay && { id: replay.id }), comboId: dto.comboId, quantity: dto.quantity, unitPriceMinor: priceMinor } })
       for (const child of children) {
         const line = await tx.orderLine.create({
-          data: { ...shared, itemId: child.itemId, variantId: child.variantId, parentLineId: parent.id, quantity: child.quantity * dto.quantity, unitPriceMinor: child.upchargeMinor },
+          data: { ...shared, ...(child.id && { id: child.id }), itemId: child.itemId, variantId: child.variantId, parentLineId: parent.id, quantity: child.quantity, unitPriceMinor: child.unitPriceMinor },
         })
-        const modifierPrices = await resolveModifierPrices(tx, staff.tenantId, child.modifierIds)
-        for (const modifierId of child.modifierIds) {
-          await tx.orderLineModifier.create({ data: { tenantId: staff.tenantId, orderLineId: line.id, modifierId, priceMinor: modifierPrices.get(modifierId) ?? 0n } })
+        for (const [modifierId, price] of Object.entries(child.modifierPriceMinor)) {
+          await tx.orderLineModifier.create({ data: { tenantId: staff.tenantId, orderLineId: line.id, modifierId, priceMinor: price } })
         }
       }
       return buildOrderView(tx, order)
@@ -327,8 +377,12 @@ export class OrderLinesService {
    * this same transaction). The line is kept, stamped voided - it drops out
    * of the order, bill and invoice, and its kitchen ticket line shows struck
    * through. A combo is voided whole, items included.
+   *
+   * `replay` (restiq-backend#297): a void the hub already made. The manager
+   * typed their PIN on the hub, so no PIN travels; the approving manager is
+   * recorded as an audit event `sync.void_approved_offline` instead.
    */
-  async voidLine(staff: PosPrincipal, orderId: string, lineId: string, dto: VoidOrderLineDto): Promise<OrderView> {
+  async voidLine(staff: PosPrincipal, orderId: string, lineId: string, dto: VoidOrderLineDto, replay?: { at: Date; approverId: string }): Promise<OrderView> {
     return this.plane().$transaction(async (tx) => {
       await setTenantContext(tx, staff.tenantId)
       const order = await loadOrder(tx, staff.tenantId, orderId)
@@ -344,10 +398,19 @@ export class OrderLinesService {
       }
       await assertBillHasNoPayments(tx, orderId)
 
-      const approval = await this.managerAuth.authorize('void_after_fire', staff.tenantId, order.outletId, dto.managerPin, dto.reason.trim(), staff.id)
-      await tx.orderLine.updateMany({ where: { id: { in: ids } }, data: { voidedAt: new Date(), voidReason: dto.reason.trim() } })
+      const reason = dto.reason.trim()
+      if (replay) {
+        const approver = await tx.staffUser.findFirst({ where: { id: replay.approverId, tenantId: staff.tenantId }, select: { name: true } })
+        if (!approver) throw new BadRequestException({ code: 'validation_failed', message: 'No such approving manager' })
+        await tx.auditEvent.create({
+          data: { tenantId: staff.tenantId, actorId: staff.id, actorEmail: staff.name, approverId: replay.approverId, approverName: approver.name, action: 'sync.void_approved_offline', reason, occurredAt: replay.at },
+        })
+      }
+      const approval = replay ? null : await this.managerAuth.authorize('void_after_fire', staff.tenantId, order.outletId, dto.managerPin, reason, staff.id)
+      const at = replay?.at ?? new Date()
+      await tx.orderLine.updateMany({ where: { id: { in: ids } }, data: { voidedAt: at, voidReason: reason } })
       await tx.ticketLine.updateMany({ where: { orderLineId: { in: ids } }, data: { voided: true } })
-      await this.managerAuth.recordApproval(tx, approval, { actorId: staff.id, actorEmail: staff.name, occurredAt: new Date() })
+      if (approval) await this.managerAuth.recordApproval(tx, approval, { actorId: staff.id, actorEmail: staff.name, occurredAt: at })
       return buildOrderView(tx, order)
     })
   }
