@@ -50,6 +50,8 @@ export async function openOrRebuild(dataDir: string, migrationsDir: string): Pro
   const bootstrap = join(dataDir, 'bootstrap.json')
   if (existsSync(bootstrap)) {
     await importBootstrap(fresh.pg, JSON.parse(readFileSync(bootstrap, 'utf8')) as BootstrapPayload, dataDir)
+    // bootstrap.json predates every open sale whose op was already acked (the journal replays only unacked ones).
+    await fresh.pg.query('UPDATE hub_meta SET open_sales_resync = true')
     logger.warn(`RECOVERY: moved the broken database to ${broken} and rebuilt it from bootstrap.json; the journal is replayed next`)
   } else {
     logger.error(`RECOVERY: moved the broken database to ${broken}; no bootstrap.json, so the hub bootstraps from the cloud when it next syncs`)

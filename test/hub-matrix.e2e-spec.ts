@@ -60,7 +60,7 @@ describe('hub offline test matrix (e2e)', () => {
     return { Authorization: `Bearer ${(res.body as { token: string }).token}` }
   }
 
-  async function status(): Promise<{ online: boolean; outboxDepth: number; locked: boolean; lockReason: string | null }> {
+  async function status(): Promise<{ online: boolean; outboxDepth: number; locked: boolean; lockReason: string | null; openSalesResync: boolean }> {
     return (await request(http).get('/pos/v1/hub/status').set(till).expect(200)).body as Awaited<ReturnType<typeof status>>
   }
 
@@ -270,7 +270,16 @@ describe('hub offline test matrix (e2e)', () => {
     await expectCloudMatchesHub()
   })
 
-  it('recovery after a crash: PGlite will not open, the hub rebuilds from bootstrap.json and the journal, then drains with no duplicates', async () => {
+  it('recovery after a crash: PGlite will not open, the hub rebuilds from bootstrap.json and the journal, drains with no duplicates and gets its acked open sales back', async () => {
+    // Open and pushed before the crash, so acked: the rebuild alone (bootstrap.json + unacked ops) cannot bring them back.
+    const [openShift] = await hubRows(`SELECT id FROM shifts WHERE closed_at IS NULL`)
+    const tableOrder = (await post(till, `/pos/v1/outlets/${f.outletId}/tables/${f.tableId}/order`).expect(200)).body as { id: string }
+    await post(till, `/pos/v1/orders/${tableOrder.id}/lines`, { itemId: f.itemId, quantity: 2, modifierIds: [f.gheeId] }).expect(201)
+    await worker.sync()
+    expect(await outboxDepth(hub)).toBe(0)
+    const openSale = `SELECT o.id, o.status::text, l.id AS line_id, l.quantity FROM orders o JOIN order_lines l ON l.order_id = o.id WHERE o.id = $1::uuid`
+    const tableBefore = await hubRows(openSale, [tableOrder.id])
+
     await c.down()
     await worker.sync()
     for (let i = 0; i < 3; i++) await sale(till, i)
@@ -296,6 +305,8 @@ describe('hub offline test matrix (e2e)', () => {
     const after: Row[][] = []
     for (const sql of Object.values(ofOrders)) after.push(await hubRows(sql, [orderIds]))
     expect(after).toEqual(before)
+    expect(await hubRows(openSale, [tableOrder.id])).toEqual([])
+    expect((await readMeta(hub))?.openSalesResync).toBe(true)
 
     await c.up()
     till = await login(HUB_PIN)
@@ -305,11 +316,23 @@ describe('hub offline test matrix (e2e)', () => {
     expect(await hubRows(`SELECT DISTINCT result->>'status' AS status FROM hub_outbox WHERE op_id = ANY($1::uuid[])`, [pending.map((op) => op.opId)])).toEqual([{ status: 'accepted' }])
     expect(await cloud.bill.count({ where: { tenantId: f.tenantId } })).toBe(cloudBills + 3)
     for (const sql of Object.values(ofOrders)) expect(await cloud.$queryRawUnsafe<Row[]>(sql, orderIds)).toEqual(await hubRows(sql, [orderIds]))
+
+    // Drained, so the worker took the open sales from the cloud: the shift and the table order are back.
+    expect((await readMeta(hub))?.openSalesResync).toBe(false)
+    expect(await status()).toMatchObject({ online: true, openSalesResync: false })
+    expect(await hubRows(`SELECT id FROM shifts WHERE closed_at IS NULL`)).toEqual([openShift])
+    expect(await hubRows(openSale, [tableOrder.id])).toEqual(tableBefore)
+    const bill = (await post(till, `/pos/v1/orders/${tableOrder.id}/bill`).expect(201)).body as { id: string; totalMinor: number }
+    await post(till, `/pos/v1/bills/${bill.id}/finalize`, { tenders: [{ method: 'cash', amountMinor: bill.totalMinor }] }).expect(200)
+    await worker.sync()
+    expect(worker.lastError).toBeNull()
+    expect(await outboxDepth(hub)).toBe(0)
+    expect(await hubRows(`SELECT DISTINCT result->>'status' AS status FROM hub_outbox WHERE acked_at IS NOT NULL AND seq > $1`, [pending.at(-1)!.seq])).toEqual([{ status: 'accepted' }])
+    expect(await cloud.shift.count({ where: { tenantId: f.tenantId, closedAt: null } })).toBe(1)
+    expect(await cloud.bill.findUniqueOrThrow({ where: { id: bill.id } })).toMatchObject({ status: 'finalized' })
   }, 60_000)
 
   it('revoked while offline sales are pending: the hub locks and keeps every unsynced op in the outbox and journal', async () => {
-    // The rebuild above restored bootstrap.json, which predates case 2's shift (acked, so not replayed): see KNOWN_ISSUES.
-    await post(till, '/pos/v1/shifts', { outletId: f.outletId, floatMinor: 50000 }).expect(201)
     await c.down()
     await worker.sync()
     for (let i = 0; i < 3; i++) await sale(till, i)

@@ -18,6 +18,8 @@ export interface HubMeta {
   online: boolean
   /** H4: cloud time minus hub time, from the cloud's serverTime. */
   clockSkewSeconds: number
+  /** H5: set when recovery rebuilt the store from bootstrap.json; the worker re-imports open sales once the outbox drains. */
+  openSalesResync: boolean
 }
 
 /** One row (id is always true). deviceId is set by the sync worker (H4); the rest by the bootstrap import. */
@@ -37,6 +39,7 @@ export async function createMetaTable(pg: PGlite): Promise<void> {
     online boolean NOT NULL DEFAULT false,
     clock_skew_seconds int NOT NULL DEFAULT 0
   )`)
+  await pg.exec('ALTER TABLE hub_meta ADD COLUMN IF NOT EXISTS open_sales_resync boolean NOT NULL DEFAULT false')
 }
 
 /** The hub's sync state, or undefined before the first bootstrap. */
@@ -44,7 +47,7 @@ export async function readMeta(pg: Pick<PGlite, 'query'>): Promise<HubMeta | und
   const { rows } = await pg.query<HubMeta>(`
     SELECT tenant_id AS "tenantId", outlet_id AS "outletId", device_id AS "deviceId", cursor::text AS cursor,
       policy, permissions, last_sync_at AS "lastSyncAt", must_sync_before AS "mustSyncBefore", locked, lock_reason AS "lockReason",
-      online, clock_skew_seconds AS "clockSkewSeconds"
+      online, clock_skew_seconds AS "clockSkewSeconds", open_sales_resync AS "openSalesResync"
     FROM hub_meta`)
   return rows[0]
 }

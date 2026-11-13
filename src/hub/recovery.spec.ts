@@ -14,6 +14,7 @@ import { HUB_PIN, seedSaleFixture, seedTenantRows, type SaleFixture } from '../.
 import { CLOUD_TABLES } from '../pos/sync/sync.service'
 import { importBootstrap, writeDurably } from './import'
 import { readJournal } from './journal'
+import { readMeta } from './meta'
 import { readOutbox } from './outbox'
 import { reconcile } from './recovery'
 import { APP_ROLE, openStore } from './store'
@@ -143,6 +144,7 @@ describe('hub startup recovery', () => {
     writeFileSync(join(dataDir, 'global', 'pg_control'), Buffer.alloc(8192, 7))
     hub = await bootHub(dataDir, MIGRATIONS)
     expect(broken()).toHaveLength(1)
+    expect((await readMeta(hub.pg))?.openSalesResync).toBe(true)
     expect(await rows(hub.pg, BILLS)).toEqual(before)
     expect(await readOutbox(hub.pg)).toEqual(readJournal(dataDir))
     expect(await rows(hub.pg, 'SELECT * FROM hub_orphans')).toEqual([])

@@ -36,6 +36,8 @@ export class HubStatusController {
       lockReason,
       rejections: (await pg.query<{ n: number }>('SELECT count(*)::int AS n FROM hub_rejections WHERE NOT acknowledged')).rows[0].n,
       orphans: await this.orphans(),
+      /** A rebuilt store still waiting for its open sales from the cloud (H5). */
+      openSalesResync: meta?.openSalesResync ?? false,
     }
   }
 

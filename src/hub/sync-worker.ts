@@ -167,6 +167,11 @@ export class SyncWorker {
     if (!(await readMeta(this.o.pg))) await this.bootstrap(true)
     else await this.o.pg.query('UPDATE hub_meta SET policy = $1::jsonb', [JSON.stringify(status.policy)])
     await this.push()
+    // After a rebuild (H5): the open shift, orders and bills come back from the cloud once it holds every hub op.
+    if ((await readMeta(this.o.pg))?.openSalesResync && (await outboxDepth(this.o.pg)) === 0) {
+      await this.bootstrap(true)
+      await this.o.pg.query('UPDATE hub_meta SET open_sales_resync = false')
+    }
     await this.pull()
     await this.forwardAcks()
     await this.cacheRejections()
