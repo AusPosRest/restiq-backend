@@ -10,11 +10,13 @@ Design: Restiq `docs/SYNC-DESIGN.md` (accepted 2026-10-07). Issue restiq-backend
 
 - **Device key at enrolment** - `POST /device/v1/enroll` takes optional `publicKey` (base64 SPKI DER, ed25519), checked before the code is used up - `src/ops/devices/devices.service.ts`.
 - **Device realm** - `/sync/v1/*` is signed, not token-authenticated: headers `X-Device-Id`, `X-Device-Timestamp` (ms), `X-Device-Signature` (base64 ed25519 over `METHOD\npath?query\ntimestamp\nsha256hex(raw body)`), 5-minute skew. 401 `invalid_signature` for any failure, 403 `device_revoked` / `device_not_in_outlet` / `tenant_inactive` - `src/platform/device-sync.guard.ts`, `device-signature.ts`. `main.ts` keeps the raw body for this.
-- **Change feed** - `sync_changes` (bigserial id = cursor), written by the `sync_record_change()` trigger on the 19 cloud-owned tables - migration `20261113180000_offline_sync`.
-- `GET /sync/v1/bootstrap` - every cloud-owned row for the device's tenant and outlet as plain rows (database column names), the role permission catalogue, `policy` (`maxOfflineHours` from `tenants.max_offline_hours`, default 24; `syncIntervalSeconds` 30) and a cursor - `src/pos/sync/sync.service.ts`.
-- `GET /sync/v1/pull?cursor=&limit=` - rows changed after the cursor, latest per row, read as they are now (`delete` when gone).
+- **Change feed** - `sync_changes` (bigserial id = cursor), written by the `sync_record_change()` trigger on the 21 cloud-owned tables - migrations `20261113180000_offline_sync`, `20261113200000_sync_tenant_brand_feed` (adds `tenants` and `brands`, #292). Pruned daily to 30 days (`SyncService.prune`, skipped when `RESTIQ_HUB=1` or in tests); each tenant's newest change is always kept.
+- **Hub only** (#292) - `bootstrap` and `push` answer 403 `not_hub` unless the device's `role` is `hub` (ops designates it). Pull, session status, heartbeat and rejections stay open to any keyed device in the outlet.
+- `GET /sync/v1/bootstrap` - every cloud-owned row (including the caller's own `tenants` row and its `brands`) for the device's tenant and outlet as plain rows (database column names), the role permission catalogue, `policy` (`maxOfflineHours` from `tenants.max_offline_hours`, default 24; `syncIntervalSeconds` 30) and a cursor - `src/pos/sync/sync.service.ts`.
+- `GET /sync/v1/pull?cursor=&limit=` - rows changed after the cursor, latest per row, read as they are now (`delete` when gone). A cursor above 0 but below the tenant's oldest kept change answers 410 `cursor_expired`: bootstrap again.
+- `POST /sync/v1/heartbeat` (#292) - `{outboxDepth, appVersion, clockSkewSeconds, recentRejectionCount}` (same DTO and same device columns as the ops heartbeat, via `heartbeatData()`), 204; `GET /ops/v1/sync-health` shows the values.
 - `POST /sync/v1/push` - see below - `src/pos/sync/sync-push.service.ts`.
-- `GET /sync/v1/session-status`, `GET /sync/v1/rejections`, `POST /sync/v1/rejections/:opId/acknowledge`.
+- `GET /sync/v1/session-status` (with `isHub`), `GET /sync/v1/rejections`, `POST /sync/v1/rejections/:opId/acknowledge`.
 
 ### Push
 
@@ -23,7 +25,7 @@ Body `{batchId, ops[1..200]}` (201+ → 413 `batch_too_large`). Each op `{opId, 
 | type | payload | online equivalent |
 |---|---|---|
 | `order.create` | `orderId`, and `tableId` or `tokenNumber` (counter order keeps the hub's token) | open table / counter order |
-| `order.line.add` | `orderId`, `lineId`, `itemId`, `variantId?`, `quantity`, `modifierIds?`, `seatNumber?`, `unitPriceMinor` (string), `modifierPriceMinor?` (`{modifierId: string}`) | add line - at the hub's price, not today's |
+| `order.line.add` | `orderId`, `lineId`, `itemId`, `variantId?`, `quantity`, `modifierIds?`, `seatNumber?`, `note?`, `unitPriceMinor` (string), `modifierPriceMinor?` (`{modifierId: string}`) | add line - at the hub's price, not today's |
 | `order.line.update` | `orderId`, `lineId`, plus the update fields | update line |
 | `order.line.remove` | `orderId`, `lineId` | remove line |
 | `order.status` | `orderId`, `status` | status change (fires kitchen tickets on `sent`) |
@@ -48,6 +50,7 @@ Ids made on the hub are kept, and `at` becomes the row's `createdAt` / `finalize
 - **Settle window.** Pull only shows changes older than 30 s, so a slower transaction that took a lower id is not skipped; a transaction longer than that could still be missed (upgrade path: commit-ordered feed).
 - **No FK from `sync_changes` to `tenants`** - an append-only log read by tenant; an FK would make every tenant hard-delete clear it first.
 - Pull and bootstrap filter by tenant explicitly on top of RLS, as the rest of the codebase does.
+- **`cursor_expired` without a watermark (#292).** A hub's cursor is always one of its own tenant's change ids (or 0), so "below the oldest kept id" means changes it never saw were pruned. Keeping each tenant's newest change stops a quiet tenant's caught-up hub from reading as expired.
 
 ## Hub mode (issue #293)
 

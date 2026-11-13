@@ -5,9 +5,9 @@ export { ALERT_CHANNEL } from './sync-health/alert-channel'
 export type { AlertChannel, SilentDeviceAlert } from './sync-health/alert-channel'
 // tenant-admin/CAP-6 (AD-12): the one device/enrolment-code implementation,
 // reused by admin/devices instead of a second one.
-export { DevicesService } from './devices/devices.service'
+export { DevicesService, heartbeatData } from './devices/devices.service'
 export type { DeviceListItem, DeviceListResult, DeviceView, EnrollActor, EnrollResult } from './devices/devices.service'
-export { DEVICE_TYPES } from './devices/devices.dtos'
+export { DEVICE_TYPES, HeartbeatDto } from './devices/devices.dtos'
 export type { DeviceTypeValue } from './devices/devices.dtos'
 // #132: one agreements implementation, published from /ops and signed from /admin.
 export { AgreementsService } from './agreements/agreements.service'
