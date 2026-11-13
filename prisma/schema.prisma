@@ -192,6 +192,7 @@ model Tenant {
   cartLineModifiers   CartLineModifier[]
   cardReaders         CardReader[]
   readerOrders        ReaderOrder[]
+  billingLineItems    BillingLineItem[]
 
   // The directory list is served from these: filter columns plus the
   // created_at ordering the default sort and cursor walk.
@@ -2297,4 +2298,30 @@ model RevokedPosToken {
 
   @@index([tenantId])
   @@map("revoked_pos_tokens")
+}
+
+enum BillingItemKind {
+  recurring
+  one_time
+}
+
+// #290: a restaurant's billing contract. No unbilled items = the plan price (PlanPrice). Amounts are per
+// billing period of the tenant (tenant.billingPeriod) in its currency; Stripe needs every recurring item
+// of one subscription on the same interval, so items carry none of their own.
+model BillingLineItem {
+  id              String          @id @default(uuid(7)) @db.Uuid
+  tenantId        String          @map("tenant_id") @db.Uuid
+  description     String
+  quantity        Int
+  unitAmountMinor BigInt          @map("unit_amount_minor")
+  kind            BillingItemKind
+  sortOrder       Int             @map("sort_order")
+  // one_time only: set once the item is on a Stripe invoice/checkout; then read-only.
+  billedAt        DateTime?       @map("billed_at") @db.Timestamptz(6)
+  createdAt       DateTime        @default(now()) @map("created_at") @db.Timestamptz(6)
+
+  tenant Tenant @relation(fields: [tenantId], references: [id])
+
+  @@index([tenantId])
+  @@map("billing_line_items")
 }
