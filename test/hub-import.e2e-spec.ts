@@ -97,7 +97,7 @@ describe('hub bootstrap import and pull from the cloud (e2e)', () => {
     const store = await openStore(undefined, MIGRATIONS)
     hub = store.pg
     setPrismaClient(store.prisma)
-    app = await createHubApp()
+    app = await createHubApp(hub, dataDir)
     await app.init()
     http = app.getHttpServer() as Parameters<typeof request>[0]
   }, 60_000)

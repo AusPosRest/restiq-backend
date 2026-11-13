@@ -37,6 +37,8 @@ import { ShiftsService } from '../pos/shifts/shifts.service'
 import { PosTablesController } from '../pos/tables/tables.controller'
 import { PosTenantController } from '../pos/tenant.controller'
 import { hubAllowlist } from './allowlist'
+import { OpRecorderInterceptor } from './op-recorder.interceptor'
+import type { PGlite } from '@electric-sql/pglite'
 
 @Module({
   imports: [PlatformModule, KitchenModule],
@@ -73,9 +75,10 @@ import { hubAllowlist } from './allowlist'
 })
 export class HubModule {}
 
-/** The hub's Nest app, not yet listening. The caller must have called setPrismaClient() first. */
-export async function createHubApp(): Promise<NestExpressApplication> {
+/** The hub's Nest app, not yet listening, recording every write as an op in pg's outbox and dataDir's journal. The caller must have called setPrismaClient() first. */
+export async function createHubApp(pg: PGlite, dataDir: string): Promise<NestExpressApplication> {
   const app = await NestFactory.create<NestExpressApplication>(HubModule, { logger: ['error', 'warn'] })
   app.use(hubAllowlist)
+  app.useGlobalInterceptors(new OpRecorderInterceptor(pg, dataDir))
   return app
 }

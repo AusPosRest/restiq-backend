@@ -383,6 +383,9 @@ export class OrderLinesService {
    * recorded as an audit event `sync.void_approved_offline` instead.
    */
   async voidLine(staff: PosPrincipal, orderId: string, lineId: string, dto: VoidOrderLineDto, replay?: { at: Date; approverId: string }): Promise<OrderView> {
+    // Checked before the transaction, not inside it (restiq-backend#300): authorize runs its own queries, which on the
+    // hub's single PGlite connection would wait behind this transaction until it timed out.
+    const approval = replay ? null : await this.managerAuth.authorize('void_after_fire', staff.tenantId, staff.outletId, dto.managerPin, dto.reason.trim(), staff.id)
     return this.plane().$transaction(async (tx) => {
       await setTenantContext(tx, staff.tenantId)
       const order = await loadOrder(tx, staff.tenantId, orderId)
@@ -406,7 +409,6 @@ export class OrderLinesService {
           data: { tenantId: staff.tenantId, actorId: staff.id, actorEmail: staff.name, approverId: replay.approverId, approverName: approver.name, action: 'sync.void_approved_offline', reason, occurredAt: replay.at },
         })
       }
-      const approval = replay ? null : await this.managerAuth.authorize('void_after_fire', staff.tenantId, order.outletId, dto.managerPin, reason, staff.id)
       const at = replay?.at ?? new Date()
       await tx.orderLine.updateMany({ where: { id: { in: ids } }, data: { voidedAt: at, voidReason: reason } })
       await tx.ticketLine.updateMany({ where: { orderLineId: { in: ids } }, data: { voided: true } })
