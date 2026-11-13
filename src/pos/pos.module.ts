@@ -23,6 +23,11 @@ import { PaymentIntentsService } from './payments/intents.service'
 import { PosShiftsController } from './shifts/shifts.controller'
 import { ShiftsService } from './shifts/shifts.service'
 import { PosTablesController } from './tables/tables.controller'
+// Offline sync (restiq-backend#185) lives here because every pushed op is a
+// pos order/bill operation - it calls these same services.
+import { SyncController } from './sync/sync.controller'
+import { SyncPushService } from './sync/sync-push.service'
+import { SyncService } from './sync/sync.service'
 import { PosTenantController } from './tenant.controller'
 
 @Module({
@@ -39,6 +44,7 @@ import { PosTenantController } from './tenant.controller'
     PosTablesController,
     PosDevicesController,
     PosTenantController,
+    SyncController,
   ],
   providers: [
     PosAuthService,
@@ -51,6 +57,8 @@ import { PosTenantController } from './tenant.controller'
     BillsService,
     PaymentIntentsService,
     PosDevicesService,
+    SyncService,
+    SyncPushService,
   ],
 })
 export class PosModule {}

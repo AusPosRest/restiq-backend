@@ -29,6 +29,7 @@ the task entry to `tasks/completed.md` after every feature or bug fix.
   insert-only past bump), grouped per resolved station, with bump/recall/
   refire actions and the station-queue/expo/bumped/all-day read
   projections every KDS screen story consumes.
+- [Offline sync for the Windows hub till - backend](features/offline-sync.md) - D15: device-signed /sync/v1, change feed, push of offline sales (#185)
 
 ## Tasks
 
