@@ -31,22 +31,33 @@ Body `{batchId, ops[1..200]}` (201+ → 413 `batch_too_large`). Each op `{opId, 
 | `order.status` | `orderId`, `status` | status change (fires kitchen tickets on `sent`) |
 | `bill.create` | `orderId`, `billId` | create bill |
 | `bill.finalize` | `billId`, `tenders`, `tenderIds` (one per tender), `discountMinor?`, `discountReason?` | finalize |
+| `order.combo.add` (#297) | `orderId`, `lineId` (parent), `comboId`, `quantity`, `unitPriceMinor`, `seatNumber?`, `children[]` of `{lineId, itemId, variantId?, quantity (whole line), unitPriceMinor, modifierPriceMinor?}` | add combo - the hub's lines and prices as written; slots and availability are not re-checked |
+| `order.line.void` (#297) | `orderId`, `lineId`, `reason`, `approvedByStaffId` | void after fire - no PIN; audited `sync.void_approved_offline` with the approver |
+| `order.transfer` (#297) | `orderId`, `newOwnerStaffId`, `reason?` | transfer |
+| `order.discard` (#297) | `orderId` | discard empty order |
+| `shift.open` (#297) | `shiftId`, `outletId` (must be the hub's), `floatMinor` | open shift |
+| `shift.cash_movement` (#297) | `shiftId`, `movementId`, `type`, `amountMinor`, `reason` | paid out / bank drop |
+| `shift.close` (#297) | `shiftId`, `countedMinor` | blind close |
+| `clock.in` (#297) | `clockEventId` | clock-in written at PIN login (skipped if the cloud already has one that local day) |
+| `clock.out` (#297) | `clockEventId` | clock out - kept even if the cloud never saw the clock-in |
+| `ticket.bump` (#297) | `orderId`, `stationId` (uuid or `null` = unrouted) | bump the order's queued ticket at that station |
+| `ticket.recall` (#297) | `orderId`, `stationId` (uuid or `null`) | recall the ticket there bumped last; the 12 h window is not re-checked |
 
-Ids made on the hub are kept, and `at` becomes the row's `createdAt` / `finalizedAt`.
+Ids made on the hub are kept, and `at` becomes the row's business time (`createdAt`, `finalizedAt`, `voidedAt`, `openedAt`/`closedAt`, `occurredAt`, `bumpedAt`/`recalledAt`). Clock ops need no permission; shift ops need `settle_bills`, ticket ops `fire_kitchen`, the rest `take_orders`. Refunds stay cloud-only (D-1) and ticket refire stays on the hub - neither is an op. The payload classes are exported from `src/pos` (`Sync*Payload`) so the hub's op recorder validates against the same rules.
 
 ## Integration points for later stories
 
 - Desktop hub (restiq-desktop): bootstrap into its local store, outbox → push, pull every `syncIntervalSeconds`, lock when `mustSyncBefore` passes.
 - Per-device bill number series waits on decision O5; bills are still numbered by the cloud at finalize.
-- `ticket.bump`: kitchen tickets get cloud ids at send, so a hub bump cannot name them yet - needs ticket ids from the hub or a bump by order + station.
 - Ops dead-letter replay of sync ops (payload is not stored, by NFR-15).
 
 ## Key decisions
 
 - **Device realm, key at enrolment.** The one-time enrolment code is the trust anchor, so the key rides on it; no separate key endpoint, no staff token for sync. Each op names its staff member.
 - **Money ops are never refused for a lapsed permission (S3).** The sale happened; it is applied and an `sync.permission_lapsed` audit event is written. A large discount approved on the hub is applied with a `sync.discount_approved_offline` audit event - a manager PIN never travels in the outbox.
-- **A replayed cash settle skips the open-shift check** that online cash needs (#208): the hub already took the cash, and shifts are not synced ops yet.
-- **Re-sends are safe.** Ledger first; if the ledger write was lost after an apply, the re-sent create hits the hub's own id (unique violation → accepted), a status already reached is a no-op, an already finalized bill is accepted.
+- **A replayed cash settle skips the open-shift check** that online cash needs (#208): the hub already took the cash.
+- **Tickets by order + station (#297).** The cloud makes its own ticket ids in `fireOnSend`, so the hub names the order and station. `fireOnSend` keeps at most one queued ticket per order and station, so a bump means that one and a recall the one bumped last; none in that state means a re-send already applied (no-op), no ticket at all is rejected `not_found`.
+- **Re-sends are safe.** Ledger first; if the ledger write was lost after an apply, the re-sent create hits the hub's own id (unique violation → accepted), a status already reached is a no-op, an already finalized bill is accepted; likewise an already voided line, a discarded order (its `order.discarded` audit exists), a closed shift, a bumped/recalled ticket.
 - **Settle window.** Pull only shows changes older than 30 s, so a slower transaction that took a lower id is not skipped; a transaction longer than that could still be missed (upgrade path: commit-ordered feed).
 - **No FK from `sync_changes` to `tenants`** - an append-only log read by tenant; an FK would make every tenant hard-delete clear it first.
 - Pull and bootstrap filter by tenant explicitly on top of RLS, as the rest of the codebase does.

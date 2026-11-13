@@ -376,7 +376,7 @@ export class OrdersService {
    * instead, so the kitchen ticket and void audit keep their order. Refused
    * once anything is still on it, or any money has touched its bill.
    */
-  async discard(staff: PosPrincipal, orderId: string): Promise<void> {
+  async discard(staff: PosPrincipal, orderId: string, replay?: Pick<Replay, 'at'>): Promise<void> {
     const plane = this.plane()
     await plane.$transaction(async (tx) => {
       await setTenantContext(tx, staff.tenantId)
@@ -402,7 +402,7 @@ export class OrdersService {
 
       const what = order.tokenNumber !== null ? `token ${order.tokenNumber}` : order.tableId ? 'table order' : 'order'
       await tx.auditEvent.create({
-        data: { tenantId: staff.tenantId, actorId: staff.id, actorEmail: staff.name, action: 'order.discarded', reason: `Discarded empty ${what} ${orderId}`, occurredAt: new Date() },
+        data: { tenantId: staff.tenantId, actorId: staff.id, actorEmail: staff.name, action: 'order.discarded', reason: `Discarded empty ${what} ${orderId}`, occurredAt: replay?.at ?? new Date() },
       })
     })
   }
@@ -412,7 +412,7 @@ export class OrdersService {
    * shift-change/handoff, not one of the six manager-authorised actions).
    * The old owner cannot mutate the order once this completes.
    */
-  async transfer(staff: PosPrincipal, orderId: string, dto: TransferOrderDto): Promise<OrderView> {
+  async transfer(staff: PosPrincipal, orderId: string, dto: TransferOrderDto, replay?: Pick<Replay, 'at'>): Promise<OrderView> {
     const plane = this.plane()
     return plane.$transaction(async (tx) => {
       await setTenantContext(tx, staff.tenantId)
@@ -440,7 +440,7 @@ export class OrdersService {
           actorEmail: staff.name,
           action: 'order.ownership_transferred',
           reason: dto.reason ?? `Ownership handed from staff ${order.ownerId} to staff ${dto.newOwnerStaffId}`,
-          occurredAt: new Date(),
+          occurredAt: replay?.at ?? new Date(),
         },
       })
 
