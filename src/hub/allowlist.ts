@@ -31,6 +31,10 @@ export const ROUTES = [
   'GET /kitchen/v1/outlets/:o/expo',
   'GET /kitchen/v1/outlets/:o/bumped',
   'GET /kitchen/v1/outlets/:o/all-day-summary',
+  // Hub status and Sync issues (H6) - hub-only
+  'GET /pos/v1/hub/status',
+  'GET /pos/v1/hub/rejections',
+  'POST /pos/v1/hub/rejections/:op/acknowledge',
   // Orders and bills
   'POST /pos/v1/outlets/:o/tables/:t/order',
   'POST /pos/v1/outlets/:o/counter-orders',

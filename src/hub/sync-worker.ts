@@ -43,6 +43,8 @@ export interface SyncWorkerOptions {
   deviceId: string
   key: KeyObject
   appVersion: string
+  /** Called after every tick, worked or not (H6: the desktop's status message). */
+  onTick?: () => void
 }
 
 interface CloudRejection {
@@ -89,6 +91,7 @@ export class SyncWorker {
         .catch((error: unknown) => this.logger.error(`sync tick crashed: ${String(error)}`))
         .finally(() => {
           this.current = undefined
+          this.o.onTick?.()
           this.schedule()
         })
       return this.current
@@ -165,6 +168,7 @@ export class SyncWorker {
     else await this.o.pg.query('UPDATE hub_meta SET policy = $1::jsonb', [JSON.stringify(status.policy)])
     await this.push()
     await this.pull()
+    await this.forwardAcks()
     await this.cacheRejections()
     await this.call('POST', '/sync/v1/heartbeat', {
       outboxDepth: Math.min(await outboxDepth(this.o.pg), 100_000),
@@ -240,14 +244,30 @@ export class SyncWorker {
     }
   }
 
+  /** H6: sends the acknowledgements staff made on the till (hub/rejections/:opId/acknowledge) to the cloud. */
+  async forwardAcks(): Promise<void> {
+    const { rows } = await this.o.pg.query<{ opId: string }>('SELECT op_id AS "opId" FROM hub_rejections WHERE ack_pending')
+    for (const { opId } of rows) {
+      try {
+        await this.call('POST', `/sync/v1/rejections/${opId}/acknowledge`)
+      } catch (error) {
+        // 404: the cloud never had it (or forgot it) - nothing left to acknowledge.
+        if (!(error instanceof CloudError && error.status === 404)) throw error
+      }
+      await this.o.pg.query('UPDATE hub_rejections SET ack_pending = false WHERE op_id = $1', [opId])
+    }
+  }
+
   private async cacheRejections(): Promise<void> {
     const list = await this.call<CloudRejection[]>('GET', '/sync/v1/rejections')
     await this.o.pg.transaction(async (tx) => {
-      await tx.query('DELETE FROM hub_rejections')
+      // An acknowledgement made since forwardAcks ran stays until the next tick sends it.
+      await tx.query('DELETE FROM hub_rejections WHERE NOT ack_pending')
       await tx.query(
         `INSERT INTO hub_rejections (op_id, type, code, message, at, acknowledged)
          SELECT "opId", type, code, message, at, acknowledged
-         FROM jsonb_to_recordset($1::jsonb) AS r("opId" uuid, type text, code text, message text, at timestamptz, acknowledged boolean)`,
+         FROM jsonb_to_recordset($1::jsonb) AS r("opId" uuid, type text, code text, message text, at timestamptz, acknowledged boolean)
+         ON CONFLICT (op_id) DO NOTHING`,
         [JSON.stringify(list)],
       )
     })
