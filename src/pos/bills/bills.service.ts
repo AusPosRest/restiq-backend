@@ -540,7 +540,8 @@ export class BillsService {
         refs.map(async (ref) => {
           const pi = await stripe.paymentIntents.retrieve(ref, { expand: ['latest_charge'] }, { stripeAccount })
           const charge = typeof pi.latest_charge === 'object' ? pi.latest_charge : null
-          return { id: pi.id, refundable: BigInt(pi.amount_received - (charge?.amount_refunded ?? 0)) }
+          // Stripe refuses refund_application_fee on a charge that carried no platform fee (fee 0).
+          return { id: pi.id, refundable: BigInt(pi.amount_received - (charge?.amount_refunded ?? 0)), hadFee: (pi.application_fee_amount ?? 0) > 0 }
         }),
       )
       payments.sort((a, b) => (b.refundable > a.refundable ? 1 : b.refundable < a.refundable ? -1 : 0))
@@ -552,7 +553,7 @@ export class BillsService {
         const part = payment.refundable < due ? payment.refundable : due
         if (part === 0n) continue
         await stripe.refunds.create(
-          { payment_intent: payment.id, amount: Number(part), refund_application_fee: true, metadata: { creditNoteId } },
+          { payment_intent: payment.id, amount: Number(part), ...(payment.hadFee ? { refund_application_fee: true } : {}), metadata: { creditNoteId } },
           { stripeAccount, idempotencyKey: i === 0 ? creditNoteId : `${creditNoteId}:${payment.id}` },
         )
         due -= part
