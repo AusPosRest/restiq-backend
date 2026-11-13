@@ -23,13 +23,14 @@ export interface ClockInParams {
  * Runs inside the caller's own transaction (post-login), same shape as every
  * other tenant-scoped write in this codebase.
  */
-export async function recordClockInIfNeeded(tx: Prisma.TransactionClient, params: ClockInParams): Promise<void> {
+// `replay` (restiq-backend#297): a clock-in the hub recorded at login, with its id and time.
+export async function recordClockInIfNeeded(tx: Prisma.TransactionClient, params: ClockInParams, replay?: { id: string; at: Date }): Promise<void> {
   const latest = await tx.clockEvent.findFirst({ where: { staffId: params.staffId }, orderBy: { occurredAt: 'desc' } })
-  const now = new Date()
+  const now = replay?.at ?? new Date()
   if (latest?.type === 'clock_in' && localDateKey(latest.occurredAt, params.timezone) === localDateKey(now, params.timezone)) {
     return
   }
   await tx.clockEvent.create({
-    data: { id: uuidv7(), tenantId: params.tenantId, staffId: params.staffId, outletId: params.outletId, type: 'clock_in', occurredAt: now },
+    data: { id: replay?.id ?? uuidv7(), tenantId: params.tenantId, staffId: params.staffId, outletId: params.outletId, type: 'clock_in', occurredAt: now },
   })
 }

@@ -206,7 +206,8 @@ export class KitchenTicketsService {
 
   // -- actions (CAP-2/CAP-4, no actor attribution) --------------------------
 
-  async bump(staff: PosPrincipal, ticketId: string): Promise<TicketView> {
+  // `replay` (restiq-backend#297): a bump or recall the hub already made, at its time.
+  async bump(staff: PosPrincipal, ticketId: string, replay?: { at: Date }): Promise<TicketView> {
     const plane = this.plane()
     return plane.$transaction(async (tx) => {
       await setTenantContext(tx, staff.tenantId)
@@ -214,14 +215,14 @@ export class KitchenTicketsService {
       if (ticket.status === 'bumped') {
         throw new ConflictException({ code: 'conflict', message: 'This ticket is already bumped' })
       }
-      const updated = await tx.ticket.update({ where: { id: ticketId }, data: { status: 'bumped', bumpedAt: new Date() } })
-      await tx.ticketEvent.create({ data: { tenantId: staff.tenantId, ticketId, type: 'bumped' } })
+      const updated = await tx.ticket.update({ where: { id: ticketId }, data: { status: 'bumped', bumpedAt: replay?.at ?? new Date() } })
+      await tx.ticketEvent.create({ data: { tenantId: staff.tenantId, ticketId, type: 'bumped', ...(replay && { occurredAt: replay.at }) } })
       return buildTicketView(tx, updated)
     })
   }
 
   /** Returns a bumped ticket to its source station's queue, marked RECALLED (CAP-4). */
-  async recall(staff: PosPrincipal, ticketId: string): Promise<TicketView> {
+  async recall(staff: PosPrincipal, ticketId: string, replay?: { at: Date }): Promise<TicketView> {
     const plane = this.plane()
     return plane.$transaction(async (tx) => {
       await setTenantContext(tx, staff.tenantId)
@@ -229,14 +230,15 @@ export class KitchenTicketsService {
       if (ticket.status !== 'bumped') {
         throw new ConflictException({ code: 'conflict', message: 'Only a bumped ticket can be recalled' })
       }
-      if (ticket.bumpedAt && Date.now() - ticket.bumpedAt.getTime() > BUMPED_WINDOW_MS) {
+      // The window was checked on the hub when it recalled; a late sync must not refuse it.
+      if (!replay && ticket.bumpedAt && Date.now() - ticket.bumpedAt.getTime() > BUMPED_WINDOW_MS) {
         throw new ConflictException({ code: 'conflict', message: 'This ticket is too old to reopen' })
       }
       const updated = await tx.ticket.update({
         where: { id: ticketId },
-        data: { status: 'queued', recallCount: { increment: 1 }, recalledAt: new Date() },
+        data: { status: 'queued', recallCount: { increment: 1 }, recalledAt: replay?.at ?? new Date() },
       })
-      await tx.ticketEvent.create({ data: { tenantId: staff.tenantId, ticketId, type: 'recalled' } })
+      await tx.ticketEvent.create({ data: { tenantId: staff.tenantId, ticketId, type: 'recalled', ...(replay && { occurredAt: replay.at }) } })
       return buildTicketView(tx, updated)
     })
   }
