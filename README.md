@@ -85,6 +85,7 @@ or `dev`.
     POST /ops/v1/auth/login     email+password -> { token, operator }; generic 401 on bad credentials
     GET  /ops/v1/auth/session   current operator (Bearer token)
     POST /ops/v1/auth/logout    204; audited
+    POST /webhooks/stripe       public; Stripe events, verified by signature over the raw body (#282)
 
 Errors are shaped `{ "error": { "code", "message" } }`.
 

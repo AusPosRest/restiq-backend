@@ -161,6 +161,7 @@ model Tenant {
   deadLetters         SyncDeadLetter[]
   subscription        Subscription?
   invoices            Invoice[]
+  paymentAccount      TenantPaymentAccount?
   checklistProgress   ChecklistProgress?
   floors              Floor[]
   diningTables        DiningTable[]
@@ -1239,6 +1240,10 @@ model Subscription {
   currentPeriodStart DateTime           @map("current_period_start") @db.Timestamptz(6)
   currentPeriodEnd   DateTime           @map("current_period_end") @db.Timestamptz(6)
   suspendedAt        DateTime?          @map("suspended_at") @db.Timestamptz(6)
+  // #282: card billing on the platform's own Stripe account. null status = not set up.
+  stripeCustomerId     String?            @map("stripe_customer_id")
+  stripeSubscriptionId String?            @unique @map("stripe_subscription_id")
+  cardBillingStatus    CardBillingStatus? @map("card_billing_status")
   createdAt          DateTime           @default(now()) @map("created_at") @db.Timestamptz(6)
   updatedAt          DateTime           @updatedAt @map("updated_at") @db.Timestamptz(6)
 
@@ -1246,6 +1251,13 @@ model Subscription {
   invoices Invoice[]
 
   @@map("subscriptions")
+}
+
+enum CardBillingStatus {
+  pending
+  active
+  past_due
+  canceled
 }
 
 enum InvoiceStatus {
@@ -1261,6 +1273,8 @@ model Invoice {
   period         String
   amountMinor    BigInt        @map("amount_minor_units")
   status         InvoiceStatus @default(pending)
+  // #282: the Stripe invoice this row mirrors - webhook redeliveries upsert on it.
+  stripeInvoiceId String?      @unique @map("stripe_invoice_id")
   createdAt      DateTime      @default(now()) @map("created_at") @db.Timestamptz(6)
 
   tenant       Tenant       @relation(fields: [tenantId], references: [id])
@@ -2158,6 +2172,21 @@ model SimulatedMessage {
 
   @@index([createdAt])
   @@map("simulated_messages")
+}
+
+// #282: the restaurant's Stripe Connect account (v2 Accounts) and the platform's cut of its card payments.
+model TenantPaymentAccount {
+  tenantId        String   @id @map("tenant_id") @db.Uuid
+  stripeAccountId String?  @unique @map("stripe_account_id")
+  allowedMethods  String[] @default(["card", "apple_pay", "google_pay"]) @map("allowed_methods")
+  feePercentBps   Int      @default(0) @map("fee_percent_bps")
+  feeFixedMinor   BigInt   @default(0) @map("fee_fixed_minor")
+  createdAt       DateTime @default(now()) @map("created_at") @db.Timestamptz(6)
+  updatedAt       DateTime @updatedAt @map("updated_at") @db.Timestamptz(6)
+
+  tenant Tenant @relation(fields: [tenantId], references: [id])
+
+  @@map("tenant_payment_accounts")
 }
 
 // #201: plan list prices per country, edited by operators in the Platform Console (Plans).
