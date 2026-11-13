@@ -4,11 +4,11 @@
 import type { PGlite, Transaction } from '@electric-sql/pglite'
 import { closeSync, fsyncSync, openSync, renameSync, writeFileSync } from 'node:fs'
 import { join } from 'node:path'
-import { CLOUD_TABLES, type SyncService } from '../pos/sync/sync.service'
+import { CLOUD_TABLES, OPEN_SALES_TABLES, type SyncService } from '../pos/sync/sync.service'
 
 export type BootstrapPayload = Awaited<ReturnType<SyncService['bootstrap']>>
 export type PullPage = Awaited<ReturnType<SyncService['pull']>>
-type CloudTable = (typeof CLOUD_TABLES)[number]
+type CloudTable = (typeof CLOUD_TABLES)[number] | (typeof OPEN_SALES_TABLES)[number]
 
 // Back to PGlite's superuser (session user) for this transaction only, with FK
 // and sync_record_change triggers off: rows arrive parent-less (other outlets,
@@ -23,7 +23,7 @@ async function asImporter(pg: PGlite, fn: (tx: Transaction) => Promise<void>): P
   })
 }
 
-/** Upserts rows (column names as in the database) into one table. Table names only ever come from CLOUD_TABLES. */
+/** Upserts rows (column names as in the database) into one table. Table names only ever come from CLOUD_TABLES or OPEN_SALES_TABLES. */
 async function upsert(tx: Transaction, table: CloudTable, rows: unknown[], columns: Map<CloudTable, string>): Promise<void> {
   if (rows.length === 0) return
   let set = columns.get(table)
@@ -41,13 +41,33 @@ async function upsert(tx: Transaction, table: CloudTable, rows: unknown[], colum
   ])
 }
 
+const ids = (rows: unknown[] | undefined) => JSON.stringify((rows ?? []).map((row) => (row as { id: string }).id))
+
+/**
+ * H4 (B6): the outlet's open sales from bootstrap?include=open_sales, into the
+ * hub's own tables. Upserts only - the hub's other sales stay. The cloud made
+ * its own ids for line modifiers, tickets and the token counter when it
+ * applied the hub's ops, so the hub's copies hanging off the imported orders
+ * and lines are dropped first, or they would count twice.
+ * ponytail: also drops the hub's done tickets of those orders (kitchen history only).
+ */
+async function importOpenSales(tx: Transaction, sales: Record<string, unknown[]>, outletId: string, columns: Map<CloudTable, string>): Promise<void> {
+  const orders = ids(sales.orders)
+  await tx.query(`DELETE FROM ticket_lines WHERE ticket_id IN (SELECT id FROM tickets WHERE order_id IN (SELECT jsonb_array_elements_text($1::jsonb)::uuid))`, [orders])
+  await tx.query(`DELETE FROM tickets WHERE order_id IN (SELECT jsonb_array_elements_text($1::jsonb)::uuid)`, [orders])
+  await tx.query(`DELETE FROM order_line_modifiers WHERE order_line_id IN (SELECT jsonb_array_elements_text($1::jsonb)::uuid)`, [ids(sales.order_lines)])
+  await tx.query(`DELETE FROM token_number_counters WHERE outlet_id = $1::uuid`, [outletId])
+  for (const table of OPEN_SALES_TABLES) await upsert(tx, table, sales[table] ?? [], columns)
+}
+
 const MUST_SYNC_BEFORE = `now() + make_interval(hours => (policy->>'maxOfflineHours')::int)`
 
 /**
  * Replaces the hub's copy of the cloud-owned tables with the snapshot (rows the
- * snapshot no longer has are deleted), records tenant, outlet, cursor and
- * policy in hub_meta - one transaction - then keeps the payload as
- * dataDir/bootstrap.json for offline recovery (H5).
+ * snapshot no longer has are deleted), adds its open sales when it has them
+ * (the sync worker asks for those only while its outbox is empty), records
+ * tenant, outlet, cursor and policy in hub_meta - one transaction - then
+ * keeps the payload as dataDir/bootstrap.json for offline recovery (H5).
  */
 export async function importBootstrap(pg: PGlite, payload: BootstrapPayload, dataDir: string): Promise<void> {
   const tenantId = payload.data.tenants?.[0]?.id
@@ -61,6 +81,7 @@ export async function importBootstrap(pg: PGlite, payload: BootstrapPayload, dat
       ])
     }
     for (const table of CLOUD_TABLES) await upsert(tx, table, payload.data[table] ?? [], columns)
+    if (payload.openSales) await importOpenSales(tx, payload.openSales, payload.outletId, columns)
     await tx.query(
       `INSERT INTO hub_meta (tenant_id, outlet_id, cursor, policy, permissions, last_sync_at, must_sync_before)
        VALUES ($1, $2, $3, $4::jsonb, $5::jsonb, now(), now() + make_interval(hours => ($4::jsonb->>'maxOfflineHours')::int))
