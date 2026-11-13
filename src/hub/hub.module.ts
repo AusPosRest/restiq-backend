@@ -37,6 +37,8 @@ import { ShiftsService } from '../pos/shifts/shifts.service'
 import { PosTablesController } from '../pos/tables/tables.controller'
 import { PosTenantController } from '../pos/tenant.controller'
 import { hubAllowlist } from './allowlist'
+import { HubStatusController } from './hub-status.controller'
+import { HubContext, HubLockGuard } from './lock.guard'
 import { OpRecorderInterceptor } from './op-recorder.interceptor'
 import type { PGlite } from '@electric-sql/pglite'
 
@@ -55,6 +57,7 @@ import type { PGlite } from '@electric-sql/pglite'
     PosTablesController,
     PosDevicesController,
     PosTenantController,
+    HubStatusController,
   ],
   providers: [
     PosAuthService,
@@ -75,10 +78,15 @@ import type { PGlite } from '@electric-sql/pglite'
 })
 export class HubModule {}
 
-/** The hub's Nest app, not yet listening, recording every write as an op in pg's outbox and dataDir's journal, calling onOp after each. The caller must have called setPrismaClient() first. */
-export async function createHubApp(pg: PGlite, dataDir: string, onOp?: () => void): Promise<NestExpressApplication> {
-  const app = await NestFactory.create<NestExpressApplication>(HubModule, { logger: ['error', 'warn'] })
+/**
+ * The hub's Nest app, not yet listening, recording every write as an op in pg's outbox and dataDir's journal, calling onOp after each.
+ * hub supplies the clock and the sync worker to the status endpoints and the O1 lock (H6). The caller must have called setPrismaClient() first.
+ */
+export async function createHubApp(pg: PGlite, dataDir: string, onOp?: () => void, hub = new HubContext(pg)): Promise<NestExpressApplication> {
+  const app = await NestFactory.create<NestExpressApplication>({ module: HubModule, providers: [{ provide: HubContext, useValue: hub }] }, { logger: ['error', 'warn'] })
   app.use(hubAllowlist)
+  // After the APP_GUARDs (added at create), so PosAuthGuard has already answered 401/403.
+  app.useGlobalGuards(new HubLockGuard(hub))
   app.useGlobalInterceptors(new OpRecorderInterceptor(pg, dataDir, onOp))
   return app
 }

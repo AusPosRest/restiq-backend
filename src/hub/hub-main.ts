@@ -8,29 +8,26 @@
 //   { type: 'device-key', pem, deviceId, cloudUrl, appVersion? }
 // HUB_CLOUD_URL / HUB_DEVICE_ID fill a missing cloudUrl / deviceId (hub_meta's
 // device_id too). HUB_DEVICE_KEY_PEM is for tests and local runs only.
+// Status (H6, restiq-desktop D3): a { type: 'status', ... } message (desktop-port.ts)
+// goes to the parent after listen, after the worker starts and after every tick.
 // Shutdown: SIGTERM, SIGINT or a parentPort { type: 'shutdown' } stops the
 // worker, closes the app and PGlite, then exits 0.
 import 'reflect-metadata'
+import type { PGlite } from '@electric-sql/pglite'
 import { existsSync } from 'node:fs'
 import { join } from 'node:path'
 import { setPrismaClient } from '../db/client'
+import { listenToParent, statusMessage, type DeviceKeyMessage, type ParentPort } from './desktop-port'
 import { createHubApp } from './hub.module'
+import { HubContext } from './lock.guard'
 import { compactJournal } from './journal'
 import { readMeta } from './meta'
 import { devicePrivateKey } from './signer'
 import { openStore } from './store'
 import { SyncWorker } from './sync-worker'
 
-interface DeviceKeyMessage {
-  type: 'device-key'
-  pem: string
-  deviceId?: string
-  cloudUrl?: string
-  appVersion?: string
-}
-
 /** Electron's utilityProcess port to the main process; absent under plain node. */
-const parentPort = (process as NodeJS.Process & { parentPort?: { on(event: 'message', listener: (event: { data: unknown }) => void): void } }).parentPort
+const parentPort = (process as NodeJS.Process & { parentPort?: ParentPort }).parentPort
 
 function required(name: string): string {
   const value = process.env[name]
@@ -39,6 +36,28 @@ function required(name: string): string {
 }
 
 async function main(): Promise<void> {
+  // Filled in as startup gets that far; shutdown closes whatever exists.
+  const open: { pg?: PGlite; app?: Awaited<ReturnType<typeof createHubApp>> } = {}
+  let worker: SyncWorker | undefined
+  let closing: Promise<void> | undefined
+  const shutdown = () => {
+    closing ??= (async () => {
+      await worker?.stop()
+      await open.app?.close()
+      await open.pg?.close()
+    })().then(
+      () => process.exit(0),
+      (error: unknown) => {
+        console.error('hub shutdown failed:', error)
+        process.exit(1)
+      },
+    )
+  }
+  // First thing, so a device key sent while the store opens is held, not lost (restiq-desktop D3).
+  const parent = listenToParent(parentPort, shutdown)
+  process.on('SIGTERM', shutdown)
+  process.on('SIGINT', shutdown)
+
   const dataDir = required('HUB_DATA_DIR')
   required('POS_JWT_SECRET')
   const port = Number(process.env.HUB_PORT ?? 8180)
@@ -50,47 +69,36 @@ async function main(): Promise<void> {
   const migrationsDir = [join(__dirname, 'migrations'), join(__dirname, '..', '..', 'prisma', 'migrations')].find((dir) => existsSync(dir))
   if (!migrationsDir) throw new Error('No migrations directory found next to the hub')
 
-  const { pg, prisma } = await openStore(dataDir, migrationsDir)
+  const store = await openStore(dataDir, migrationsDir)
+  const db = (open.pg = store.pg)
   // ponytail: only at startup - nothing appends while this runs.
   compactJournal(dataDir)
-  setPrismaClient(prisma)
-  let worker: SyncWorker | undefined
-  const app = await createHubApp(pg, dataDir, () => worker?.kick())
+  setPrismaClient(store.prisma)
+  const app = (open.app = await createHubApp(db, dataDir, () => worker?.kick(), new HubContext(db, undefined, () => worker)))
   await app.listen(port, '127.0.0.1')
   console.log(`restiq hub listening on 127.0.0.1:${port}`)
+  const postStatus = () => {
+    if (!parentPort) return
+    statusMessage(db, worker, new Date()).then(
+      (message) => parentPort.postMessage(message),
+      (error: unknown) => console.error('status message failed:', error),
+    )
+  }
+  postStatus()
 
   const startSync = async (message: DeviceKeyMessage): Promise<void> => {
     const cloudUrl = message.cloudUrl ?? process.env.HUB_CLOUD_URL
-    const deviceId = message.deviceId ?? process.env.HUB_DEVICE_ID ?? (await readMeta(pg))?.deviceId
+    const deviceId = message.deviceId ?? process.env.HUB_DEVICE_ID ?? (await readMeta(db))?.deviceId
     if (worker) return console.warn('sync worker already running; device key ignored')
     if (!cloudUrl || !deviceId) return console.error('sync worker not started: cloudUrl and deviceId are required')
-    worker = new SyncWorker({ pg, dataDir, cloudUrl, deviceId, key: devicePrivateKey(message.pem), appVersion: message.appVersion ?? 'hub' })
+    worker = new SyncWorker({ pg: db, dataDir, cloudUrl, deviceId, key: devicePrivateKey(message.pem), appVersion: message.appVersion ?? 'hub', onTick: postStatus })
     worker.start()
     console.log(`sync worker started for device ${deviceId}`)
+    postStatus()
   }
 
-  let closing: Promise<void> | undefined
-  const shutdown = () => {
-    closing ??= (async () => {
-      await worker?.stop()
-      await app.close()
-      await pg.close()
-    })().then(
-      () => process.exit(0),
-      (error: unknown) => {
-        console.error('hub shutdown failed:', error)
-        process.exit(1)
-      },
-    )
-  }
-  process.on('SIGTERM', shutdown)
-  process.on('SIGINT', shutdown)
-  parentPort?.on('message', ({ data }) => {
-    const message = data as { type?: unknown } | null
-    if (message?.type === 'shutdown') shutdown()
-    else if (message?.type === 'device-key' && typeof (message as DeviceKeyMessage).pem === 'string') {
-      startSync(message as DeviceKeyMessage).catch((error: unknown) => console.error('sync worker not started:', error))
-    }
+  parent.onDeviceKey((message) => {
+    startSync(message).catch((error: unknown) => console.error('sync worker not started:', error))
   })
   const pem = process.env.HUB_DEVICE_KEY_PEM
   if (pem) await startSync({ type: 'device-key', pem })
