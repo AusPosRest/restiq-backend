@@ -1,6 +1,7 @@
 import { Body, Controller, Get, HttpCode, Param, ParseUUIDPipe, Post, Query, Res } from '@nestjs/common'
 import type { Response } from 'express'
 import { AnyStaff, CurrentStaff, PosPrincipal, RequirePermission } from '../../platform'
+import type { CardReaderView } from '../../ops'
 import { CreatePaymentIntentDto, PaymentIntentView, SimulateIntentDto } from './intents.dtos'
 import { PaymentIntentsService } from './intents.service'
 
@@ -25,6 +26,13 @@ export class PosPaymentIntentsController {
     const { view, created } = await this.intents.createIntent(staff, billId, dto)
     res.status(created ? 201 : 200)
     return view
+  }
+
+  // #286: resume a still-waiting card payment after the settle screen reloads.
+  @Get('bills/:id/intents/active')
+  @AnyStaff()
+  active(@CurrentStaff() staff: PosPrincipal, @Param('id', ParseUUIDPipe) billId: string): Promise<{ intent: PaymentIntentView | null }> {
+    return this.intents.activeForBill(staff, billId)
   }
 
   @Get('payment-intents/:id')
@@ -56,5 +64,12 @@ export class PosPaymentIntentsController {
     @Query('deviceId', new ParseUUIDPipe({ optional: true })) deviceId?: string,
   ): Promise<PaymentIntentView[]> {
     return this.intents.listPendingForOutlet(staff, outletId, deviceId)
+  }
+
+  // #286: the outlet's Stripe card readers (empty while the simulated terminal applies).
+  @Get('outlets/:outletId/card-readers')
+  @AnyStaff()
+  listReaders(@CurrentStaff() staff: PosPrincipal, @Param('outletId') outletId: string): Promise<{ readers: CardReaderView[] }> {
+    return this.intents.listReaders(staff, outletId)
   }
 }

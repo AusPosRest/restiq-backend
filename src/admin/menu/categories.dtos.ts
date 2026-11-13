@@ -1,7 +1,8 @@
-import { IsInt, IsOptional, IsString, Min, MinLength } from 'class-validator'
+import { IsInt, IsOptional, IsString, MaxLength, Min } from 'class-validator'
+import { NotBlank } from '../../platform'
 
 export class CreateCategoryDto {
-  @IsString() @MinLength(1)
+  @IsString() @NotBlank() @MaxLength(80)
   name!: string
 
   @IsOptional() @IsInt() @Min(0)
@@ -9,7 +10,7 @@ export class CreateCategoryDto {
 }
 
 export class UpdateCategoryDto {
-  @IsOptional() @IsString() @MinLength(1)
+  @IsOptional() @IsString() @NotBlank() @MaxLength(80)
   name?: string
 
   @IsOptional() @IsInt() @Min(0)

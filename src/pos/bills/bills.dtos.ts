@@ -3,13 +3,17 @@
 // every other pos DTO (AD-5).
 import { Type } from 'class-transformer'
 import { ArrayMinSize, IsArray, IsBoolean, IsIn, IsInt, IsOptional, IsString, IsUUID, MaxLength, Min, MinLength, ValidateIf, ValidateNested } from 'class-validator'
-import type { BillStatus, TenderMethod } from '../../generated/prisma/client'
+import type { BillStatus, GstSplitRounding, TenderMethod } from '../../generated/prisma/client'
 
 // Only the cashier-asserted methods are postable here. The electronic ones
 // (card_terminal, ...) are written by src/pos/payments' confirmIntent when
 // the provider confirms, never by this DTO (issue #130, ADR-001). `external`
 // (issue #146) is money taken outside RESTIQ - asserted by the cashier too.
 export const TENDER_METHODS = ['cash', 'upi_manual', 'external'] as const
+
+// restiq-backend#221: a refund can go back by any tender method, including
+// the electronic ones the bill may have been paid with.
+export const REFUND_METHODS = ['cash', 'upi_manual', 'upi_intent', 'upi_qr', 'card_online', 'card_terminal', 'external'] as const satisfies readonly TenderMethod[]
 
 export class TenderDto {
   @IsIn(TENDER_METHODS)
@@ -30,6 +34,12 @@ export class TenderDto {
   @ValidateIf((tender: TenderDto) => tender.method === 'external')
   @IsString() @MinLength(1) @MaxLength(64)
   reference?: string
+
+  // restiq-backend#241 (Q28): cash only - what the guest handed over; the
+  // change is tenderedMinor - amountMinor. amountMinor stays what went into
+  // the drawer. Checked against method/amountMinor in the service.
+  @IsOptional() @IsInt() @Min(1)
+  tenderedMinor?: number
 }
 
 // discountMinor/discountReason are optional, but only together - a bare
@@ -66,6 +76,10 @@ export interface TenderView {
   riskAcknowledged: boolean
   // The external tender's reference / bill number (issue #146); null otherwise.
   reference: string | null
+  // restiq-backend#241: cash handed over and the change given back - null
+  // unless the client recorded tenderedMinor on a cash tender.
+  tenderedMinor: number | null
+  changeMinor: number | null
   createdAt: string
 }
 
@@ -86,9 +100,14 @@ export interface BillView {
   billNumber: number | null
   subtotalMinor: number
   taxMinor: number
-  // Snapshotted once at bill-creation time (bill-core.ts's
-  // createOrGetBillRecord) - never recomputed, including across finalize.
+  // Snapshotted from the order's lines while the bill is open, and
+  // recomputed once at finalize on the discounted value when a discount is
+  // given (SE-2) - immutable after that.
   taxBreakdown: TaxBreakdownLineView[]
+  // The India CGST/SGST odd-paisa rule taxBreakdown was computed with
+  // (restiq-backend#244), snapshotted with it; null for AU, IGST,
+  // composition, and bills computed before #244's setting existed.
+  gstSplitRounding: GstSplitRounding | null
   // True only for a tax-inclusive country (AU GST) - see tax.ts.
   pricesIncludeTax: boolean
   discountMinor: number | null
@@ -97,6 +116,9 @@ export interface BillView {
   // subtotal + tax - discount. Never persisted as its own column - always
   // derived from the three that are.
   totalMinor: number
+  // restiq-backend#241 (Q28): the cash round-off settled at finalize (tenders
+  // sum to totalMinor + this). Null when none was taken. Not taxed.
+  roundOffMinor: number | null
   status: BillStatus
   // qr-self-order/CAP-5 (issue #80): null for a guest-checkout Bill (no
   // staff creator - see Bill.createdByStaffId's schema comment).
@@ -122,12 +144,12 @@ export class RefundLineDto {
   quantity!: number
 }
 
-// managerPin/reason are both mandatory here, unlike FinalizeBillDto's
-// conditional pair - refund is one of CAP-8's six gated actions
-// unconditionally (AD-15), not only above some threshold.
+// Every refund requires PIN approval and a reason. Missing PIN is handled
+// by the service so an unprivileged cashier gets 403 (#240), while a
+// manager retains the existing 400 validation error.
 export class RefundBillDto {
-  @IsString() @MinLength(1)
-  managerPin!: string
+  @ValidateIf((dto: RefundBillDto) => dto.managerPin !== undefined) @IsString() @MinLength(1)
+  managerPin?: string
 
   @IsString() @MinLength(1)
   reason!: string
@@ -137,6 +159,12 @@ export class RefundBillDto {
   // path from a partial one.
   @IsOptional() @IsArray() @ArrayMinSize(1) @ValidateNested({ each: true }) @Type(() => RefundLineDto)
   lines?: RefundLineDto[]
+
+  // restiq-backend#221: how the money went back to the guest. Omitted: the
+  // bill's main tender (its largest; earliest on a tie) - what a refund to
+  // "the original payment" means.
+  @IsOptional() @IsIn(REFUND_METHODS)
+  method?: TenderMethod
 }
 
 export interface CreditNoteLineView {
@@ -158,6 +186,8 @@ export interface CreditNoteView {
   taxMinor: number
   // Same never-persisted-derived-total convention as BillView.totalMinor.
   totalMinor: number
+  // How the money went back; null on a note issued before this was recorded.
+  method: TenderMethod | null
   createdAt: string
   lines: CreditNoteLineView[]
 }
@@ -195,6 +225,7 @@ export interface InvoiceSellerView {
 export interface InvoiceCreditNoteView {
   id: string
   amountMinor: number
+  method: TenderMethod | null
   reason: string
   createdAt: string
 }
@@ -208,9 +239,13 @@ export interface InvoiceView {
   // invented here - a future receipt-template story owns any of that). Null
   // on the pro-forma view - an open bill has none yet.
   invoiceNumber: string | null
-  // "Tax Invoice" for an AU/ABN seller (AU's GST law requires the literal
-  // phrase on a compliant tax invoice), "Invoice" otherwise; "Bill" for an
-  // open bill's pro-forma view, regardless of country (issue #125).
+  // restiq-backend#213: true when the bill was rung up while the tenant was in Test mode. Clients print
+  // "Test mode - not a valid tax invoice" on it.
+  testMode: boolean
+  // "Tax Invoice" for a GST-registered seller (both countries' GST law
+  // requires the literal phrase), "Bill of Supply" for an IN composition
+  // dealer, "Receipt" for an unregistered AU seller; "Bill" for an open
+  // bill's pro-forma view, regardless of country (issue #125).
   title: string
   // Null on the pro-forma view - an open bill has no finalizedAt yet.
   issuedAt: string | null
@@ -218,12 +253,22 @@ export interface InvoiceView {
   seller: InvoiceSellerView
   footerMessage: string | null
   lines: InvoiceLineView[]
+  // IN GST invoice fields (PE-18): SAC 996331 (restaurant service) and the
+  // place of supply read off the seller's GSTIN state code. Null for AU and
+  // for an IN composition dealer.
+  sacCode: string | null
+  placeOfSupply: string | null
+  // The counter token the customer was called by; null for a table order.
+  tokenNumber: number | null
   subtotalMinor: number
   discountMinor: number | null
   discountReason: string | null
   taxBreakdown: TaxBreakdownLineView[]
   taxMinor: number
   totalMinor: number
+  // restiq-backend#241 (Q28): the cash round-off line; amount paid is
+  // totalMinor + roundOffMinor. Null when none. GST totals exclude it.
+  roundOffMinor: number | null
   pricesIncludeTax: boolean
   // Empty on the pro-forma view even if a guest has partially paid shares
   // pre-finalize (issue #125) - a pro-forma bill shows no payments.
@@ -241,6 +286,10 @@ export interface PrintJobView {
   payload: InvoiceView
   createdAt: string
   printedAt: string | null
+  // restiq-backend#210 (CU-18): set only on the POST .../print response -
+  // false when no active printer would ever pick this job up, so the till
+  // can offer the bill on screen instead of claiming "Sent to printer".
+  printerAvailable?: boolean
 }
 
 // issue #158: today's payment history at an outlet - every Tender on a

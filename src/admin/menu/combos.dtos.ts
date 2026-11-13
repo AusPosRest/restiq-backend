@@ -14,6 +14,7 @@ import {
   IsUUID,
   Length,
   Matches,
+  Max,
   MaxLength,
   Min,
   MinLength,
@@ -31,7 +32,7 @@ export class ComboSelectionDto {
   @IsUUID()
   optionId!: string
 
-  @IsOptional() @IsInt() @Min(1)
+  @IsOptional() @IsInt() @Min(1) @Max(999)
   quantity?: number
 
   @IsOptional() @IsArray() @ArrayUnique() @IsUUID('all', { each: true })

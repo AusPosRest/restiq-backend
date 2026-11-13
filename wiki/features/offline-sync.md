@@ -10,7 +10,7 @@ Design: Restiq `docs/SYNC-DESIGN.md` (accepted 2026-10-07). Issue restiq-backend
 
 - **Device key at enrolment** - `POST /device/v1/enroll` takes optional `publicKey` (base64 SPKI DER, ed25519), checked before the code is used up - `src/ops/devices/devices.service.ts`.
 - **Device realm** - `/sync/v1/*` is signed, not token-authenticated: headers `X-Device-Id`, `X-Device-Timestamp` (ms), `X-Device-Signature` (base64 ed25519 over `METHOD\npath?query\ntimestamp\nsha256hex(raw body)`), 5-minute skew. 401 `invalid_signature` for any failure, 403 `device_revoked` / `device_not_in_outlet` / `tenant_inactive` - `src/platform/device-sync.guard.ts`, `device-signature.ts`. `main.ts` keeps the raw body for this.
-- **Change feed** - `sync_changes` (bigserial id = cursor), written by the `sync_record_change()` trigger on the 19 cloud-owned tables - migration `20261008100000_offline_sync`.
+- **Change feed** - `sync_changes` (bigserial id = cursor), written by the `sync_record_change()` trigger on the 19 cloud-owned tables - migration `20261113180000_offline_sync`.
 - `GET /sync/v1/bootstrap` - every cloud-owned row for the device's tenant and outlet as plain rows (database column names), the role permission catalogue, `policy` (`maxOfflineHours` from `tenants.max_offline_hours`, default 24; `syncIntervalSeconds` 30) and a cursor - `src/pos/sync/sync.service.ts`.
 - `GET /sync/v1/pull?cursor=&limit=` - rows changed after the cursor, latest per row, read as they are now (`delete` when gone).
 - `POST /sync/v1/push` - see below - `src/pos/sync/sync-push.service.ts`.
@@ -43,6 +43,7 @@ Ids made on the hub are kept, and `at` becomes the row's `createdAt` / `finalize
 
 - **Device realm, key at enrolment.** The one-time enrolment code is the trust anchor, so the key rides on it; no separate key endpoint, no staff token for sync. Each op names its staff member.
 - **Money ops are never refused for a lapsed permission (S3).** The sale happened; it is applied and an `sync.permission_lapsed` audit event is written. A large discount approved on the hub is applied with a `sync.discount_approved_offline` audit event - a manager PIN never travels in the outbox.
+- **A replayed cash settle skips the open-shift check** that online cash needs (#208): the hub already took the cash, and shifts are not synced ops yet.
 - **Re-sends are safe.** Ledger first; if the ledger write was lost after an apply, the re-sent create hits the hub's own id (unique violation → accepted), a status already reached is a no-op, an already finalized bill is accepted.
 - **Settle window.** Pull only shows changes older than 30 s, so a slower transaction that took a lower id is not skipped; a transaction longer than that could still be missed (upgrade path: commit-ordered feed).
 - **No FK from `sync_changes` to `tenants`** - an append-only log read by tenant; an FK would make every tenant hard-delete clear it first.

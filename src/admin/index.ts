@@ -8,7 +8,7 @@ export type { PinStatus } from './staff/staff.service'
 // pos/CAP-3 reuses this verbatim to snapshot an order line's price at
 // add-time against the real, already-shipped item_prices resolution rules -
 // no second price-picking implementation.
-export { resolveCurrentPrice } from './menu/pricing'
+export { assertItemAvailable, resolveCurrentPrice } from './menu/pricing'
 // restiq-backend#160: combos on the POS, QR and kiosk menus and their picks.
 export { listMenuCombos, resolveComboSelection } from './menu/combo-menu'
 export type { ComboMenuView, ComboSelectionInput, ResolvedComboChild } from './menu/combo-menu'

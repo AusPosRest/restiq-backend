@@ -327,6 +327,47 @@ describe('/guest/v1/orders order placement into the real pipeline (e2e)', () => 
     })
   })
 
+  it('preserves normalized guest notes through cart, placement and kitchen without merging lines', async () => {
+    const tenantId = await createTenant(prisma)
+    const outletId = await createOutlet(prisma, tenantId)
+    const tableId = await createTable(prisma, tenantId, outletId)
+    await enableQrOrdering(prisma, tenantId, outletId)
+    const stationId = await createStation(prisma, tenantId, outletId, 'Kitchen')
+    const item = await createItemWithPrice(prisma, tenantId, 15000, { stationId })
+    const { tokenA } = await startAndJoin(outletId, tableId)
+    const add = (note?: unknown) => authed(request(httpServer).post('/guest/v1/cart/lines'), tokenA).send({ itemId: item, quantity: 1, note })
+    expect((await add('x'.repeat(201))).status).toBe(400)
+    expect((await add(123)).status).toBe(400)
+    const added = await add('  Peanut allergy  ')
+    expect(added.status).toBe(201)
+    const notedLine = (added.body as { guests: { lines: { id: string; note: string | null }[] }[] }).guests[0].lines[0]
+    expect(notedLine.note).toBe('Peanut allergy')
+    expect((await add()).status).toBe(201)
+    const cart = await authed(request(httpServer).get('/guest/v1/cart'), tokenA)
+    expect(cart.status).toBe(200)
+    expect((cart.body as { guests: { lines: { note: string | null }[] }[] }).guests[0].lines).toEqual([
+      expect.objectContaining({ note: 'Peanut allergy' }), expect.objectContaining({ note: null }),
+    ])
+    const patch = (note?: unknown) => authed(request(httpServer).patch(`/guest/v1/cart/lines/${notedLine.id}`), tokenA).send(note === undefined ? { quantity: 2 } : { note })
+    expect((await patch('x'.repeat(201))).status).toBe(400)
+    expect((await patch()).status).toBe(200)
+    expect((await prisma.cartLine.findUnique({ where: { id: notedLine.id } }))?.note).toBe('Peanut allergy')
+    expect((await patch('  ')).status).toBe(200)
+    expect((await prisma.cartLine.findUnique({ where: { id: notedLine.id } }))?.note).toBeNull()
+    expect((await patch(`  ${'x'.repeat(200)}  `)).status).toBe(200)
+    expect((await patch(' Peanut allergy ')).status).toBe(200)
+    const placed = await authed(request(httpServer).post('/guest/v1/orders'), tokenA).send({})
+    expect(placed.status).toBe(201)
+    const orderId = (placed.body as PlacedOrderBody).orderId
+    const lines = await prisma.orderLine.findMany({ where: { orderId } })
+    expect(lines).toHaveLength(2)
+    expect(lines).toEqual(expect.arrayContaining([expect.objectContaining({ note: 'Peanut allergy' }), expect.objectContaining({ note: null })]))
+    const staffToken = await createStaff(prisma, tenantId, outletId, 'Server')
+    const queue = await authed(request(httpServer).get(`/kitchen/v1/outlets/${outletId}/stations/${stationId}/queue`), staffToken)
+    expect(queue.status).toBe(200)
+    expect((queue.body as TicketBody[])[0]?.lines).toEqual(expect.arrayContaining([expect.objectContaining({ note: 'Peanut allergy' })]))
+  })
+
   describe('validation', () => {
     it('rejects placing an empty cart', async () => {
       const tenantId = await createTenant(prisma)
@@ -357,6 +398,54 @@ describe('/guest/v1/orders order placement into the real pipeline (e2e)', () => 
       expect((res.body as { error: { code: string } }).error.code).toBe('table_has_active_order')
       // The cart is kept so the guests can still order once the server adds to the live order.
       expect(await prisma.cartLine.count()).toBe(1)
+    })
+
+    it('places the order on a table whose open order is over 12 hours old, moving that order off the table without closing it (#230)', async () => {
+      const tenantId = await createTenant(prisma)
+      const outletId = await createOutlet(prisma, tenantId)
+      const tableId = await createTable(prisma, tenantId, outletId)
+      await enableQrOrdering(prisma, tenantId, outletId)
+      const item = await createItemWithPrice(prisma, tenantId, 19000)
+      const stale = await prisma.order.create({ data: { tenantId, outletId, tableId, ownerId: null, status: 'sent', createdAt: new Date(Date.now() - 13 * 60 * 60 * 1000) } })
+      const staleLine = await prisma.orderLine.create({ data: { tenantId, orderId: stale.id, itemId: item, quantity: 2, unitPriceMinor: 19000n } })
+      const { tokenA } = await startAndJoin(outletId, tableId)
+      await authed(request(httpServer).post('/guest/v1/cart/lines'), tokenA).send({ itemId: item, quantity: 1 })
+
+      const res = await authed(request(httpServer).post('/guest/v1/orders'), tokenA).send({})
+      expect(res.status).toBe(201)
+      const placed = res.body as PlacedOrderBody
+      expect(placed.orderId).not.toBe(stale.id)
+      expect(await prisma.order.findUnique({ where: { id: placed.orderId } })).toMatchObject({ tableId, source: 'qr' })
+
+      // Not closed: same status, same lines, just no longer on the table.
+      expect(await prisma.order.findUnique({ where: { id: stale.id } })).toMatchObject({ status: 'sent', tableId: null })
+      expect(await prisma.orderLine.findMany({ where: { orderId: stale.id } })).toEqual([expect.objectContaining({ id: staleLine.id, quantity: 2 })])
+      const audit = await prisma.auditEvent.findMany({ where: { tenantId, action: 'order.detached_stale_table' } })
+      expect(audit).toHaveLength(1)
+      expect(audit[0]?.reason).toContain(stale.id)
+      expect(audit[0]?.reason).toContain(tableId)
+
+      // Still in Open orders, for End of day (#251) to close.
+      const staffToken = await createStaff(prisma, tenantId, outletId, 'Server Priya')
+      const orders = (await authed(request(httpServer).get(`/pos/v1/outlets/${outletId}/orders`), staffToken)).body as OrderBody[]
+      expect(orders.map((o) => o.id)).toEqual(expect.arrayContaining([stale.id, placed.orderId]))
+    })
+
+    it('still 409s when the table\'s open order is under 12 hours old (#230)', async () => {
+      const tenantId = await createTenant(prisma)
+      const outletId = await createOutlet(prisma, tenantId)
+      const tableId = await createTable(prisma, tenantId, outletId)
+      await enableQrOrdering(prisma, tenantId, outletId)
+      const item = await createItemWithPrice(prisma, tenantId, 19000)
+      const { tokenA } = await startAndJoin(outletId, tableId)
+      await authed(request(httpServer).post('/guest/v1/cart/lines'), tokenA).send({ itemId: item, quantity: 1 })
+      const recent = await prisma.order.create({ data: { tenantId, outletId, tableId, ownerId: null, status: 'open', createdAt: new Date(Date.now() - 11 * 60 * 60 * 1000) } })
+
+      const res = await authed(request(httpServer).post('/guest/v1/orders'), tokenA).send({})
+      expect(res.status).toBe(409)
+      expect((res.body as ErrorBody).error.code).toBe('table_has_active_order')
+      expect((await prisma.order.findUnique({ where: { id: recent.id } }))?.tableId).toBe(tableId)
+      expect(await prisma.auditEvent.count({ where: { action: 'order.detached_stale_table' } })).toBe(0)
     })
 
     it('410s placement once the session is closed', async () => {

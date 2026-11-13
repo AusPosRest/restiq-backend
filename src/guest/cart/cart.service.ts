@@ -13,7 +13,7 @@
 // barrel; the guest realm never imports pos-internal, non-exported
 // functions), not a second, drifting reimplementation of the business rule.
 import { BadRequestException, ConflictException, ForbiddenException, GoneException, Injectable, NotFoundException } from '@nestjs/common'
-import { resolveComboSelection, resolveCurrentPrice } from '../../admin'
+import { assertItemAvailable, resolveComboSelection, resolveCurrentPrice } from '../../admin'
 import type { CartLine, Prisma, PriceChannel, TableSession } from '../../generated/prisma/client'
 import { GuestPrincipal, RegionRegistryService } from '../../platform'
 import { isSessionInactive } from '../sessions/sessions.service'
@@ -97,23 +97,6 @@ function assertModifierSelectionValid(item: ItemForCartLine, modifierIds: string
   }
 }
 
-/**
- * CAP-2 success criterion: "an 86'd item shows unavailable and cannot be
- * added" - checks the tenant-wide toggle (MenuItem.available) AND this
- * outlet's override (ItemOutletOverride), the same two availability sources
- * Tenant Admin's items.service.ts writes (admin/menu/items.service.ts's
- * setAvailability/setOutletAvailability). Never a guest-side copy of either.
- */
-async function assertItemAvailable(tx: Tx, outletId: string, item: ItemForCartLine): Promise<void> {
-  if (!item.available) {
-    throw new BadRequestException({ code: 'item_unavailable', message: 'This item is currently unavailable' })
-  }
-  const override = await tx.itemOutletOverride.findUnique({ where: { itemId_outletId: { itemId: item.id, outletId } } })
-  if (override && !override.available) {
-    throw new BadRequestException({ code: 'item_unavailable', message: 'This item is currently unavailable' })
-  }
-}
-
 async function loadActiveSession(tx: Tx, guest: GuestPrincipal): Promise<TableSession> {
   const session = await tx.tableSession.findUnique({ where: { id: guest.sessionId } })
   if (!session) {
@@ -168,6 +151,7 @@ async function toComboCartLineView(tx: Tx, line: CartLineWithRelations): Promise
     currency: combo.currency,
     view: {
       id: line.id,
+      note: line.note,
       guestId: line.guestId,
       guestName: line.guestName,
       itemId: null,
@@ -195,6 +179,7 @@ async function toCartLineView(tx: Tx, tenantId: string, outletId: string, line: 
     currency: resolved?.currency ?? null,
     view: {
       id: line.id,
+      note: line.note,
       guestId: line.guestId,
       guestName: line.guestName,
       itemId: line.itemId,
@@ -280,6 +265,7 @@ export class CartService {
           itemId: dto.itemId,
           variantId: dto.variantId ?? null,
           quantity: dto.quantity,
+          note: dto.note ?? null,
         },
       })
       for (const modifierId of modifierIds) {
@@ -320,6 +306,10 @@ export class CartService {
       assertNotComboPick(line)
       if (line.comboId && dto.modifierIds !== undefined) {
         throw new ConflictException({ code: 'combo_locked', message: 'Remove the combo and add it again to change it' })
+      }
+
+      if (dto.note !== undefined) {
+        await tx.cartLine.update({ where: { id: lineId }, data: { note: dto.note } })
       }
 
       if (dto.quantity !== undefined) {

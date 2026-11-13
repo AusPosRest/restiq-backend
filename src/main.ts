@@ -33,6 +33,7 @@ async function bootstrap(): Promise<void> {
   // Uploaded item photos travel inline as data:image URLs (issue #142, up to
   // ~280 KB of base64) - above Express's 100 KB JSON default.
   app.useBodyParser('json', { limit: '512kb' })
+  // #282: rawBody (above) keeps req.rawBody for Stripe webhook signature checks.
   // credentials: the operator's session cookie rides this same path.
   app.enableCors({ origin: webOrigin, credentials: true })
 

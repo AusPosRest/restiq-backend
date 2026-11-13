@@ -611,3 +611,36 @@
 - **Tests:** `test/guest-kiosk.e2e-spec.ts` (happy path with two gap-free
   tokens, status list, kitchen tickets, POS list; the 404/403/400 refusals).
 - **Not built:** kiosk-side payment (pay at the counter), CDS.
+
+## Guest special instructions (#231)
+
+Guests can send `note` on add or update of a cart line. Strings are trimmed, limited to 200 characters, and blank/null clears the note; omission on update preserves it. Cart lines return `note` as string or null. Each add remains a distinct line, including the same item with different notes. Placement copies the note to the order line for the kitchen display.
+
+## Card payments on the guest's phone - Stripe (#284)
+
+Contract: `stripe-284-427-contract.md` (web #427). Builds on #282's connected accounts.
+
+- **When offered** - `GuestBillView.cardPayments` is set only for a Live tenant (Test mode keeps the
+  simulator) whose `tenant_payment_accounts.card_payments_active` is true, on a server with
+  `STRIPE_SECRET_KEY` and `STRIPE_PUBLISHABLE_KEY`, and never for a kiosk session (kiosk card is the
+  reader phase). `paymentsAvailable` = simulator on, or `cardPayments` set. The active flag is
+  Stripe's card_payments capability as last read by the ops Payments tab (GET or onboarding link), so a
+  bill read never calls Stripe - a restaurant that just finished onboarding is offered card payments
+  once ops opens its Payments tab.
+- **Start** (`card-payments.service.ts` `start`) - validates under the bill lock like pay-all/payShare,
+  then creates the PaymentIntent on the connected account (`{ stripeAccount }`, idempotency key from the
+  new row id) outside any transaction, then writes the `stripe`/`card_online` row after re-checking under
+  the lock (on a race it cancels its PaymentIntent and retries once). An open attempt for the same
+  target with the same amount is handed out again; any other is cancelled at Stripe first.
+- **Settle** (`applyStripeIntent`) - one path for `sync` and `POST /webhooks/stripe/connect`. Acts only
+  when the row's providerRef, amount, currency and the tenant's account all match. `confirmIntent` writes
+  the tender; if the bill is finalized, the share was paid another way, the amount no longer matches,
+  or the attempt was already cancelled, the money is flagged `late_capture_refund_due` (audit
+  `payment.late_capture_refund_due`) instead - refunding it is manual, as for any late capture. A
+  declined card is cancelled at Stripe before the row is marked failed, so a failed row can never
+  capture later; the phone starts a new attempt.
+- **Refunds** - a `card_online` credit note on a bill with Stripe card tenders refunds the note total at
+  Stripe (fullest payment first, split only if needed, `refund_application_fee`) inside the refund
+  transaction; a refusal is 502 `refund_failed` and no credit note.
+- Not built: Connect `account.updated` handling for v2 accounts (thin events) - add if ops-tab refresh
+  is not enough; automatic refund of late captures.

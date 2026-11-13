@@ -2,24 +2,23 @@
 // explicit operator RLS context, and detail mutations that write their
 // audit_events row in the same transaction (AD-6), routed to the tenant's
 // owning region through the registry (AD-1).
-import { BadRequestException, ConflictException, Injectable, NotFoundException } from '@nestjs/common'
+import { BadRequestException, ConflictException, Injectable, Logger, NotFoundException } from '@nestjs/common'
 import { createHash, randomBytes } from 'node:crypto'
 import type { Prisma, PrismaClient } from '../../generated/prisma/client'
-import { OpsPrincipal, PrismaService, RegionRegistryService } from '../../platform'
+import { isTestMode, MailService, OpsPrincipal, PrismaService, RegionRegistryService } from '../../platform'
 import {
-  CAPABILITY_DEFAULTS,
-  CAPABILITY_KEYS,
-  CapabilityKey,
-  ToggleCapabilityDto,
   UpdateBrandingDto,
   UpdateTenantDto,
 } from './directory.dtos'
-import { OWNER_INVITE_TTL_HOURS } from './tenants.service'
+import { classifySeverity, compareSeverity, LAGGING_THRESHOLD_SECONDS, Severity } from '../sync-health/severity'
+import { OWNER_INVITE_TTL_HOURS, ownerInviteEmail } from './tenants.service'
 
 const STATUSES = ['provisioning', 'active', 'inactive'] as const
 const COUNTRIES = ['IN', 'AU'] as const
 const PLANS = ['standard', 'enterprise'] as const
 const HEALTHS = ['healthy', 'lagging', 'silent', 'unknown'] as const
+type TenantHealth = (typeof HEALTHS)[number]
+const MODES = ['test', 'live'] as const
 const SORTS = ['createdAt', 'name'] as const
 const ORDERS = ['asc', 'desc'] as const
 
@@ -38,8 +37,10 @@ export interface TenantListItem {
   status: string
   plan: string
   outletCount: number
-  /** Derived sync health arrives with fleet telemetry; until then: unknown. */
-  health: 'unknown'
+  /** The worst sync severity among the tenant's active devices (PE-2); unknown when it has none. */
+  health: TenantHealth
+  /** #213: a Test-mode tenant (badged TEST, kept out of the KPIs). */
+  testMode: boolean
   createdAt: string
 }
 
@@ -70,6 +71,10 @@ export interface TenantDetail {
     status: string
     plan: string
     billingPeriod: string
+    /** #213: Test mode - simulated payments and mail, kept out of the KPIs. */
+    testMode: boolean
+    /** When the tenant last went Live; null in Test mode. */
+    liveSince: string | null
     brandingTokens: Record<string, string>
     region: string
     createdAt: string
@@ -85,10 +90,20 @@ export interface TenantDetail {
     gstRatePercent: number | null
   }>
   brands: Array<{ id: string; name: string }>
-  outlets: Array<{ id: string; name: string; brandId: string; brandName: string; address: string; type: string; timezone: string }>
+  // issue #191: each outlet's real switches (outlet_capabilities - the ones
+  // guest QR, kiosk and menu photos read). The owner sets them; ops reads them.
+  outlets: Array<{
+    id: string
+    name: string
+    brandId: string
+    brandName: string
+    address: string
+    type: string
+    timezone: string
+    capabilities: Array<{ key: string; enabled: boolean }>
+  }>
   rolesCount: number
   ownerInvite: InviteView | null
-  capabilities: Array<{ key: CapabilityKey; enabled: boolean }>
 }
 
 interface Cursor {
@@ -125,9 +140,12 @@ function decodeCursor(raw: string): Cursor {
 
 @Injectable()
 export class TenantDirectoryService {
+  private readonly logger = new Logger(TenantDirectoryService.name)
+
   constructor(
     private readonly prisma: PrismaService,
     private readonly registry: RegionRegistryService,
+    private readonly mail: MailService,
   ) {}
 
   // --- Reads: fan out across region planes via the registry (AD-1). v1 has a
@@ -144,11 +162,14 @@ export class TenantDirectoryService {
     if (!Number.isInteger(limit) || limit < 1 || limit > LIMIT_MAX) badRequest(`limit must be an integer between 1 and ${LIMIT_MAX}`)
     const cursor = query.cursor === undefined ? undefined : decodeCursor(query.cursor)
 
-    // No telemetry exists yet, so every tenant's health is "unknown": any
-    // other health filter cannot match.
-    if (health !== undefined && health !== 'unknown') return { tenants: [], nextCursor: null, total: 0 }
+    const plane = this.registry.planeFor(this.registry.homeRegion())
+    // PE-2: health comes from the same device snapshot Sync Health reads.
+    const healthByTenant = await this.tenantHealth(plane)
+    const healthIds = (wanted: TenantHealth) => [...healthByTenant].filter(([, h]) => h === wanted).map(([tenantId]) => tenantId)
 
     const where: Prisma.TenantWhereInput = {
+      ...(health === 'unknown' && { id: { notIn: [...healthByTenant.keys()] } }),
+      ...(health !== undefined && health !== 'unknown' && { id: { in: healthIds(health) } }),
       deletedAt: null,
       ...(status && { status }),
       ...(country && { country }),
@@ -165,7 +186,6 @@ export class TenantDirectoryService {
       ]
     }
 
-    const plane = this.registry.planeFor(this.registry.homeRegion())
     const [rows, total] = await plane.$transaction(async (tx) => {
       await setOperatorContext(tx)
       return Promise.all([
@@ -179,6 +199,7 @@ export class TenantDirectoryService {
             country: true,
             status: true,
             plan: true,
+            liveSince: true,
             createdAt: true,
             _count: { select: { outlets: { where: { deletedAt: null } } } },
           },
@@ -202,7 +223,8 @@ export class TenantDirectoryService {
         status: row.status,
         plan: row.plan,
         outletCount: row._count.outlets,
-        health: 'unknown',
+        health: healthByTenant.get(row.id) ?? 'unknown',
+        testMode: isTestMode(row),
         createdAt: row.createdAt.toISOString(),
       })),
       nextCursor,
@@ -219,8 +241,11 @@ export class TenantDirectoryService {
         include: {
           taxRegistrations: true,
           brands: { orderBy: { createdAt: 'asc' } },
-          outlets: { where: { deletedAt: null }, include: { brand: { select: { name: true } } }, orderBy: { createdAt: 'asc' } },
-          capabilities: true,
+          outlets: {
+            where: { deletedAt: null },
+            include: { brand: { select: { name: true } }, capabilities: { select: { key: true, enabled: true }, orderBy: { key: 'asc' } } },
+            orderBy: { createdAt: 'asc' },
+          },
           ownerInvites: { orderBy: { createdAt: 'desc' }, take: 1 },
           _count: { select: { roles: true } },
         },
@@ -229,7 +254,6 @@ export class TenantDirectoryService {
     })
     if (!result) throw new NotFoundException({ code: 'not_found', message: 'No such tenant' })
 
-    const overrides = new Map(result.capabilities.map((c) => [c.key, c.enabled]))
     const invite = result.ownerInvites[0]
 
     return {
@@ -244,6 +268,8 @@ export class TenantDirectoryService {
         status: result.status,
         plan: result.plan,
         billingPeriod: result.billingPeriod,
+        testMode: isTestMode(result),
+        liveSince: result.liveSince?.toISOString() ?? null,
         brandingTokens: result.brandingTokens as Record<string, string>,
         region,
         createdAt: result.createdAt.toISOString(),
@@ -267,6 +293,7 @@ export class TenantDirectoryService {
         address: o.address,
         type: o.type,
         timezone: o.timezone,
+        capabilities: o.capabilities,
       })),
       rolesCount: result._count.roles,
       ownerInvite: invite
@@ -279,22 +306,28 @@ export class TenantDirectoryService {
             createdAt: invite.createdAt.toISOString(),
           }
         : null,
-      capabilities: CAPABILITY_KEYS.map((key) => ({ key, enabled: overrides.get(key) ?? CAPABILITY_DEFAULTS[key] })),
     }
   }
 
   async kpi(key: string): Promise<{ key: KpiKey; value: number }> {
     if (!(KPI_KEYS as readonly string[]).includes(key)) badRequest(`key must be one of: ${KPI_KEYS.join(', ')}`)
     const kpiKey = key as KpiKey
-    // Device and DLQ counts read 0 until their fleet stories add the data.
-    if (kpiKey === 'devices_online' || kpiKey === 'open_dlq') return { key: kpiKey, value: 0 }
-
     const plane = this.registry.planeFor(this.registry.homeRegion())
     const value = await plane.$transaction(async (tx) => {
       await setOperatorContext(tx)
-      return kpiKey === 'active_tenants'
-        ? tx.tenant.count({ where: { status: 'active', deletedAt: null } })
-        : tx.outlet.count({ where: { deletedAt: null, tenant: { deletedAt: null } } })
+      // #213: Test-mode tenants are not customers - every tile counts Live tenants only.
+      const live = { deletedAt: null, liveSince: { not: null } } satisfies Prisma.TenantWhereInput
+      switch (kpiKey) {
+        case 'active_tenants':
+          return tx.tenant.count({ where: { status: 'active', ...live } })
+        case 'outlets':
+          return tx.outlet.count({ where: { deletedAt: null, tenant: live } })
+        // issue #189: online = heard from within sync health's lagging threshold.
+        case 'devices_online':
+          return tx.device.count({ where: { status: 'active', tenant: live, lastContactAt: { gte: new Date(Date.now() - LAGGING_THRESHOLD_SECONDS * 1000) } } })
+        case 'open_dlq':
+          return tx.syncDeadLetter.count({ where: { resolvedAt: null, tenant: live } })
+      }
     })
     return { key: kpiKey, value }
   }
@@ -317,26 +350,6 @@ export class TenantDirectoryService {
     return { tenant: updated }
   }
 
-  async toggleCapability(
-    operator: OpsPrincipal,
-    id: string,
-    key: string,
-    dto: ToggleCapabilityDto,
-  ): Promise<{ capability: { key: CapabilityKey; enabled: boolean } }> {
-    if (!(CAPABILITY_KEYS as readonly string[]).includes(key)) {
-      badRequest(`key must be one of: ${CAPABILITY_KEYS.join(', ')}`)
-    }
-    const capKey = key as CapabilityKey
-    const action = `tenant.capability.${capKey}.${dto.enabled ? 'enabled' : 'disabled'}`
-    await this.mutate(operator, id, action, dto.reason, async (tx) => {
-      await tx.tenantCapability.upsert({
-        where: { tenantId_key: { tenantId: id, key: capKey } },
-        create: { tenantId: id, key: capKey, enabled: dto.enabled },
-        update: { enabled: dto.enabled },
-      })
-    })
-    return { capability: { key: capKey, enabled: dto.enabled } }
-  }
 
   async updateBranding(
     operator: OpsPrincipal,
@@ -357,9 +370,9 @@ export class TenantDirectoryService {
     return { brandingTokens: tokens }
   }
 
-  // inviteToken is the raw accept token, exposed exactly once here: there is
-  // no mailer in this prototype, so the ops console must be able to show a
-  // copyable accept link (issue #85). Only the hash is stored.
+  // inviteToken is the raw accept token, exposed exactly once here so the ops
+  // console can still show a copyable accept link (issue #85); it is also
+  // emailed to the owner (#198). Only the hash is stored.
   async regenerateOwnerInvite(
     operator: OpsPrincipal,
     id: string,
@@ -367,12 +380,14 @@ export class TenantDirectoryService {
   ): Promise<{ invite: InviteView; inviteToken: string }> {
     const rawToken = randomBytes(32).toString('hex')
     const expiresAt = new Date(Date.now() + OWNER_INVITE_TTL_HOURS * 3_600_000)
+    let restaurant = ''
 
     const invite = await this.mutate(operator, id, 'tenant.owner_invite_regenerated', reason, async (tx) => {
-      const existing = await tx.ownerInvite.findFirst({ where: { tenantId: id }, orderBy: { createdAt: 'desc' } })
+      const existing = await tx.ownerInvite.findFirst({ where: { tenantId: id }, orderBy: { createdAt: 'desc' }, include: { tenant: { select: { name: true } } } })
       if (!existing) throw new NotFoundException({ code: 'not_found', message: 'This tenant has no owner invite to regenerate' })
       // The old token must stop working the moment the new one exists.
       await tx.ownerInvite.deleteMany({ where: { tenantId: id } })
+      restaurant = existing.tenant.name
       return tx.ownerInvite.create({
         data: {
           tenantId: id,
@@ -384,6 +399,10 @@ export class TenantDirectoryService {
         },
       })
     })
+
+    void this.mail
+      .send(ownerInviteEmail(invite.email, invite.firstName, restaurant, rawToken), { tenantId: id })
+      .catch((error: unknown) => this.logger.error(`Owner invite email failed: ${String(error)}`))
 
     return {
       invite: {
@@ -429,6 +448,50 @@ export class TenantDirectoryService {
       return tx.tenant.update({ where: { id }, data: { status: 'active' }, select: { id: true, status: true } })
     })
     return { tenant }
+  }
+
+  /**
+   * #213: switch a tenant between Test and Live. Going Live stamps live_since (simulated payments and mail
+   * stop). Going back to Test is refused once the tenant has a bill finalised while Live: those are real
+   * sales, and Test mode would let simulated payments mix in with them and badge their invoices as test.
+   */
+  async setMode(operator: OpsPrincipal, id: string, mode: string, reason: string): Promise<{ tenant: { id: string; testMode: boolean; liveSince: string | null } }> {
+    const wanted = parseChoice(mode, MODES, 'mode')
+    if (wanted === undefined) badRequest('mode is required')
+    const action = wanted === 'test' ? 'tenant.switched_to_test' : 'tenant.switched_to_live'
+    const tenant = await this.mutate(operator, id, action, reason, async (tx) => {
+      const current = await tx.tenant.findUniqueOrThrow({ where: { id }, select: { liveSince: true } })
+      if (isTestMode(current) === (wanted === 'test')) {
+        throw new ConflictException({ code: 'conflict', message: `This tenant is already in ${wanted === 'test' ? 'Test' : 'Live'} mode` })
+      }
+      if (wanted === 'test') {
+        const liveSale = await tx.bill.findFirst({ where: { tenantId: id, finalizedAt: { gte: current.liveSince! } }, select: { id: true } })
+        if (liveSale) {
+          throw new ConflictException({
+            code: 'tenant_has_live_sales',
+            message: 'This tenant has real sales since it went Live, so it cannot go back to Test mode',
+          })
+        }
+      }
+      return tx.tenant.update({ where: { id }, data: { liveSince: wanted === 'test' ? null : new Date() }, select: { id: true, liveSince: true } })
+    })
+    return { tenant: { id: tenant.id, testMode: isTestMode(tenant), liveSince: tenant.liveSince?.toISOString() ?? null } }
+  }
+
+  /** PE-2: each tenant's worst device severity, by the same rule as Sync Health. Tenants with no active device are absent. */
+  private async tenantHealth(plane: PrismaClient): Promise<Map<string, Severity>> {
+    const devices = await plane.$transaction(async (tx) => {
+      await setOperatorContext(tx)
+      return tx.device.findMany({ where: { status: 'active' }, select: { tenantId: true, lastContactAt: true, enrolledAt: true } })
+    })
+    const now = Date.now()
+    const health = new Map<string, Severity>()
+    for (const device of devices) {
+      const severity = classifySeverity(Math.max(0, Math.floor((now - (device.lastContactAt ?? device.enrolledAt).getTime()) / 1000)))
+      const worst = health.get(device.tenantId)
+      if (worst === undefined || compareSeverity(severity, worst) < 0) health.set(device.tenantId, severity)
+    }
+    return health
   }
 
   // Soft delete (AD-9's registry lifecycle stays untouched - this is a

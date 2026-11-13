@@ -3,18 +3,23 @@
 // UpdateOrderLineDto validation shape (itemId/variantId/quantity/
 // modifierIds) - same server-side rules, different destination (CartLine,
 // not OrderLine, per CartLine's schema comment).
-import { Type } from 'class-transformer'
-import { ArrayMaxSize, ArrayUnique, IsArray, IsInt, IsOptional, IsUUID, Min, ValidateNested } from 'class-validator'
+import { Transform, Type } from 'class-transformer'
+import { ArrayMaxSize, ArrayUnique, IsArray, IsInt, IsOptional, IsString, IsUUID, Max, MaxLength, Min, ValidateNested } from 'class-validator'
 import { ComboSelectionDto } from '../../admin'
 
 export class AddCartLineDto {
+  @IsOptional() @IsString() @MaxLength(200)
+  @Transform(({ value }: { value: unknown }) => typeof value === 'string' ? value.trim() || null : value)
+  note?: string | null
+
   @IsUUID()
   itemId!: string
 
   @IsOptional() @IsUUID()
   variantId?: string
 
-  @IsInt() @Min(1)
+  // SE-13: same cap as the POS.
+  @IsInt() @Min(1) @Max(999)
   quantity!: number
 
   @IsOptional() @IsArray() @ArrayUnique() @IsUUID('all', { each: true })
@@ -27,20 +32,25 @@ export class AddCartComboDto {
   @IsUUID()
   comboId!: string
 
-  @IsInt() @Min(1)
+  // SE-13: same cap as the POS.
+  @IsInt() @Min(1) @Max(999)
   quantity!: number
 
   @IsArray() @ArrayMaxSize(60) @ValidateNested({ each: true }) @Type(() => ComboSelectionDto)
   selections!: ComboSelectionDto[]
 }
 
-// Quantity and/or modifier re-selection only - swapping itemId/variantId is
+// Quantity, note and/or modifier re-selection only - swapping itemId/variantId is
 // "remove this line, add a different one", same posture as
 // UpdateOrderLineDto. Omitting modifierIds leaves selections untouched;
 // passing (possibly empty) modifierIds replaces them wholesale, re-validated
 // the same way as on add.
 export class UpdateCartLineDto {
-  @IsOptional() @IsInt() @Min(1)
+  @IsOptional() @IsString() @MaxLength(200)
+  @Transform(({ value }: { value: unknown }) => typeof value === 'string' ? value.trim() || null : value)
+  note?: string | null
+
+  @IsOptional() @IsInt() @Min(1) @Max(999)
   quantity?: number
 
   @IsOptional() @IsArray() @ArrayUnique() @IsUUID('all', { each: true })
@@ -54,6 +64,7 @@ export interface CartLineModifierView {
 }
 
 export interface CartLineView {
+  note: string | null
   id: string
   guestId: string
   guestName: string

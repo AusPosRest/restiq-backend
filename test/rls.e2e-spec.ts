@@ -67,6 +67,23 @@ describe('row-level security on region-plane tables (e2e)', () => {
     await admin.$disconnect()
   })
 
+  it('POS token revocations are tenant-isolated, with operator read access (#242)', async () => {
+    const jti = randomUUID()
+    await admin.revokedPosToken.create({ data: { jti, tenantId, expiresAt: new Date(Date.now() + 60000) } })
+    expect(await probe.revokedPosToken.count({ where: { jti } })).toBe(0)
+    const countFor = (context: string, value: string) => probe.$transaction(async (tx) => {
+      await tx.$executeRaw`SELECT set_config(${context}, ${value}, true)`
+      return tx.revokedPosToken.count({ where: { jti } })
+    })
+    expect(await countFor('app.tenant_id', randomUUID())).toBe(0)
+    expect(await countFor('app.tenant_id', tenantId)).toBe(1)
+    expect(await countFor('app.operator_context', 'operator')).toBe(1)
+    await expect(probe.$transaction(async (tx) => {
+      await tx.$executeRaw`SELECT set_config('app.tenant_id', ${randomUUID()}, true)`
+      await tx.revokedPosToken.create({ data: { jti: randomUUID(), tenantId, expiresAt: new Date() } })
+    })).rejects.toThrow()
+  })
+
   it('returns zero rows with no tenant context (fail closed)', async () => {
     expect(await probe.tenant.count()).toBe(0)
   })
@@ -276,7 +293,7 @@ describe('row-level security on region-plane tables (e2e)', () => {
 
   it('agreement_signatures: fail closed under the wrong tenant, visible under the correct one and to operators (issue #132)', async () => {
     const version = await admin.agreementVersion.create({
-      data: { version: 9_999, title: 'RLS Probe Terms', body: 'x', bodySha256: 'x', publishedBy: 'rls@probe.example' },
+      data: { version: 9_999, title: 'RLS Probe Terms', body: 'x', fileSha256: 'x', publishedBy: 'rls@probe.example' },
     })
     await admin.agreementSignature.create({
       data: { tenantId, agreementVersionId: version.id, signerOwnerId: randomUUID(), signerName: 'Probe Owner', signerEmail: 'rls@probe.example', evidenceSha256: 'x', signedAt: new Date() },

@@ -15,8 +15,8 @@ export class OpsAuthController {
   }
 
   @Get('session')
-  session(@CurrentOperator() operator: OpsPrincipal): { operator: OpsPrincipal } {
-    return { operator }
+  session(@CurrentOperator() operator: OpsPrincipal): { operator: { id: string; email: string } } {
+    return { operator: { id: operator.id, email: operator.email } }
   }
 
   @Post('logout')

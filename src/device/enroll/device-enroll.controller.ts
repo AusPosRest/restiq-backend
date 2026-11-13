@@ -1,5 +1,5 @@
 import { Body, Controller, HttpCode, Post, UseGuards } from '@nestjs/common'
-import { DeviceView } from '../../ops'
+import { EnrollResult } from '../../ops'
 import { DeviceEnrollDto } from './device-enroll.dto'
 import { DeviceEnrollService } from './device-enroll.service'
 import { EnrollRateLimitGuard } from './enroll-rate-limit.guard'
@@ -16,7 +16,7 @@ export class DeviceEnrollController {
   @Post('enroll')
   @HttpCode(201)
   @UseGuards(EnrollRateLimitGuard)
-  enroll(@Body() dto: DeviceEnrollDto): Promise<{ device: DeviceView }> {
+  enroll(@Body() dto: DeviceEnrollDto): Promise<EnrollResult> {
     return this.enrollService.enroll(dto)
   }
 }

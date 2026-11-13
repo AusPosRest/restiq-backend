@@ -149,6 +149,30 @@ describe('/admin/v1/auth/login (e2e)', () => {
     await prisma.$disconnect()
   })
 
+  it('describes an unused invite (restaurant + email) without consuming it, and refuses a used one (issue #193)', async () => {
+    const token = randomBytes(32).toString('hex')
+    await prisma.ownerInvite.create({
+      data: {
+        tenantId: tenantAId,
+        email: 'ravi@details-test.example',
+        firstName: 'Ravi',
+        lastName: 'Kumar',
+        tokenHash: createHash('sha256').update(token).digest('hex'),
+        expiresAt: new Date(Date.now() + 60 * 60 * 1000),
+      },
+    })
+    const details = await request(httpServer).post('/admin/v1/auth/invite-details').send({ token })
+    expect(details.status).toBe(200)
+    expect(details.body).toEqual({ restaurantName: 'Login Test Co A', email: 'ravi@details-test.example', firstName: 'Ravi' })
+    // Reading it twice is fine - nothing was consumed.
+    expect((await request(httpServer).post('/admin/v1/auth/invite-details').send({ token })).status).toBe(200)
+
+    expect((await request(httpServer).post('/admin/v1/auth/accept-invite').send({ token, password: PASSWORD })).status).toBe(200)
+    const used = await request(httpServer).post('/admin/v1/auth/invite-details').send({ token })
+    expect(used.status).toBe(409)
+    expect((await request(httpServer).post('/admin/v1/auth/invite-details').send({ token: 'nope' })).status).toBe(400)
+  })
+
   it('logs in and the returned token authorizes only this owner\'s tenant', async () => {
     const res = await request(httpServer).post('/admin/v1/auth/login').send({ email: ownerAEmail, password: PASSWORD })
     expect(res.status).toBe(200)
@@ -162,6 +186,23 @@ describe('/admin/v1/auth/login (e2e)', () => {
     // read has no tenant-id input except what the login-issued token carries.
     expect((branding.body as { receiptFooter: string }).receiptFooter).toBe('Tenant A footer')
     expect((branding.body as { receiptFooter: string }).receiptFooter).not.toBe('Tenant B footer')
+  })
+
+  it('logout ends the session server-side: the signed-out token is refused (restiq-backend#209, SE-9)', async () => {
+    const login = await request(httpServer).post('/admin/v1/auth/login').send({ email: ownerAEmail, password: PASSWORD })
+    const token = (login.body as { token: string }).token
+    expect((await request(httpServer).get('/admin/v1/branding').set('Authorization', `Bearer ${token}`)).status).toBe(200)
+
+    const logout = await request(httpServer).post('/admin/v1/auth/logout').set('Authorization', `Bearer ${token}`)
+    expect(logout.status).toBe(204)
+
+    const reused = await request(httpServer).get('/admin/v1/branding').set('Authorization', `Bearer ${token}`)
+    expect(reused.status).toBe(401)
+    expect((reused.body as { error: { code: string } }).error.code).toBe('session_revoked')
+    // Signing in again works.
+    const again = await request(httpServer).post('/admin/v1/auth/login').send({ email: ownerAEmail, password: PASSWORD })
+    expect((await request(httpServer).get('/admin/v1/branding').set('Authorization', `Bearer ${(again.body as { token: string }).token}`)).status).toBe(200)
+    expect((await request(httpServer).post('/admin/v1/auth/logout')).status).toBe(401)
   })
 
   it('rejects a wrong password with the same generic 401 body as an unknown email', async () => {

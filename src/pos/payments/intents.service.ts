@@ -11,9 +11,12 @@
 // true }` and where simulate() is the confirmation trigger - a webhook
 // handler (B6) calls the same confirmIntent.
 import { BadRequestException, ConflictException, ForbiddenException, Injectable, NotFoundException } from '@nestjs/common'
+import Stripe from 'stripe'
 import type { Prisma } from '../../generated/prisma/client'
-import { paymentsSimulatorEnabled, PosPrincipal, RegionRegistryService, uuidv7 } from '../../platform'
-import { isUniqueViolation, loadBill, refreshOpenBillTotals, toBillView } from '../bills'
+import { applicationFeeMinor, GuestCardPaymentsService } from '../../guest'
+import { CardReadersService, CardReaderView } from '../../ops'
+import { paymentsSimulatorFor, PosPrincipal, RegionRegistryService, StripeService, stripeTestKey, tenantInTestMode, uuidv7 } from '../../platform'
+import { isUniqueViolation, loadBill, lockBill, refreshOpenBillTotals, toBillView } from '../bills'
 import { setTenantContext } from '../tenant-context'
 import { linkedPeripheral, queueFor } from '../device-routing'
 import { ACTIVE_INTENT_STATUSES, confirmIntent, expireIfDue, failIntent, INTENT_INCLUDE, IntentRow, isIntentActive, toPaymentIntentView } from './intent-core'
@@ -34,9 +37,38 @@ async function loadIntent(tx: Tx, tenantId: string, intentId: string): Promise<I
   return intent
 }
 
+/**
+ * #286: Stripe card readers take this outlet's card_terminal payments when the tenant is Live, its
+ * Stripe account last read active, the server has a key, and the outlet has at least one reader.
+ * Otherwise null - the simulated terminal, unchanged.
+ */
+export async function stripeTerminalFor(tx: Tx, tenantId: string, outletId: string): Promise<{ accountId: string; feePercentBps: number; feeFixedMinor: bigint } | null> {
+  if (!process.env.STRIPE_SECRET_KEY || (await tenantInTestMode(tx, tenantId))) return null
+  const account = await tx.tenantPaymentAccount.findUnique({ where: { tenantId } })
+  if (!account?.stripeAccountId || !account.cardPaymentsActive) return null
+  if ((await tx.cardReader.count({ where: { tenantId, outletId } })) === 0) return null
+  return { accountId: account.stripeAccountId, feePercentBps: account.feePercentBps, feeFixedMinor: account.feeFixedMinor }
+}
+
+const isStripeReaderIntent = (intent: Pick<IntentRow, 'provider' | 'rail'>): boolean => intent.provider === 'stripe' && intent.rail === 'card_terminal'
+
+// Stripe's test cards for the simulated reader (test key only).
+const TEST_CARD = { success: '4242424242424242', failure: '4000000000000002' } as const
+
+interface ReaderStart {
+  accountId: string
+  feeMinor: bigint
+  stripeReaderId: string
+}
+
 @Injectable()
 export class PaymentIntentsService {
-  constructor(private readonly registry: RegionRegistryService) {}
+  constructor(
+    private readonly registry: RegionRegistryService,
+    private readonly stripe: StripeService,
+    private readonly cards: GuestCardPaymentsService,
+    private readonly readers: CardReadersService,
+  ) {}
 
   private plane() {
     return this.registry.planeFor(this.registry.homeRegion())
@@ -50,17 +82,21 @@ export class PaymentIntentsService {
    * never exceed what is still due after every tender already on the bill.
    */
   async createIntent(staff: PosPrincipal, billId: string, dto: CreatePaymentIntentDto): Promise<{ view: PaymentIntentView; created: boolean }> {
-    // #170: the simulator is the only card provider so far - with it off there is nothing to send to.
-    if (!paymentsSimulatorEnabled()) {
-      throw new ConflictException({
-        code: 'provider_unavailable',
-        message: 'Card terminal payments are not connected yet - take the card on your own terminal and record it as an external payment',
-      })
-    }
     const plane = this.plane()
-    return plane.$transaction(async (tx) => {
+    const result = await plane.$transaction(async (tx): Promise<{ view: PaymentIntentView; created: boolean; start?: ReaderStart }> => {
       await setTenantContext(tx, staff.tenantId)
+      // #170: the simulator is the only card provider so far - with it off there is nothing to send to.
+      // #213: a tenant in Test mode always has it. #286: a Live outlet with Stripe card readers uses those.
+      const simulator = await paymentsSimulatorFor(tx, staff.tenantId)
+      await lockBill(tx, billId)
       const bill = await refreshOpenBillTotals(tx, await loadBill(tx, staff.tenantId, billId))
+      const terminal = await stripeTerminalFor(tx, staff.tenantId, bill.outletId)
+      if (!terminal && !simulator) {
+        throw new ConflictException({
+          code: 'provider_unavailable',
+          message: 'Card terminal payments are not connected yet - take the card on your own terminal and record it as an external payment',
+        })
+      }
       if (bill.status === 'finalized') {
         throw new ConflictException({ code: 'already_finalized', message: 'This bill has already been finalised' })
       }
@@ -86,10 +122,64 @@ export class PaymentIntentsService {
       // partial unique index is free for the new one.
       const active = await tx.paymentIntent.findFirst({ where: { billId, shareId: null, status: { in: [...ACTIVE_INTENT_STATUSES] } }, include: INTENT_INCLUDE })
       if (active && isIntentActive(await expireIfDue(tx, active))) {
-        throw new ConflictException({ code: 'intent_active', message: `A payment is already waiting on the terminal (${active.id})` })
+        // restiq-backend#210 (PE-22): staff-facing copy, no ids.
+        throw new ConflictException({ code: 'intent_active', message: 'A card payment for this bill is already waiting on the terminal - cancel it there or wait for it to finish' })
       }
 
       const tenant = await tx.tenant.findUniqueOrThrow({ where: { id: staff.tenantId }, select: { country: true } })
+      const currency = tenant.country === 'AU' ? 'AUD' : 'INR'
+
+      if (terminal) {
+        if (!dto.readerId) throw new BadRequestException({ code: 'reader_required', message: 'Choose the card reader to take this payment on' })
+        const reader = await tx.cardReader.findFirst({ where: { id: dto.readerId, tenantId: staff.tenantId, outletId: bill.outletId } })
+        if (!reader) throw new NotFoundException({ code: 'not_found', message: 'No such card reader at this outlet' })
+        try {
+          // Reserved as `created` before Stripe is called (the partial unique index keeps it the bill's only active intent).
+          const intent = await tx.paymentIntent.create({
+            data: {
+              id: uuidv7(),
+              tenantId: staff.tenantId,
+              outletId: bill.outletId,
+              billId,
+              rail: dto.rail,
+              provider: 'stripe',
+              amountMinor: BigInt(dto.amountMinor),
+              currency,
+              status: 'created',
+              clientKey: dto.clientKey,
+              clientPayload: { readerId: reader.id, readerLabel: reader.label },
+              expiresAt: new Date(Date.now() + INTENT_TTL_MS),
+              createdByStaffId: staff.id,
+            },
+            include: INTENT_INCLUDE,
+          })
+          return {
+            view: toPaymentIntentView(intent),
+            created: true,
+            start: { accountId: terminal.accountId, stripeReaderId: reader.stripeReaderId, feeMinor: applicationFeeMinor(BigInt(dto.amountMinor), terminal.feePercentBps, terminal.feeFixedMinor) },
+          }
+        } catch (error) {
+          if (isUniqueViolation(error)) {
+            throw new ConflictException({ code: 'intent_active', message: 'A card payment for this bill is already waiting on the terminal - cancel it there or wait for it to finish' })
+          }
+          throw error
+        }
+      }
+
+      // restiq-backend#210 (PE-22): never queue a payment no terminal will
+      // pick up. It goes to this till's linked terminal, else the outlet-wide
+      // queue - which only an active terminal not linked to another till drains.
+      const targetDeviceId = await linkedPeripheral(tx, staff.tenantId, dto.deviceId, 'terminal')
+      if (!targetDeviceId) {
+        const outletTerminals = await tx.device.count({ where: { tenantId: staff.tenantId, outletId: bill.outletId, type: 'terminal', status: 'active', pairedPosId: null } })
+        if (outletTerminals === 0) {
+          throw new ConflictException({
+            code: 'no_terminal',
+            message: 'No card terminal is set up for this till. Take the card on your own machine and record it as External, or choose Cash or UPI.',
+          })
+        }
+      }
+
       try {
         const intent = await tx.paymentIntent.create({
           data: {
@@ -100,39 +190,194 @@ export class PaymentIntentsService {
             rail: dto.rail,
             provider: 'simulated',
             amountMinor: BigInt(dto.amountMinor),
-            currency: tenant.country === 'AU' ? 'AUD' : 'INR',
+            currency,
             status: 'pending',
             clientKey: dto.clientKey,
             clientPayload: { simulated: true },
             expiresAt: new Date(Date.now() + INTENT_TTL_MS),
             createdByStaffId: staff.id,
             // Issue #134: a POS with a linked terminal charges only there.
-            targetDeviceId: await linkedPeripheral(tx, staff.tenantId, dto.deviceId, 'terminal'),
+            targetDeviceId,
           },
           include: INTENT_INCLUDE,
         })
         return { view: toPaymentIntentView(intent), created: true }
       } catch (error) {
         if (isUniqueViolation(error)) {
-          throw new ConflictException({ code: 'intent_active', message: 'A payment is already waiting on the terminal' })
+          throw new ConflictException({ code: 'intent_active', message: 'A card payment for this bill is already waiting on the terminal - cancel it there or wait for it to finish' })
         }
         throw error
       }
     })
+    if (!result.start) return { view: result.view, created: result.created }
+    return { view: await this.startOnReader(staff.tenantId, result.view, result.start), created: true }
   }
 
-  /** GET payment-intents/:id - the settle screen's poll; expires lazily. */
+  /**
+   * #286: a Stripe PaymentIntent on the connected account (card_present, automatic capture, the
+   * platform fee), then the reader is told to collect it. Stripe is never called inside a transaction.
+   * A Stripe refusal (reader offline or busy, ...) fails the intent with Stripe's message.
+   */
+  private async startOnReader(tenantId: string, view: PaymentIntentView, start: ReaderStart): Promise<PaymentIntentView> {
+    const stripe = this.stripe.client()
+    const opts = { stripeAccount: start.accountId }
+    let pi: Stripe.PaymentIntent | null = null
+    try {
+      pi = await stripe.paymentIntents.create(
+        {
+          amount: view.amountMinor,
+          currency: view.currency.toLowerCase(),
+          // API 2026-10-28.endive: payment_method_types is gone; allowed_payment_method_types narrows to in-person cards.
+          allowed_payment_method_types: ['card_present'],
+          capture_method: 'automatic',
+          ...(start.feeMinor > 0n ? { application_fee_amount: Number(start.feeMinor) } : {}),
+          metadata: { tenantId, billId: view.billId, intentId: view.id },
+        },
+        { ...opts, idempotencyKey: `restiq-pos-terminal-${view.id}` },
+      )
+      const piId = pi.id
+      const saved = await this.plane().$transaction(async (tx) => {
+        await setTenantContext(tx, tenantId)
+        return tx.paymentIntent.updateMany({ where: { id: view.id, status: 'created' }, data: { status: 'pending', providerRef: piId } })
+      })
+      if (saved.count === 0) {
+        // Cancelled (or expired) while Stripe answered - nothing goes to the reader.
+        await stripe.paymentIntents.cancel(piId, {}, opts).catch(() => undefined)
+      } else {
+        await stripe.terminal.readers.processPaymentIntent(start.stripeReaderId, { payment_intent: piId }, { ...opts, idempotencyKey: `restiq-pos-terminal-process-${view.id}` })
+      }
+    } catch (error) {
+      if (!(error instanceof Stripe.errors.StripeError)) throw error
+      if (pi) await stripe.paymentIntents.cancel(pi.id, {}, opts).catch(() => undefined)
+      await this.plane().$transaction(async (tx) => {
+        await setTenantContext(tx, tenantId)
+        await failIntent(tx, view.id, error.message)
+      })
+    }
+    return this.readView(tenantId, view.id)
+  }
+
+  private readView(tenantId: string, intentId: string): Promise<PaymentIntentView> {
+    return this.plane().$transaction(async (tx) => {
+      await setTenantContext(tx, tenantId)
+      return toPaymentIntentView(await expireIfDue(tx, await loadIntent(tx, tenantId, intentId)))
+    })
+  }
+
+  /** The Stripe account and reader behind a Stripe reader intent (the reader may since have been removed). */
+  private async readerContext(tenantId: string, intent: IntentRow): Promise<{ accountId: string | null; stripeReaderId: string | null }> {
+    const readerId = (intent.clientPayload as { readerId?: string } | null)?.readerId
+    return this.plane().$transaction(async (tx) => {
+      await setTenantContext(tx, tenantId)
+      const account = await tx.tenantPaymentAccount.findUnique({ where: { tenantId } })
+      const reader = readerId ? await tx.cardReader.findFirst({ where: { id: readerId, tenantId } }) : null
+      return { accountId: account?.stripeAccountId ?? null, stripeReaderId: reader?.stripeReaderId ?? null }
+    })
+  }
+
+  /**
+   * #286: brings a Stripe reader intent in step with Stripe. Money and declines go through the guest
+   * card path's applyStripeIntent (the same matching checks and confirmIntent CAS as the webhook). A
+   * reader action that failed without a card decline (customer cancelled, timed out) fails the intent
+   * with Stripe's message. Past its expiry it is cancelled at Stripe before the read path expires it.
+   */
+  private async syncReaderIntent(tenantId: string, intent: IntentRow): Promise<void> {
+    // An expired one is still read (a late capture is money - ADR-011), but never cancelled from here.
+    if (!isStripeReaderIntent(intent) || !intent.providerRef || !(isIntentActive(intent) || intent.status === 'expired')) return
+    const { accountId, stripeReaderId } = await this.readerContext(tenantId, intent)
+    if (!accountId) return
+    const stripe = this.stripe.client()
+    const opts = { stripeAccount: accountId }
+    const pi = await stripe.paymentIntents.retrieve(intent.providerRef, {}, opts)
+    if ((await this.cards.applyStripeIntent(pi, accountId)) === 'applied') return
+    if (pi.status !== 'requires_payment_method' || !stripeReaderId || !isIntentActive(intent)) return
+
+    const reader = await stripe.terminal.readers.retrieve(stripeReaderId, {}, opts)
+    const action = reader.deleted ? null : reader.action
+    const failedHere = action?.type === 'process_payment_intent' && action.process_payment_intent?.payment_intent === pi.id && action.status === 'failed'
+    if (failedHere || intent.expiresAt <= new Date()) {
+      // Settled meanwhile? Then the cancel is refused and the capture is applied instead.
+      if (await this.cancelAtStripe(tenantId, intent, accountId, stripeReaderId)) return
+      if (failedHere) {
+        await this.plane().$transaction(async (tx) => {
+          await setTenantContext(tx, tenantId)
+          await failIntent(tx, intent.id, action?.failure_message ?? 'The card reader could not take the payment')
+        })
+      }
+    }
+  }
+
+  /** Clears the reader and cancels the PaymentIntent. True when Stripe refused because the money already moved (then settled). */
+  private async cancelAtStripe(tenantId: string, intent: IntentRow, accountId: string, stripeReaderId: string | null): Promise<boolean> {
+    const stripe = this.stripe.client()
+    const opts = { stripeAccount: accountId }
+    if (stripeReaderId) await stripe.terminal.readers.cancelAction(stripeReaderId, {}, opts).catch(() => undefined)
+    if (!intent.providerRef) return false
+    try {
+      await stripe.paymentIntents.cancel(intent.providerRef, {}, opts)
+      return false
+    } catch (error) {
+      const pi = await stripe.paymentIntents.retrieve(intent.providerRef, {}, opts)
+      if (pi.status === 'canceled') return false
+      if (pi.status !== 'succeeded') throw error
+      await this.cards.applyStripeIntent(pi, accountId)
+      return true
+    }
+  }
+
+  /** GET payment-intents/:id - the settle screen's poll; expires lazily. #286: a Stripe reader intent syncs from Stripe first. */
   async getIntent(staff: PosPrincipal, intentId: string): Promise<PaymentIntentView> {
     const plane = this.plane()
-    return plane.$transaction(async (tx) => {
+    const intent = await plane.$transaction(async (tx) => {
       await setTenantContext(tx, staff.tenantId)
-      return toPaymentIntentView(await expireIfDue(tx, await loadIntent(tx, staff.tenantId, intentId)))
+      return loadIntent(tx, staff.tenantId, intentId)
     })
+    await this.syncReaderIntent(staff.tenantId, intent)
+    return this.readView(staff.tenantId, intentId)
+  }
+
+  /**
+   * GET bills/:id/intents/active - the settle screen's resume after a reload: the bill's newest
+   * still-open card terminal intent at this outlet (synced from Stripe for a reader intent, so it
+   * may come back already settled), or null.
+   */
+  async activeForBill(staff: PosPrincipal, billId: string): Promise<{ intent: PaymentIntentView | null }> {
+    const row = await this.plane().$transaction(async (tx) => {
+      await setTenantContext(tx, staff.tenantId)
+      return tx.paymentIntent.findFirst({
+        where: { tenantId: staff.tenantId, billId, outletId: staff.outletId, rail: 'card_terminal', status: { in: [...ACTIVE_INTENT_STATUSES] }, expiresAt: { gt: new Date() } },
+        orderBy: { createdAt: 'desc' },
+        select: { id: true },
+      })
+    })
+    return { intent: row ? await this.getIntent(staff, row.id) : null }
+  }
+
+  /** GET outlets/:outletId/card-readers (#286) - the readers the POS can send a payment to; empty while the simulated terminal applies. */
+  async listReaders(staff: PosPrincipal, outletId: string): Promise<{ readers: CardReaderView[] }> {
+    if (outletId !== staff.outletId) throw new ForbiddenException({ code: 'outlet_mismatch', message: 'Not your outlet' })
+    const { terminal, rows } = await this.plane().$transaction(async (tx) => {
+      await setTenantContext(tx, staff.tenantId)
+      const terminal = await stripeTerminalFor(tx, staff.tenantId, outletId)
+      const rows = terminal ? await tx.cardReader.findMany({ where: { tenantId: staff.tenantId, outletId }, include: { outlet: { select: { name: true } } }, orderBy: { createdAt: 'asc' } }) : []
+      return { terminal, rows }
+    })
+    return { readers: terminal ? await this.readers.views(terminal.accountId, rows) : [] }
   }
 
   /** POST payment-intents/:id/cancel - idempotent on an already-over intent; refuses to cancel money that moved. */
   async cancelIntent(staff: PosPrincipal, intentId: string): Promise<PaymentIntentView> {
     const plane = this.plane()
+    // #286: a Stripe reader intent is stopped at Stripe first (reader cleared, PaymentIntent cancelled);
+    // if the card went through meanwhile, it is settled and the cancel below answers already_succeeded.
+    const current = await plane.$transaction(async (tx) => {
+      await setTenantContext(tx, staff.tenantId)
+      return loadIntent(tx, staff.tenantId, intentId)
+    })
+    if (isStripeReaderIntent(current) && isIntentActive(current)) {
+      const { accountId, stripeReaderId } = await this.readerContext(staff.tenantId, current)
+      if (accountId) await this.cancelAtStripe(staff.tenantId, current, accountId, stripeReaderId)
+    }
     return plane.$transaction(async (tx) => {
       await setTenantContext(tx, staff.tenantId)
       const intent = await expireIfDue(tx, await loadIntent(tx, staff.tenantId, intentId))
@@ -162,7 +407,8 @@ export class PaymentIntentsService {
       // Issue #134: a linked terminal drains only its own queue.
       const targetDeviceId = await queueFor(tx, staff.tenantId, deviceId, 'terminal')
       const rows = await tx.paymentIntent.findMany({
-        where: { tenantId: staff.tenantId, outletId, status: { in: [...ACTIVE_INTENT_STATUSES] }, targetDeviceId },
+        // #284: a Stripe intent is paid on the guest's phone, never on a terminal.
+        where: { tenantId: staff.tenantId, outletId, status: { in: [...ACTIVE_INTENT_STATUSES] }, targetDeviceId, provider: { not: 'stripe' } },
         include: INTENT_INCLUDE,
         orderBy: { createdAt: 'asc' },
       })
@@ -178,11 +424,16 @@ export class PaymentIntentsService {
    */
   async simulate(staff: PosPrincipal, intentId: string, dto: SimulateIntentDto): Promise<PaymentIntentView> {
     const plane = this.plane()
+    const current = await plane.$transaction(async (tx) => {
+      await setTenantContext(tx, staff.tenantId)
+      return loadIntent(tx, staff.tenantId, intentId)
+    })
+    if (isStripeReaderIntent(current)) return this.simulateOnReader(staff, current, dto)
     return plane.$transaction(async (tx) => {
       await setTenantContext(tx, staff.tenantId)
       const intent = await loadIntent(tx, staff.tenantId, intentId)
       // #170: with the simulator off the webhook does not exist, for old intents too.
-      if (intent.provider !== 'simulated' || !paymentsSimulatorEnabled()) {
+      if (intent.provider !== 'simulated' || !(await paymentsSimulatorFor(tx, staff.tenantId))) {
         throw new NotFoundException({ code: 'not_found', message: 'No such payment intent' })
       }
 
@@ -202,5 +453,24 @@ export class PaymentIntentsService {
       }
       return toPaymentIntentView(await failIntent(tx, current.id, 'declined'))
     })
+  }
+
+  /**
+   * #286: with a Stripe test key only (404 otherwise), taps Stripe's test card on the simulated reader -
+   * 4242... approves, 4000...0002 declines - then syncs like the settle screen's poll.
+   */
+  private async simulateOnReader(staff: PosPrincipal, intent: IntentRow, dto: SimulateIntentDto): Promise<PaymentIntentView> {
+    if (!stripeTestKey()) throw new NotFoundException({ code: 'not_found', message: 'No such payment intent' })
+    if (intent.status === 'succeeded' && dto.outcome === 'success') return toPaymentIntentView(intent)
+    if (intent.status === 'failed' && dto.outcome === 'failure') return toPaymentIntentView(intent)
+    if (!isIntentActive(intent)) throw new ConflictException({ code: 'already_terminal', message: `This payment is already ${intent.status}` })
+    const { accountId, stripeReaderId } = await this.readerContext(staff.tenantId, intent)
+    if (!accountId || !stripeReaderId || !intent.providerRef) throw new ConflictException({ code: 'conflict', message: 'This payment is not on a card reader yet' })
+    await this.stripe.client().testHelpers.terminal.readers.presentPaymentMethod(
+      stripeReaderId,
+      { type: 'card_present', card_present: { number: TEST_CARD[dto.outcome] } },
+      { stripeAccount: accountId },
+    )
+    return this.getIntent(staff, intent.id)
   }
 }

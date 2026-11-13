@@ -19,6 +19,15 @@ documented here verbatim.
   smaller of the two surgery options named in the story brief, versus
   mounting kitchen routes under `/pos/v1/kitchen`.
 
+### Finalize backstop (issue #228)
+
+Every bill finalize path, including guest QR checkout, calls the shared
+`fireOnSend` hook from `commitFinalize` in the settlement transaction. Unsent
+staff-added lines reach the existing queued ticket as an ADD-ON batch; lines
+already on a ticket and voided lines are skipped. POS finalize has no separate
+fire call. Rejected finalization (including `shift_not_open`) creates no kitchen
+tickets, and a later transaction failure rolls back any kitchen writes.
+
 ### Schema (migration `20260829060002_kitchen_ticket_domain_and_menu_routing`)
 
 - `MenuItem.stationId` (nullable UUID, FK `Station`, `ON DELETE SET NULL`) -

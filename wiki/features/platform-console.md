@@ -208,3 +208,53 @@ See `wiki/features/tenant-admin.md`'s CAP-108 section for the
   product (add when "already imported" badges or push-updates are wanted),
   allergens/modifier groups on products (tags cover dietary labels), bulk
   CSV upload into the directory, a GIN index on `tags`.
+
+## #282 - Stripe Connect and card billing
+
+- `src/ops/payments/` - `GET`/`PATCH /ops/v1/tenants/:tenantId/payments`, `POST .../payments/onboarding-link`.
+  The connected account is created with Stripe Accounts v2 (dashboard `none`, Stripe collects fees and
+  carries losses - the only settings this platform is allowed). Its status is read live from Stripe on
+  every view (`accountStatus`), never stored. Wallet list and platform fee live in `tenant_payment_accounts`.
+- `SubscriptionsService.billingLink` - Stripe Checkout (mode=subscription) on the platform account; the
+  amount is inline from PlanPrice at link time, so a price edit applies to the next link only.
+- `POST /webhooks/stripe` (`subscriptions/stripe-webhook.controller.ts`) - public by path (no realm guard
+  matches `/webhooks`), trusted only by signature. Unknown events and unknown tenants are acknowledged (200).
+
+## #286 - Card readers (Stripe Terminal) and reader orders
+
+Contract: `stripe-readers-contract.md` (web #429). Stacked on #282 (connected accounts, subscription card) and #284 (Stripe settlement).
+
+- **Readers** (`src/ops/card-readers/card-readers.service.ts`) live on the restaurant's connected account
+  (server-driven smart readers). `card_readers` keeps id, outlet, Stripe reader id, label, device type and
+  serial; online/offline is read from Stripe (one `terminal.readers.list` per account) on every view and
+  shows `unknown` if Stripe can't be reached. An outlet's first registration needs a street address and
+  creates its Terminal Location, saved with a compare-and-set on `outlets.stripe_terminal_location_id`
+  (a racing duplicate is deleted at Stripe). `simulated-*` codes (Stripe's sandbox readers, e.g.
+  `simulated-wpe`, `simulated-s700`) only with a `sk_test_` key. Register/remove are audited on the tenant.
+- **Prices** (`reader_prices`, platform-level like `plan_prices`, no RLS): one row per country x model,
+  seeded with no price (not for sale). Changes go to the control-plane audit log with the reason.
+- **Orders** (`reader-orders.service.ts`): the row is written first as `payment_failed` with the
+  placeholder "Payment not completed", then a one-off invoice is created on the platform customer
+  (`collection_method: charge_automatically`, `default_payment_method` = the subscription's card,
+  `pending_invoice_items_behavior: exclude` so subscription items are never swept in, idempotency keys
+  from the order id), an invoice item added, finalized and paid. Success -> `paid`; a Stripe error ->
+  stays `payment_failed` with Stripe's message (no retry). `invoice.paid`/`invoice.payment_failed` with
+  `metadata.readerOrderId` are routed by `StripeWebhookController` to `applyInvoice`, which only moves a
+  `payment_failed` order whose invoice id, amount and currency match. Ops PATCH is forward-only
+  (`NEXT_STATUS`); the same status again only edits tracking ref / note; cancel from paid/ordered
+  refunds the invoice's PaymentIntent first (idempotency key per order), then a compare-and-set write.
+- **POS** (`src/pos/payments/intents.service.ts`): `stripeTerminalFor` = Live tenant + active Stripe
+  account + server key + >=1 reader at the outlet. Then a card_terminal intent requires `readerId`, is
+  reserved as `created` (the partial unique index keeps one active intent per bill), then the
+  PaymentIntent is created (`allowed_payment_method_types: ['card_present']` - API 2026-10-28.endive no
+  longer takes `payment_method_types`), saved as `pending` with its id, and sent with
+  `processPaymentIntent`. A Stripe refusal fails the intent with Stripe's message. `GET` syncs:
+  money/declines through `GuestCardPaymentsService.applyStripeIntent` (same matching checks as the
+  Connect webhook; card_terminal rows go straight to `confirmIntent`); a reader action that failed
+  without a decline fails the intent; past expiry it is cancelled at Stripe first. Cancel = `cancelAction`
+  + PaymentIntent cancel (if Stripe says it already succeeded, it is settled and cancel answers
+  `already_succeeded`). `simulate` (`success`/`failure`) taps 4242... / 4000...0002 through
+  `testHelpers.terminal.readers.presentPaymentMethod`, test key only (404 otherwise).
+- Known ceiling: the POS has no per-bill "active intent" read, so a reloaded till can't resume a waiting
+  reader payment; it sees 409 `intent_active` until the intent ends or is cancelled.
+

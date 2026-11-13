@@ -3,6 +3,8 @@ import { KitchenModule } from '../kitchen'
 import { PlatformModule } from '../platform'
 import { GuestBillsController } from './bills/bills.controller'
 import { GuestBillsService } from './bills/bills.service'
+import { GuestCardPaymentsService } from './bills/card-payments.service'
+import { StripeConnectWebhookController } from './bills/stripe-connect-webhook.controller'
 import { CartController } from './cart/cart.controller'
 import { CartService } from './cart/cart.service'
 import { GuestMenuController } from './menu/menu.controller'
@@ -23,10 +25,11 @@ import { GuestSessionsService } from './sessions/sessions.service'
 // (src/pos/bills/index.ts), not a NestJS provider.
 @Module({
   imports: [PlatformModule, KitchenModule],
-  controllers: [GuestSessionsController, GuestMenuController, CartController, GuestOrdersController, GuestBillsController],
-  providers: [GuestSessionsService, GuestMenuService, CartService, GuestOrdersService, GuestBillsService],
+  controllers: [GuestSessionsController, GuestMenuController, CartController, GuestOrdersController, GuestBillsController, StripeConnectWebhookController],
+  providers: [GuestSessionsService, GuestMenuService, CartService, GuestOrdersService, GuestBillsService, GuestCardPaymentsService],
   // GuestSessionsService is consumed by pos/tables/tables.controller.ts for
   // the staff-side close (AD-2: cross-module reach only via this barrel).
-  exports: [GuestSessionsService],
+  // #286: GuestCardPaymentsService is pos/payments' Stripe settlement path too (POS card readers).
+  exports: [GuestSessionsService, GuestCardPaymentsService],
 })
 export class GuestModule {}

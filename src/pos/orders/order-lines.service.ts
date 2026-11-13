@@ -9,27 +9,31 @@
 // from the shared pos/tenant-context.ts) rather than reimplemented here.
 //
 // Mutability window, per stories.yaml story 4 and AD-14 ("Order is mutable
-// pre-finalisation"): a line may be ADDED any time the order isn't closed
-// (kitchen can still receive more items on an already-sent order), but may
-// only be EDITED (quantity/modifiers) or REMOVED while the order is still
-// "open" - once sent, the kitchen may already be acting on that specific
-// line, so it is frozen except for outright new additions.
+// pre-finalisation"): a line may be ADDED any time the order isn't closed.
+// restiq-backend#210 (CU-15): the freeze is per line, not per order - a line
+// may be EDITED or REMOVED until it is on a kitchen ticket (items added to an
+// already-sent order wait on the till until Send to kitchen fires them, see
+// orders.service.ts's updateStatus). Once the kitchen has it, only a
+// manager-approved void (voidLine) takes it back.
 import { BadRequestException, ConflictException, Injectable, NotFoundException } from '@nestjs/common'
-import { resolveComboSelection, resolveCurrentPrice } from '../../admin'
+import { assertItemAvailable, resolveComboSelection, resolveCurrentPrice } from '../../admin'
 import type { Order, OrderLine, PriceChannel, Prisma } from '../../generated/prisma/client'
-import { KitchenTicketsService } from '../../kitchen'
-import { PosPrincipal, RegionRegistryService } from '../../platform'
+import { ManagerAuthService, PosPrincipal, RegionRegistryService } from '../../platform'
 import type { Replay } from '../sync/replay'
 import { setTenantContext } from '../tenant-context'
-import { AddComboLineDto, AddOrderLineDto, OrderView, UpdateOrderLineDto } from './orders.dtos'
+import { AddComboLineDto, AddOrderLineDto, OrderView, UpdateOrderLineDto, VoidOrderLineDto } from './orders.dtos'
+import { lockBill } from '../bills'
+import { ACTIVE_INTENT_STATUSES } from '../payments/intent-core'
 import { assertOwner, buildOrderView, loadOrder, Tx } from './orders.service'
 
-// Fixed for this story: pos/CAP-3 only builds dine-in table orders (Order
-// always has a tableId - opened via pos/CAP-2's table map). QSR/counter mode
-// (pos/CAP-6, a later story) composes over these same endpoints and picks
-// its own channel when it exists; there is no channel column on Order today
-// to read instead.
-const ORDER_PRICE_CHANNEL: PriceChannel = 'dine_in'
+// A table order is dine-in; a counter (token) order has no table and is
+// priced on the takeaway channel first (restiq-backend#208, SE-8) - Order
+// has no channel column, so the table is what tells them apart. Each channel
+// falls back to the item's channel-less price; a counter order whose item is
+// priced for dine-in only still rings up at that dine-in price.
+function orderPriceChannels(order: Order): PriceChannel[] {
+  return order.tableId === null ? ['takeaway', 'dine_in'] : ['dine_in']
+}
 
 type ItemForOrderLine = Prisma.MenuItemGetPayload<{
   include: {
@@ -100,15 +104,25 @@ function assertOrderNotClosed(order: Order): void {
   }
 }
 
-function assertOrderOpenForEdit(order: Order): void {
-  if (order.status !== 'open') {
-    throw new ConflictException({ code: 'conflict', message: 'This order has already been sent to the kitchen - its lines can no longer be changed or removed' })
+/** The line plus (for a combo) its items - a combo is on a ticket once any of its items is. */
+async function lineAndChildIds(tx: Tx, line: OrderLine): Promise<string[]> {
+  const children = await tx.orderLine.findMany({ where: { parentLineId: line.id }, select: { id: true } })
+  return [line.id, ...children.map((c) => c.id)]
+}
+
+async function isSentToKitchen(tx: Tx, lineIds: string[]): Promise<boolean> {
+  return (await tx.ticketLine.count({ where: { orderLineId: { in: lineIds } } })) > 0
+}
+
+async function assertLineNotSent(tx: Tx, line: OrderLine): Promise<void> {
+  if (await isSentToKitchen(tx, await lineAndChildIds(tx, line))) {
+    throw new ConflictException({ code: 'line_sent', message: 'The kitchen already has this item - ask a manager to void it' })
   }
 }
 
 async function loadOrderLine(tx: Tx, tenantId: string, orderId: string, lineId: string) {
   const line = await tx.orderLine.findUnique({ where: { id: lineId } })
-  if (!line || line.tenantId !== tenantId || line.orderId !== orderId) {
+  if (!line || line.tenantId !== tenantId || line.orderId !== orderId || line.voidedAt) {
     throw new NotFoundException({ code: 'not_found', message: 'No such order line' })
   }
   return line
@@ -126,11 +140,32 @@ function assertNotComboLine(line: OrderLine, action: 'change' | 'remove'): void 
   }
 }
 
+async function assertBillHasNoPayments(tx: Tx, orderId: string): Promise<void> {
+  const bill = await tx.bill.findUnique({ where: { orderId }, select: { id: true } })
+  if (!bill) return
+  await lockBill(tx, bill.id)
+  const locked = await tx.bill.findUnique({
+    where: { id: bill.id },
+    include: {
+      _count: {
+        select: {
+          tenders: true,
+          paymentIntents: { where: { status: { in: [...ACTIVE_INTENT_STATUSES] } } },
+          shares: { where: { OR: [{ status: 'paid' }, { paidAt: { not: null } }] } },
+        },
+      },
+    },
+  })
+  if (locked && locked._count.tenders + locked._count.paymentIntents + locked._count.shares > 0) {
+    throw new ConflictException({ code: 'bill_has_payments', message: 'Payment has been taken on this bill. Refund or reverse it before changing lines.' })
+  }
+}
+
 @Injectable()
 export class OrderLinesService {
   constructor(
     private readonly registry: RegionRegistryService,
-    private readonly tickets: KitchenTicketsService,
+    private readonly managerAuth: ManagerAuthService,
   ) {}
 
   private plane() {
@@ -157,19 +192,16 @@ export class OrderLinesService {
       assertOrderNotClosed(order)
 
       const item = await loadItemForOrderLine(tx, staff.tenantId, dto.itemId)
+      await assertItemAvailable(tx, order.outletId, item)
       assertVariantBelongsToItem(item, dto.variantId)
       const modifierIds = dto.modifierIds ?? []
       assertModifierSelectionValid(item, modifierIds)
 
-      const price = replay
-        ? { priceMinor: replay.unitPriceMinor }
-        : await resolveCurrentPrice(tx, {
-            tenantId: staff.tenantId,
-            itemId: dto.itemId,
-            variantId: dto.variantId ?? null,
-            channel: ORDER_PRICE_CHANNEL,
-            outletId: order.outletId,
-          })
+      // A replayed line keeps the price the hub charged (see the doc comment above); ??= then skips the lookup.
+      let price: { priceMinor: bigint } | null = replay ? { priceMinor: replay.unitPriceMinor } : null
+      for (const channel of orderPriceChannels(order)) {
+        price ??= await resolveCurrentPrice(tx, { tenantId: staff.tenantId, itemId: dto.itemId, variantId: dto.variantId ?? null, channel, outletId: order.outletId })
+      }
       if (!price) {
         throw new BadRequestException({ code: 'no_price', message: 'No current price is configured for this item' })
       }
@@ -188,6 +220,7 @@ export class OrderLinesService {
           unitPriceMinor: price.priceMinor,
           seatNumber: dto.seatNumber ?? null,
           addedByStaffId: staff.id,
+          note: dto.note?.trim() || null,
         },
       })
       for (const modifierId of modifierIds) {
@@ -196,15 +229,9 @@ export class OrderLinesService {
         })
       }
 
-      // kitchen-display/CAP-1 (AD-16, issue #67): a line added to an order
-      // that's already "sent" needs to land on the kitchen the same way the
-      // rest of the order did at fire time - lines added while still "open"
-      // are covered later, in one pass, by fireOnSend at the open->sent
-      // transition (orders.service.ts's updateStatus).
-      if (order.status === 'sent') {
-        await this.tickets.fireAddedLine(tx, order, { id: line.id, quantity: line.quantity, item: { stationId: item.stationId } })
-      }
-
+      // restiq-backend#210 (CU-15): never fired here, even on a sent order -
+      // it waits on the till until Send to kitchen (orders.service.ts's
+      // updateStatus), so a wrong tap can still be taken back.
       return buildOrderView(tx, order)
     })
   }
@@ -228,10 +255,6 @@ export class OrderLinesService {
         for (const modifierId of child.modifierIds) {
           await tx.orderLineModifier.create({ data: { tenantId: staff.tenantId, orderLineId: line.id, modifierId, priceMinor: modifierPrices.get(modifierId) ?? 0n } })
         }
-        // Same add-on firing as a single item added to a sent order.
-        if (order.status === 'sent') {
-          await this.tickets.fireAddedLine(tx, order, { id: line.id, quantity: line.quantity, item: { stationId: child.stationId } })
-        }
       }
       return buildOrderView(tx, order)
     })
@@ -243,9 +266,14 @@ export class OrderLinesService {
       await setTenantContext(tx, staff.tenantId)
       const order = await loadOrder(tx, staff.tenantId, orderId)
       await assertOwner(tx, order, staff)
-      assertOrderOpenForEdit(order)
+      assertOrderNotClosed(order)
       const line = await loadOrderLine(tx, staff.tenantId, orderId, lineId)
       assertNotComboLine(line, 'change')
+      await assertLineNotSent(tx, line)
+
+      if (dto.quantity !== undefined && dto.quantity < line.quantity) {
+        await assertBillHasNoPayments(tx, orderId)
+      }
 
       if (dto.quantity !== undefined) {
         await tx.orderLine.update({ where: { id: lineId }, data: { quantity: dto.quantity } })
@@ -259,6 +287,10 @@ export class OrderLinesService {
         const item = await loadItemForOrderLine(tx, staff.tenantId, line.itemId!)
         assertModifierSelectionValid(item, dto.modifierIds)
         const modifierPrices = await resolveModifierPrices(tx, staff.tenantId, dto.modifierIds)
+        const previous = await tx.orderLineModifier.findMany({ where: { orderLineId: lineId }, select: { priceMinor: true } })
+        const oldPrice = previous.reduce((sum, modifier) => sum + modifier.priceMinor, 0n)
+        const newPrice = dto.modifierIds.reduce((sum, id) => sum + (modifierPrices.get(id) ?? 0n), 0n)
+        if (newPrice < oldPrice) await assertBillHasNoPayments(tx, orderId)
         await tx.orderLineModifier.deleteMany({ where: { orderLineId: lineId } })
         for (const modifierId of dto.modifierIds) {
           await tx.orderLineModifier.create({
@@ -277,11 +309,45 @@ export class OrderLinesService {
       await setTenantContext(tx, staff.tenantId)
       const order = await loadOrder(tx, staff.tenantId, orderId)
       await assertOwner(tx, order, staff)
-      assertOrderOpenForEdit(order)
-      assertNotComboLine(await loadOrderLine(tx, staff.tenantId, orderId, lineId), 'remove')
+      assertOrderNotClosed(order)
+      const line = await loadOrderLine(tx, staff.tenantId, orderId, lineId)
+      assertNotComboLine(line, 'remove')
+      await assertLineNotSent(tx, line)
+      await assertBillHasNoPayments(tx, orderId)
 
       // A combo's child lines go with it (parent_line_id ON DELETE CASCADE).
       await tx.orderLine.delete({ where: { id: lineId } })
+      return buildOrderView(tx, order)
+    })
+  }
+
+  /**
+   * restiq-backend#210 (CU-15): takes back a line the kitchen already has.
+   * Manager PIN + reason (ManagerAuthService 'void_after_fire', audited in
+   * this same transaction). The line is kept, stamped voided - it drops out
+   * of the order, bill and invoice, and its kitchen ticket line shows struck
+   * through. A combo is voided whole, items included.
+   */
+  async voidLine(staff: PosPrincipal, orderId: string, lineId: string, dto: VoidOrderLineDto): Promise<OrderView> {
+    return this.plane().$transaction(async (tx) => {
+      await setTenantContext(tx, staff.tenantId)
+      const order = await loadOrder(tx, staff.tenantId, orderId)
+      await assertOwner(tx, order, staff)
+      assertOrderNotClosed(order)
+      const line = await loadOrderLine(tx, staff.tenantId, orderId, lineId)
+      if (line.parentLineId) {
+        throw new ConflictException({ code: 'combo_locked', message: 'This item is part of a combo - void the whole combo instead' })
+      }
+      const ids = await lineAndChildIds(tx, line)
+      if (!(await isSentToKitchen(tx, ids))) {
+        throw new ConflictException({ code: 'line_not_sent', message: 'The kitchen does not have this item yet - just remove it' })
+      }
+      await assertBillHasNoPayments(tx, orderId)
+
+      const approval = await this.managerAuth.authorize('void_after_fire', staff.tenantId, order.outletId, dto.managerPin, dto.reason.trim(), staff.id)
+      await tx.orderLine.updateMany({ where: { id: { in: ids } }, data: { voidedAt: new Date(), voidReason: dto.reason.trim() } })
+      await tx.ticketLine.updateMany({ where: { orderLineId: { in: ids } }, data: { voided: true } })
+      await this.managerAuth.recordApproval(tx, approval, { actorId: staff.id, actorEmail: staff.name, occurredAt: new Date() })
       return buildOrderView(tx, order)
     })
   }
