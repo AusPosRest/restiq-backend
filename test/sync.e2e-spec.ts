@@ -423,6 +423,9 @@ describe('/sync/v1 (e2e)', () => {
       const openBillId = uuidv7()
       const closedOrderId = uuidv7()
       const closedBillId = uuidv7()
+      const cookingOrderId = uuidv7()
+      const cookingLineId = uuidv7()
+      const cookingBillId = uuidv7()
       const shiftId = uuidv7()
       const movementId = uuidv7()
       const ops = [
@@ -435,13 +438,23 @@ describe('/sync/v1 (e2e)', () => {
         op('order.create', seed.cashierId, { orderId: closedOrderId, tokenNumber: 7 }),
         op('order.line.add', seed.cashierId, { orderId: closedOrderId, lineId: uuidv7(), itemId: seed.itemId, quantity: 1, unitPriceMinor: '10000' }),
         op('bill.create', seed.cashierId, { orderId: closedOrderId, billId: closedBillId }),
+        // A paid counter order still cooking: closed, but its ticket is queued.
+        op('order.create', seed.cashierId, { orderId: cookingOrderId, tokenNumber: 8 }),
+        op('order.line.add', seed.cashierId, { orderId: cookingOrderId, lineId: cookingLineId, itemId: seed.itemId, quantity: 1, unitPriceMinor: '10000' }),
+        op('order.status', seed.cashierId, { orderId: cookingOrderId, status: 'sent' }),
+        op('bill.create', seed.cashierId, { orderId: cookingOrderId, billId: cookingBillId }),
       ]
       expect((await push(hub, ops)).map((r) => r.status)).toEqual(ops.map(() => 'accepted'))
-      const closedBill = await prisma.bill.findUniqueOrThrow({ where: { id: closedBillId } })
-      const total = Number(closedBill.pricesIncludeTax ? closedBill.subtotalMinor : closedBill.subtotalMinor + closedBill.taxMinor)
-      const finalize = op('bill.finalize', seed.cashierId, { billId: closedBillId, tenders: [{ method: 'cash', amountMinor: total }], tenderIds: [uuidv7()] })
-      expect((await push(hub, [finalize])).map((r) => r.status)).toEqual(['accepted'])
+      for (const billId of [closedBillId, cookingBillId]) {
+        const bill = await prisma.bill.findUniqueOrThrow({ where: { id: billId } })
+        const total = Number(bill.pricesIncludeTax ? bill.subtotalMinor : bill.subtotalMinor + bill.taxMinor)
+        const finalize = op('bill.finalize', seed.cashierId, { billId, tenders: [{ method: 'cash', amountMinor: total }], tenderIds: [uuidv7()] })
+        expect((await push(hub, [finalize])).map((r) => r.status)).toEqual(['accepted'])
+      }
+      // The closed order's ticket is bumped, so only the cooking one stays queued.
+      await prisma.ticket.updateMany({ where: { orderId: closedOrderId }, data: { status: 'bumped', bumpedAt: new Date() } })
       expect((await prisma.order.findUniqueOrThrow({ where: { id: closedOrderId } })).status).toBe('closed')
+      expect((await prisma.order.findUniqueOrThrow({ where: { id: cookingOrderId } })).status).toBe('closed')
 
       const plain = await signed(hub, 'GET', '/sync/v1/bootstrap')
       expect(Object.keys(plain.body as object).sort()).toEqual(['cursor', 'data', 'outletId', 'permissions', 'policy'])
@@ -452,8 +465,9 @@ describe('/sync/v1 (e2e)', () => {
       const open = (boot.body as { openSales: Record<string, Record<string, unknown>[]> }).openSales
       const ids = (table: string) => open[table].map((r) => r.id)
       expect(Object.keys(open)).toEqual([...OPEN_SALES_TABLES])
-      expect(ids('orders')).toEqual([openOrderId])
-      expect(ids('order_lines')).toEqual([openLineId])
+      // The paid order still cooking comes with its lines; its finalized bill does not.
+      expect(ids('orders').sort()).toEqual([openOrderId, cookingOrderId].sort())
+      expect(ids('order_lines').sort()).toEqual([openLineId, cookingLineId].sort())
       expect(ids('bills')).toEqual([openBillId])
       expect(open.tenders).toEqual([])
       // Queued tickets go by ticket, not order: a paid counter order still cooking keeps its ticket.
@@ -461,6 +475,7 @@ describe('/sync/v1 (e2e)', () => {
       expect(ticket).toMatchObject({ status: 'queued' })
       expect(open.tickets.every((r) => r.status === 'queued')).toBe(true)
       expect(open.ticket_lines.filter((r) => r.ticket_id === ticket?.id).map((r) => r.order_line_id)).toEqual([openLineId])
+      expect(open.tickets.map((r) => r.order_id).sort()).toEqual([openOrderId, cookingOrderId].sort())
       expect(ids('shifts')).toEqual([shiftId])
       expect(ids('cash_movements')).toEqual([movementId])
       expect(open.token_number_counters.every((r) => r.outlet_id === seed.outletId)).toBe(true)

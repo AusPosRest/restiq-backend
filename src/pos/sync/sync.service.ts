@@ -63,10 +63,12 @@ export const OPEN_SALES_TABLES = [
 type OpenSalesTable = (typeof OPEN_SALES_TABLES)[number]
 
 // $1 = tenant, $2 = outlet, as scopeSql. Orders not closed (combo children
-// share the parent's order_id), open bills, queued tickets, the open shift.
-const OPEN_ORDERS = `SELECT id FROM orders WHERE tenant_id = $1::uuid AND outlet_id = $2::uuid AND status <> 'closed'`
-const OPEN_BILLS = `SELECT id FROM bills WHERE tenant_id = $1::uuid AND outlet_id = $2::uuid AND status = 'open'`
+// share the parent's order_id) plus any order with a queued ticket (paid but
+// still cooking - the hub's kitchen needs its lines), open bills, queued
+// tickets, the open shift.
 const QUEUED_TICKETS = `SELECT id FROM tickets WHERE tenant_id = $1::uuid AND outlet_id = $2::uuid AND status = 'queued'`
+const OPEN_ORDERS = `SELECT id FROM orders WHERE tenant_id = $1::uuid AND outlet_id = $2::uuid AND (status <> 'closed' OR id IN (SELECT order_id FROM tickets WHERE id IN (${QUEUED_TICKETS})))`
+const OPEN_BILLS = `SELECT id FROM bills WHERE tenant_id = $1::uuid AND outlet_id = $2::uuid AND status = 'open'`
 const OPEN_SHIFTS = `SELECT id FROM shifts WHERE tenant_id = $1::uuid AND outlet_id = $2::uuid AND closed_at IS NULL`
 const OPEN_SALES_SCOPE: Record<OpenSalesTable, string> = {
   orders: `t.id IN (${OPEN_ORDERS})`,
