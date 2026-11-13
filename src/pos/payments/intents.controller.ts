@@ -28,6 +28,13 @@ export class PosPaymentIntentsController {
     return view
   }
 
+  // #286: resume a still-waiting card payment after the settle screen reloads.
+  @Get('bills/:id/intents/active')
+  @AnyStaff()
+  active(@CurrentStaff() staff: PosPrincipal, @Param('id', ParseUUIDPipe) billId: string): Promise<{ intent: PaymentIntentView | null }> {
+    return this.intents.activeForBill(staff, billId)
+  }
+
   @Get('payment-intents/:id')
   @AnyStaff()
   getOne(@CurrentStaff() staff: PosPrincipal, @Param('id') id: string): Promise<PaymentIntentView> {

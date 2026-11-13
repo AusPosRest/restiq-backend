@@ -336,6 +336,23 @@ export class PaymentIntentsService {
     return this.readView(staff.tenantId, intentId)
   }
 
+  /**
+   * GET bills/:id/intents/active - the settle screen's resume after a reload: the bill's newest
+   * still-open card terminal intent at this outlet (synced from Stripe for a reader intent, so it
+   * may come back already settled), or null.
+   */
+  async activeForBill(staff: PosPrincipal, billId: string): Promise<{ intent: PaymentIntentView | null }> {
+    const row = await this.plane().$transaction(async (tx) => {
+      await setTenantContext(tx, staff.tenantId)
+      return tx.paymentIntent.findFirst({
+        where: { tenantId: staff.tenantId, billId, outletId: staff.outletId, rail: 'card_terminal', status: { in: [...ACTIVE_INTENT_STATUSES] }, expiresAt: { gt: new Date() } },
+        orderBy: { createdAt: 'desc' },
+        select: { id: true },
+      })
+    })
+    return { intent: row ? await this.getIntent(staff, row.id) : null }
+  }
+
   /** GET outlets/:outletId/card-readers (#286) - the readers the POS can send a payment to; empty while the simulated terminal applies. */
   async listReaders(staff: PosPrincipal, outletId: string): Promise<{ readers: CardReaderView[] }> {
     if (outletId !== staff.outletId) throw new ForbiddenException({ code: 'outlet_mismatch', message: 'Not your outlet' })

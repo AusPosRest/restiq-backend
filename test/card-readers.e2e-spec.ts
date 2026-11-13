@@ -434,6 +434,10 @@ describe('#286 card readers and reader orders (e2e)', () => {
       // Still on the reader: GET changes nothing.
       expect(((await authed(request(httpServer).get(`/pos/v1/payment-intents/${intent.id}`), b.token)).body as IntentBody).status).toBe('pending')
 
+      // A reloaded settle screen finds the still-waiting payment on its bill.
+      const active = await authed(request(httpServer).get(`/pos/v1/bills/${b.billId}/intents/active`), b.token)
+      expect(active.body).toMatchObject({ intent: { id: intent.id, status: 'pending', readerId: expect.any(String) as string } })
+
       stripe.intents.get('pi_r_3')!.status = 'succeeded'
       for (let i = 0; i < 2; i++) {
         const got = await authed(request(httpServer).get(`/pos/v1/payment-intents/${intent.id}`), b.token)
@@ -441,6 +445,8 @@ describe('#286 card readers and reader orders (e2e)', () => {
       }
       const tenders = await prisma.tender.findMany({ where: { billId: b.billId } })
       expect(tenders).toEqual([expect.objectContaining({ method: 'card_terminal', amountMinor: BigInt(b.totalMinor), paymentIntentId: intent.id })])
+      // Settled: nothing left to resume.
+      expect((await authed(request(httpServer).get(`/pos/v1/bills/${b.billId}/intents/active`), b.token)).body).toEqual({ intent: null })
       const finalize = await authed(request(httpServer).post(`/pos/v1/bills/${b.billId}/finalize`), b.token).send({ tenders: [] })
       expect(finalize.status, JSON.stringify(finalize.body)).toBe(200)
     })
