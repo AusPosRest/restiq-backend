@@ -1,11 +1,17 @@
 // Offline sync endpoints (restiq-backend#185). Guarded by DeviceSyncGuard (the
 // /sync device realm, signed requests) - no staff token, no @RequirePermission:
 // the device is the caller and each pushed op names its own staff member.
-import { Body, Controller, Get, HttpCode, Param, ParseUUIDPipe, PayloadTooLargeException, Post, Query } from '@nestjs/common'
+import { Body, Controller, ForbiddenException, Get, HttpCode, Param, ParseUUIDPipe, PayloadTooLargeException, Post, Query } from '@nestjs/common'
+import { HeartbeatDto } from '../../ops'
 import { CurrentDevice, DevicePrincipal } from '../../platform'
 import { SyncPushService } from './sync-push.service'
 import { SYNC_BATCH_MAX, SyncOpResult, SyncPushDto } from './sync.dtos'
 import { SyncService } from './sync.service'
+
+// restiq-backend#292: the cloud takes bootstrap and pushes from the outlet's hub only.
+function requireHub(device: DevicePrincipal): void {
+  if (!device.isHub) throw new ForbiddenException({ code: 'not_hub', message: 'Only the outlet hub till can sync sales' })
+}
 
 @Controller('sync/v1')
 export class SyncController {
@@ -16,6 +22,7 @@ export class SyncController {
 
   @Get('bootstrap')
   bootstrap(@CurrentDevice() device: DevicePrincipal) {
+    requireHub(device)
     return this.sync.bootstrap(device)
   }
 
@@ -27,6 +34,7 @@ export class SyncController {
   @Post('push')
   @HttpCode(200)
   async push(@CurrentDevice() device: DevicePrincipal, @Body() dto: SyncPushDto): Promise<{ results: SyncOpResult[]; serverTime: string }> {
+    requireHub(device)
     if (dto.ops.length > SYNC_BATCH_MAX) {
       throw new PayloadTooLargeException({ code: 'batch_too_large', message: `Send at most ${SYNC_BATCH_MAX} operations` })
     }
@@ -37,6 +45,12 @@ export class SyncController {
   @Get('session-status')
   sessionStatus(@CurrentDevice() device: DevicePrincipal) {
     return this.sync.sessionStatus(device)
+  }
+
+  @Post('heartbeat')
+  @HttpCode(204)
+  async heartbeat(@CurrentDevice() device: DevicePrincipal, @Body() dto: HeartbeatDto): Promise<void> {
+    await this.sync.heartbeat(device, dto)
   }
 
   @Get('rejections')

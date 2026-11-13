@@ -10,6 +10,7 @@ import request from 'supertest'
 import { afterAll, beforeAll, beforeEach, describe, expect, it } from 'vitest'
 import { AppModule } from '../src/app.module'
 import { createPrismaClient, PrismaClient } from '../src/db/client'
+import { SyncService } from '../src/pos'
 import { signingString, signOpsToken, uuidv7 } from '../src/platform'
 
 const EMAIL = 'sync-operator@restiq.example'
@@ -161,7 +162,7 @@ describe('/sync/v1 (e2e)', () => {
   }
 
   let enrolIp = 0
-  async function enrolHub(seed: Seed, withKey = true): Promise<Hub> {
+  async function enrolHub(seed: Seed, withKey = true, asHub = true): Promise<Hub> {
     const { privateKey, publicKey } = generateKeyPairSync('ed25519')
     const codeRes = await request(httpServer)
       .post('/ops/v1/devices/enrolment-codes')
@@ -180,7 +181,9 @@ describe('/sync/v1 (e2e)', () => {
         ...(withKey && { publicKey: publicKey.export({ format: 'der', type: 'spki' }).toString('base64') }),
       })
     expect(res.status).toBe(201)
-    return { deviceId: (res.body as { device: { id: string } }).device.id, privateKey }
+    const deviceId = (res.body as { device: { id: string } }).device.id
+    if (asHub) await prisma.device.update({ where: { id: deviceId }, data: { role: 'hub' } })
+    return { deviceId, privateKey }
   }
 
   function signed(hub: Hub, method: 'GET' | 'POST', path: string, body?: unknown, opts?: { timestamp?: number; tamper?: boolean }) {
@@ -231,6 +234,23 @@ describe('/sync/v1 (e2e)', () => {
       expect((await request(httpServer).get('/sync/v1/session-status')).status).toBe(401)
     })
 
+    it('lets only the hub bootstrap and push (403 not_hub), and says which it is', async () => {
+      seq = 0
+      const seed = await seedTenant('Spice Route')
+      const till = await enrolHub(seed, true, false)
+      for (const res of [
+        await signed(till, 'GET', '/sync/v1/bootstrap'),
+        await signed(till, 'POST', '/sync/v1/push', { batchId: uuidv7(), ops: [op('order.create', seed.cashierId, { orderId: uuidv7(), tokenNumber: 1 })] }),
+      ]) {
+        expect(res.status).toBe(403)
+        expect((res.body as { error: { code: string } }).error.code).toBe('not_hub')
+      }
+      expect(await prisma.order.count({ where: { tenantId: seed.tenantId } })).toBe(0)
+      expect(((await signed(till, 'GET', '/sync/v1/session-status')).body as { isHub: boolean }).isHub).toBe(false)
+      const hub = await enrolHub(seed)
+      expect(((await signed(hub, 'GET', '/sync/v1/session-status')).body as { isHub: boolean }).isHub).toBe(true)
+    })
+
     it('refuses a revoked device with 403 device_revoked', async () => {
       const seed = await seedTenant('Spice Route')
       const hub = await enrolHub(seed)
@@ -272,6 +292,11 @@ describe('/sync/v1 (e2e)', () => {
       expect(body.data.dining_tables.map((r) => r.id)).toEqual([seed.tableId])
       expect(body.data.outlets.map((r) => r.id)).toEqual([seed.outletId])
       expect(body.data.staff_users.find((r) => r.id === seed.cashierId)?.pin_hash).toEqual(expect.stringContaining('$argon2'))
+      // #292: the hub's own tenant row (never another tenant's) and its brands.
+      expect(body.data.tenants).toHaveLength(1)
+      expect(body.data.tenants[0]).toMatchObject({ id: seed.tenantId, name: 'Spice Route', country: 'IN', status: 'active', max_offline_hours: 24, deleted_at: null })
+      expect(body.data.tenants[0]).toHaveProperty('live_since')
+      expect(body.data.brands.map((r) => r.tenant_id)).toEqual([seed.tenantId])
 
       await prisma.itemPrice.updateMany({ where: { itemId: seed.itemId }, data: { priceMinor: 12000n } })
       await prisma.itemPrice.updateMany({ where: { itemId: other.itemId }, data: { priceMinor: 99900n } })
@@ -285,6 +310,56 @@ describe('/sync/v1 (e2e)', () => {
       expect(changes[0]?.data?.price_minor).toBe(12000)
 
       expect((await signed(hub, 'GET', '/sync/v1/pull?cursor=abc')).status).toBe(400)
+
+      // #292: a tenant change (here going Live) reaches the hub through pull.
+      const cursor2 = (pull.body as { nextCursor: string }).nextCursor
+      await prisma.tenant.update({ where: { id: seed.tenantId }, data: { liveSince: null } })
+      await prisma.$executeRaw`UPDATE sync_changes SET changed_at = now() - interval '1 minute'`
+      const pull2 = await signed(hub, 'GET', `/sync/v1/pull?cursor=${cursor2}`)
+      const tenantChanges = (pull2.body as { changes: unknown[] }).changes
+      expect(tenantChanges).toHaveLength(1)
+      expect(tenantChanges[0]).toMatchObject({ entity: 'tenants', id: seed.tenantId, data: { live_since: null } })
+    })
+
+    it('answers 410 cursor_expired for a cursor older than the kept 30 days, and bootstrap still works', async () => {
+      const seed = await seedTenant('Spice Route')
+      const hub = await enrolHub(seed)
+      await prisma.$executeRaw`UPDATE sync_changes SET changed_at = now() - interval '1 minute'`
+      const oldCursor = ((await signed(hub, 'GET', '/sync/v1/bootstrap')).body as { cursor: string }).cursor
+
+      // Two later changes; then everything up to the first one ages past 30 days.
+      await prisma.itemPrice.updateMany({ where: { itemId: seed.itemId }, data: { priceMinor: 12000n } })
+      await prisma.itemPrice.updateMany({ where: { itemId: seed.itemId }, data: { priceMinor: 13000n } })
+      const newest = await prisma.syncChange.findFirstOrThrow({ where: { tenantId: seed.tenantId }, orderBy: { id: 'desc' } })
+      await prisma.$executeRaw`UPDATE sync_changes SET changed_at = now() - interval '31 days' WHERE id < ${newest.id}`
+      await prisma.$executeRaw`UPDATE sync_changes SET changed_at = now() - interval '1 minute' WHERE id = ${newest.id}`
+      await app.get(SyncService).prune()
+      // The newest change of a tenant is always kept.
+      expect(await prisma.syncChange.count({ where: { tenantId: seed.tenantId } })).toBe(1)
+
+      const expired = await signed(hub, 'GET', `/sync/v1/pull?cursor=${oldCursor}`)
+      expect(expired.status).toBe(410)
+      expect((expired.body as { error: { code: string } }).error.code).toBe('cursor_expired')
+      expect((await signed(hub, 'GET', '/sync/v1/pull?cursor=0')).status).toBe(200)
+
+      const again = await signed(hub, 'GET', '/sync/v1/bootstrap')
+      expect(again.status).toBe(200)
+      const cursor = (again.body as { cursor: string }).cursor
+      expect(cursor).toBe(newest.id.toString())
+      expect((await signed(hub, 'GET', `/sync/v1/pull?cursor=${cursor}`)).status).toBe(200)
+    })
+
+    it('records a signed heartbeat that ops sync-health shows', async () => {
+      const seed = await seedTenant('Spice Route')
+      const hub = await enrolHub(seed)
+      const beat = { outboxDepth: 17, appVersion: '1.4.0', clockSkewSeconds: -3, recentRejectionCount: 2 }
+      expect((await signed(hub, 'POST', '/sync/v1/heartbeat', beat)).status).toBe(204)
+      expect((await signed(hub, 'POST', '/sync/v1/heartbeat', { ...beat, outboxDepth: -1 })).status).toBe(400)
+
+      const health = await request(httpServer).get(`/ops/v1/sync-health?tenantId=${seed.tenantId}`).set('Authorization', `Bearer ${opsToken}`)
+      expect(health.status).toBe(200)
+      const row = (health.body as { devices: Record<string, unknown>[] }).devices.find((d) => d.deviceId === hub.deviceId)
+      expect(row).toMatchObject({ ...beat, severity: 'healthy' })
     })
 
     it('says when the hub must sync by', async () => {
@@ -312,7 +387,7 @@ describe('/sync/v1 (e2e)', () => {
       // The hub charged 9500 (its menu was older than the cloud's 10000).
       const sale = [
         op('order.create', seed.cashierId, { orderId, tableId: seed.tableId }, at),
-        op('order.line.add', seed.cashierId, { orderId, lineId, itemId: seed.itemId, quantity: 2, unitPriceMinor: '9500' }, at),
+        op('order.line.add', seed.cashierId, { orderId, lineId, itemId: seed.itemId, quantity: 2, unitPriceMinor: '9500', note: 'less spicy' }, at),
         op('order.status', seed.cashierId, { orderId, status: 'sent' }, at),
         op('bill.create', seed.cashierId, { orderId, billId }, at),
       ]
@@ -328,7 +403,9 @@ describe('/sync/v1 (e2e)', () => {
       const order = await prisma.order.findUniqueOrThrow({ where: { id: orderId } })
       expect(order.createdAt.toISOString()).toBe(at)
       expect(order.status).toBe('closed')
-      expect((await prisma.orderLine.findUniqueOrThrow({ where: { id: lineId } })).unitPriceMinor).toBe(9500n)
+      const line = await prisma.orderLine.findUniqueOrThrow({ where: { id: lineId } })
+      expect(line.unitPriceMinor).toBe(9500n)
+      expect(line.note).toBe('less spicy') // #292: the note survives the push
       const tender = await prisma.tender.findUniqueOrThrow({ where: { id: tenderId } })
       expect(tender.createdAt.toISOString()).toBe(at)
       expect((await prisma.bill.findUniqueOrThrow({ where: { id: billId } })).status).toBe('finalized')

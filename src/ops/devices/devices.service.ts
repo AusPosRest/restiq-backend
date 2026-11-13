@@ -155,6 +155,17 @@ async function setOperatorContext(tx: Prisma.TransactionClient): Promise<void> {
   await tx.$executeRaw`SELECT set_config('app.operator_context', 'operator', true)`
 }
 
+/** The device columns a heartbeat writes - shared by the ops and the signed /sync heartbeat (#292). */
+export function heartbeatData(dto: HeartbeatDto): Prisma.DeviceUpdateInput {
+  return {
+    lastContactAt: new Date(),
+    outboxDepth: dto.outboxDepth,
+    appVersion: dto.appVersion,
+    clockSkewSeconds: dto.clockSkewSeconds,
+    recentRejectionCount: dto.recentRejectionCount,
+  }
+}
+
 function isRecordNotFound(error: unknown): boolean {
   return typeof error === 'object' && error !== null && (error as { code?: unknown }).code === 'P2025'
 }
@@ -454,16 +465,7 @@ export class DevicesService {
         if (device.status === 'revoked') throw new ConflictException({ code: 'conflict', message: 'A revoked device cannot heartbeat' })
 
         await tx.$executeRaw`SELECT set_config('app.tenant_id', ${device.tenantId}, true)`
-        const updated = await tx.device.update({
-          where: { id: deviceId },
-          data: {
-            lastContactAt: new Date(),
-            outboxDepth: dto.outboxDepth,
-            appVersion: dto.appVersion,
-            clockSkewSeconds: dto.clockSkewSeconds,
-            recentRejectionCount: dto.recentRejectionCount,
-          },
-        })
+        const updated = await tx.device.update({ where: { id: deviceId }, data: heartbeatData(dto) })
         return { device: toDeviceView(updated) }
       })
     } catch (error) {
