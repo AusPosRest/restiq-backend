@@ -3,6 +3,7 @@
 // on top: the ids the hub made and, for a line, the price it charged.
 import { Type } from 'class-transformer'
 import {
+  ArrayMaxSize,
   ArrayMinSize,
   IsArray,
   IsInt,
@@ -43,6 +44,29 @@ export class SyncOpDto {
 
   @IsObject()
   payload!: Record<string, unknown>
+}
+
+// restiq-backend#301 (B4, D-4): a hub's LAN base URL - http(s), a private IPv4
+// (10/8, 172.16/12, 192.168/16) or *.local host, and an explicit port.
+const LAN_URL = /^https?:\/\/([a-z0-9.-]+):(\d{1,5})\/?$/i
+const LOCAL_HOST = /^(?:[a-z0-9](?:[a-z0-9-]*[a-z0-9])?\.)+local$/i
+
+// ponytail: plain regex, not new URL() - URL rewrites "010" as octal and throws on "08".
+export function isLanUrl(url: string): boolean {
+  const match = LAN_URL.exec(url)
+  if (!match) return false
+  const [, host, port] = match
+  if (Number(port) < 1 || Number(port) > 65535) return false
+  if (LOCAL_HOST.test(host)) return true
+  const octets = host.split('.')
+  if (octets.length !== 4 || !octets.every((o) => /^(?:0|[1-9]\d{0,2})$/.test(o) && Number(o) <= 255)) return false
+  const [a, b] = octets.map(Number)
+  return a === 10 || (a === 172 && b >= 16 && b <= 31) || (a === 192 && b === 168)
+}
+
+export class HubAddressDto {
+  @IsArray() @ArrayMinSize(1) @ArrayMaxSize(4) @IsString({ each: true }) @MaxLength(100, { each: true })
+  urls!: string[]
 }
 
 export class SyncPushDto {

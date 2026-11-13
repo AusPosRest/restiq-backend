@@ -1,11 +1,11 @@
 // Offline sync endpoints (restiq-backend#185). Guarded by DeviceSyncGuard (the
 // /sync device realm, signed requests) - no staff token, no @RequirePermission:
 // the device is the caller and each pushed op names its own staff member.
-import { Body, Controller, ForbiddenException, Get, HttpCode, Param, ParseUUIDPipe, PayloadTooLargeException, Post, Query } from '@nestjs/common'
+import { BadRequestException, Body, Controller, ForbiddenException, Get, HttpCode, Param, ParseUUIDPipe, PayloadTooLargeException, Post, Put, Query } from '@nestjs/common'
 import { HeartbeatDto } from '../../ops'
 import { CurrentDevice, DevicePrincipal } from '../../platform'
 import { SyncPushService } from './sync-push.service'
-import { SYNC_BATCH_MAX, SyncOpResult, SyncPushDto } from './sync.dtos'
+import { HubAddressDto, isLanUrl, SYNC_BATCH_MAX, SyncOpResult, SyncPushDto } from './sync.dtos'
 import { SyncService } from './sync.service'
 
 // restiq-backend#292: the cloud takes bootstrap and pushes from the outlet's hub only.
@@ -21,9 +21,26 @@ export class SyncController {
   ) {}
 
   @Get('bootstrap')
-  bootstrap(@CurrentDevice() device: DevicePrincipal) {
+  bootstrap(@CurrentDevice() device: DevicePrincipal, @Query('include') include?: string) {
     requireHub(device)
-    return this.sync.bootstrap(device)
+    // restiq-backend#301 (B6): the hub's re-bootstrap also takes the outlet's open sales.
+    return this.sync.bootstrap(device, include === 'open_sales')
+  }
+
+  @Put('hub-address')
+  @HttpCode(204)
+  async announce(@CurrentDevice() device: DevicePrincipal, @Body() dto: HubAddressDto): Promise<void> {
+    requireHub(device)
+    const bad = dto.urls.find((url) => !isLanUrl(url))
+    if (bad !== undefined) {
+      throw new BadRequestException({ code: 'validation_failed', message: `${bad} is not a LAN address: use http(s), a private IPv4 or .local host, and a port` })
+    }
+    await this.sync.setHubAddress(device, dto.urls)
+  }
+
+  @Get('hub')
+  hub(@CurrentDevice() device: DevicePrincipal) {
+    return this.sync.hubAddress(device)
   }
 
   @Get('pull')

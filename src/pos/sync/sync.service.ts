@@ -43,6 +43,47 @@ type CloudTable = (typeof CLOUD_TABLES)[number]
 // Tables whose rows belong to one outlet (outlet_id, null = every outlet).
 const OUTLET_SCOPED: ReadonlySet<CloudTable> = new Set(['item_prices', 'item_outlet_overrides', 'floors', 'stations', 'printers'])
 
+/**
+ * restiq-backend#301 (B6): the outlet's sales still in progress, parents first.
+ * Hub-owned (the hub writes them), so never in CLOUD_TABLES or the change feed;
+ * sent only by bootstrap?include=open_sales, for a hub's re-bootstrap.
+ */
+export const OPEN_SALES_TABLES = [
+  'orders',
+  'order_lines',
+  'order_line_modifiers',
+  'bills',
+  'tenders',
+  'tickets',
+  'ticket_lines',
+  'shifts',
+  'cash_movements',
+  'token_number_counters',
+] as const
+type OpenSalesTable = (typeof OPEN_SALES_TABLES)[number]
+
+// $1 = tenant, $2 = outlet, as scopeSql. Orders not closed (combo children
+// share the parent's order_id) plus any order with a queued ticket (paid but
+// still cooking - the hub's kitchen needs its lines), open bills, queued
+// tickets, the open shift.
+const QUEUED_TICKETS = `SELECT id FROM tickets WHERE tenant_id = $1::uuid AND outlet_id = $2::uuid AND status = 'queued'`
+const OPEN_ORDERS = `SELECT id FROM orders WHERE tenant_id = $1::uuid AND outlet_id = $2::uuid AND (status <> 'closed' OR id IN (SELECT order_id FROM tickets WHERE id IN (${QUEUED_TICKETS})))`
+const OPEN_BILLS = `SELECT id FROM bills WHERE tenant_id = $1::uuid AND outlet_id = $2::uuid AND status = 'open'`
+const OPEN_SHIFTS = `SELECT id FROM shifts WHERE tenant_id = $1::uuid AND outlet_id = $2::uuid AND closed_at IS NULL`
+const OPEN_SALES_SCOPE: Record<OpenSalesTable, string> = {
+  orders: `t.id IN (${OPEN_ORDERS})`,
+  order_lines: `t.order_id IN (${OPEN_ORDERS})`,
+  order_line_modifiers: `t.order_line_id IN (SELECT id FROM order_lines WHERE order_id IN (${OPEN_ORDERS}))`,
+  bills: `t.id IN (${OPEN_BILLS})`,
+  tenders: `t.bill_id IN (${OPEN_BILLS})`,
+  tickets: `t.id IN (${QUEUED_TICKETS})`,
+  ticket_lines: `t.ticket_id IN (${QUEUED_TICKETS})`,
+  shifts: `t.id IN (${OPEN_SHIFTS})`,
+  cash_movements: `t.shift_id IN (${OPEN_SHIFTS})`,
+  // ponytail: one counter row per outlet, no date - the outlet's row is "today's".
+  token_number_counters: `t.tenant_id = $1::uuid AND t.outlet_id = $2::uuid`,
+}
+
 // How often the hub should sync when online.
 const SYNC_INTERVAL_SECONDS = 30
 // ponytail: a change becomes visible to pull only once it is this old, so a
@@ -148,7 +189,26 @@ export class SyncService implements OnModuleInit, OnModuleDestroy {
     await tx.device.update({ where: { id: deviceId }, data: { lastSyncAt: new Date() } })
   }
 
-  async bootstrap(device: DevicePrincipal): Promise<{ cursor: string; outletId: string; policy: SyncPolicy; permissions: Record<string, readonly string[]>; data: Record<string, Row[]> }> {
+  private async rows(tx: Tx, device: DevicePrincipal, table: string, where: string): Promise<Row[]> {
+    const [{ rows }] = await tx.$queryRawUnsafe<[{ rows: Row[] }]>(
+      `SELECT coalesce(jsonb_agg(to_jsonb(t)), '[]'::jsonb) AS rows FROM "${table}" t WHERE ${where}`,
+      device.tenantId,
+      device.outletId,
+    )
+    return rows
+  }
+
+  async bootstrap(
+    device: DevicePrincipal,
+    includeOpenSales = false,
+  ): Promise<{
+    cursor: string
+    outletId: string
+    policy: SyncPolicy
+    permissions: Record<string, readonly string[]>
+    data: Record<string, Row[]>
+    openSales?: Record<string, Row[]>
+  }> {
     return this.plane().$transaction(
       async (tx) => {
         await setTenantContext(tx, device.tenantId)
@@ -156,19 +216,16 @@ export class SyncService implements OnModuleInit, OnModuleDestroy {
         // it and is sent again by the next pull - an upsert, so harmless.
         const cursor = await this.settledCursor(tx, device.tenantId)
         const data: Record<string, Row[]> = {}
-        for (const table of CLOUD_TABLES) {
-          const [{ rows }] = await tx.$queryRawUnsafe<[{ rows: Row[] }]>(
-            `SELECT coalesce(jsonb_agg(to_jsonb(t)), '[]'::jsonb) AS rows FROM "${table}" t WHERE ${scopeSql(table)}`,
-            device.tenantId,
-            device.outletId,
-          )
-          data[table] = rows
-        }
+        for (const table of CLOUD_TABLES) data[table] = await this.rows(tx, device, table, scopeSql(table))
         // Roles carry no permission column - the catalogue lives in code (#169).
         const permissions = Object.fromEntries((data.roles ?? []).map((r) => [String(r.name), permissionsFor(String(r.name))]))
         const policy = await this.policy(tx, device.tenantId)
         await this.markSynced(tx, device.deviceId)
-        return { cursor: cursor.toString(), outletId: device.outletId, policy, permissions, data }
+        const result = { cursor: cursor.toString(), outletId: device.outletId, policy, permissions, data }
+        if (!includeOpenSales) return result
+        const openSales: Record<string, Row[]> = {}
+        for (const table of OPEN_SALES_TABLES) openSales[table] = await this.rows(tx, device, table, OPEN_SALES_SCOPE[table])
+        return { ...result, openSales }
       },
       { isolationLevel: 'RepeatableRead' },
     )
@@ -252,6 +309,28 @@ export class SyncService implements OnModuleInit, OnModuleDestroy {
       await setTenantContext(tx, device.tenantId)
       await tx.device.update({ where: { id: device.deviceId }, data: heartbeatData(dto) })
     })
+  }
+
+  /** restiq-backend#301 (B4): the hub announces where it answers on the shop's LAN. */
+  async setHubAddress(device: DevicePrincipal, urls: string[]): Promise<void> {
+    await this.plane().$transaction(async (tx) => {
+      await setTenantContext(tx, device.tenantId)
+      await tx.device.update({ where: { id: device.deviceId }, data: { lanUrls: urls, lanAnnouncedAt: new Date() } })
+    })
+  }
+
+  /** restiq-backend#301 (B4): where this device's outlet hub said it answers. */
+  async hubAddress(device: DevicePrincipal): Promise<{ deviceId: string; urls: string[]; announcedAt: string }> {
+    const hub = await this.plane().$transaction(async (tx) => {
+      await setTenantContext(tx, device.tenantId)
+      return tx.device.findFirst({
+        where: { tenantId: device.tenantId, outletId: device.outletId, role: 'hub', status: 'active', lanAnnouncedAt: { not: null } },
+        orderBy: { lanAnnouncedAt: 'desc' },
+        select: { id: true, lanUrls: true, lanAnnouncedAt: true },
+      })
+    })
+    if (!hub?.lanAnnouncedAt) throw new NotFoundException({ code: 'no_hub', message: 'This outlet has no hub till that has announced its address' })
+    return { deviceId: hub.id, urls: hub.lanUrls, announcedAt: hub.lanAnnouncedAt.toISOString() }
   }
 
   async rejections(device: DevicePrincipal, since: string | undefined, includeAcknowledged: string | undefined) {
