@@ -107,3 +107,23 @@ The hub till runs this backend's own POS and kitchen code on an in-process PGlit
   - **Orphans on Sync issues** (#306): the rejections list also carries the unacknowledged `hub_orphans` rows as `{ opId: <orphan row id>, type: <entity>, code: 'orphan', message (staff wording, per entity), at: createdAt, source: 'orphan' }`, merged in time order; acknowledging one sets `hub_orphans.acknowledged` on the till only (never forwarded to the cloud). `status.orphans` counts the unacknowledged ones.
   - **Desktop port** (`src/hub/desktop-port.ts`, restiq-desktop D3): `hub-main.ts` listens on `process.parentPort` before the store opens and holds an early `device-key` until the worker can start. It posts `{ type: 'status', online, lastSyncAt, outboxDepth, locked, lockReason, lastError, bootstrapped, tenantId, mustSyncBefore }` (ISO dates, same lock computation as the endpoint) after listen, after the worker starts, and after every tick (`SyncWorker` `onTick`).
 - **Checks** (#307): `src/hub/hub-status.spec.ts` (PGlite, fake clock, fake cloud): status shape; 24 h + 1 s -> 423 on table order, counter order, line and combo while finalize, print, bill read and shift close work; a pull clears it; `settle_bills` 403/200 on list and acknowledge; acknowledge forwarded online, queued offline then sent; revoked refuses every write, reads and logout still work; (#306) an orphan is listed with `source: 'orphan'` and acknowledged locally, not forwarded. `src/hub/desktop-port.spec.ts`: early key held then handed over once, shutdown, status message shape before bootstrap and when locked.
+
+## Test matrix (issue #310, HUB-BUILD-PLAN T1, SYNC-DESIGN §12.6)
+
+`test/hub-matrix.e2e-spec.ts` runs the cloud Nest app (Postgres, ephemeral port) and the hub app (PGlite, listening on its own port) in one process, the real sync worker between them. It is part of `pnpm test:e2e`, so CI's `check` job runs it; `pnpm test:hub-matrix` runs it alone (about 25 s). The hub store is file-backed in a temp dir and started as `hub-main` does (`openOrRebuild`, `compactJournal`, `createHubApp`, `reconcile`, listen). Cases 1-5 end by checking the cloud's orders, lines, modifiers, bills, tenders and tickets equal the hub's (modifier and ticket row ids are compared by content: the cloud makes its own), every op is acked and applied exactly once.
+
+| Case | Automated here |
+|---|---|
+| Online | `ringUpSale` on the hub, one worker tick, identical bill in the cloud |
+| Hub offline from the internet | cloud port closed, 50 sales (table + counter, modifiers, combos, manager-PIN voids) -> status `online: false`, outbox >= 50; reopen -> drained, finalized-bill count and totals equal, no duplicates |
+| Mid-push crash | a stubbed `fetch` lets the cloud commit the push then throws before the ack is saved; a restarted worker re-pushes -> every op `duplicate`, cloud bill count unchanged |
+| Two tills + kitchen screen | two HTTP clients ring 20 table orders each while a third polls the station queue and bumps -> 80 lines, 40 tickets seen and bumped, cloud equal after sync |
+| O1 lock | offline, `last_sync_at` aged past `maxOfflineHours` -> new order and line 423 `offline_locked`, bill + finalize 200; reconnect, one sync -> unlocked, new order 201 |
+| Recovery after a crash (H5) | offline sales, then `pg_control` overwritten so PGlite will not open -> restart through `openOrRebuild` + `reconcile` (the dir moved to `.broken-*`, rebuilt from `bootstrap.json` + journal): outbox = journal, the pending sales' lines, bills and tenders identical; reconnect -> all `accepted`, cloud bill count +3, the cloud rows equal the hub's |
+| Revoked with pending sales | revoked in the cloud while offline sales wait -> hub locked `revoked`, every unsynced op still in `hub_outbox` and `outbox.log`, none applied in the cloud |
+
+Shared harness: `test/hub-cloud.ts` (`startCloud` with `down()`/`up()` on the same port, `enrolHub`, `settle`, `hubRows`, `deleteCloudTenant`), also used by `test/hub-sync-worker.e2e-spec.ts`.
+
+Manual, on restiq-desktop's `docs/HUB-TEST-CHECKLIST.md` (T2): hub down with the internet up and both down (thin-client "hub isn't answering"; decision logic unit-tested in D5), a real low-end Windows till, power loss / OS crash, LAN tills and the KDS on separate machines, printers.
+
+Found by the matrix (#310): a rebuilt store holds only `bootstrap.json` (the first bootstrap's snapshot) plus the replayed **unacknowledged** ops, so hub state whose ops were already acked is gone after a rebuild - the open shift (cash finalize then answers 409 `shift_not_open` until a new shift is opened, while the cloud still has the old one open), and by the same cause open orders/bills pushed before the crash. See docs/KNOWN_ISSUES.md.
