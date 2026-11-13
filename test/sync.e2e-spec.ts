@@ -217,7 +217,11 @@ describe('/sync/v1 (e2e)', () => {
       expect(tampered.status).toBe(401)
       expect((tampered.body as { error: { code: string } }).error.code).toBe('invalid_signature')
 
-      expect((await signed(hub, 'GET', '/sync/v1/session-status', undefined, { timestamp: Date.now() - 6 * 60 * 1000 })).status).toBe(401)
+      const skewed = await signed(hub, 'GET', '/sync/v1/session-status', undefined, { timestamp: Date.now() - 6 * 60 * 1000 })
+      expect(skewed.status).toBe(401)
+      // issue #195: a wrong clock says so, with RESTIQ's time, so the till can be fixed.
+      expect((skewed.body as { error: { code: string; serverTime: string } }).error.code).toBe('clock_skew')
+      expect(Math.abs(Date.parse((skewed.body as { error: { serverTime: string } }).error.serverTime) - Date.now())).toBeLessThan(60_000)
       expect((await signed({ ...hub, deviceId: uuidv7() }, 'GET', '/sync/v1/session-status')).status).toBe(401)
       const other = generateKeyPairSync('ed25519').privateKey
       expect((await signed({ ...hub, privateKey: other }, 'GET', '/sync/v1/session-status')).status).toBe(401)
