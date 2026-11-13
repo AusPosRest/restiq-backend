@@ -1,6 +1,6 @@
 import { Controller, Get, Header, Query } from '@nestjs/common'
 import { AdminPrincipal, CurrentOwner } from '../../platform'
-import { ExportDestinationView, ListPaymentsQueryDto, PaymentsFilterDto, PaymentsListResult, ReportCatalogueEntry } from './reports.dtos'
+import { ExportDestinationView, ListPaymentsQueryDto, PaymentsFilterDto, PaymentsListResult, ReportCatalogueEntry, TopItemsResult } from './reports.dtos'
 import { ReportsService } from './reports.service'
 
 @Controller('admin/v1/reports')
@@ -27,6 +27,18 @@ export class AdminReportsController {
   @Header('Content-Disposition', 'attachment; filename="payments.csv"')
   exportPayments(@CurrentOwner() owner: AdminPrincipal, @Query() query: PaymentsFilterDto): Promise<string> {
     return this.reports.exportPaymentsCsv(owner, query)
+  }
+
+  @Get('top-items')
+  topItems(@CurrentOwner() owner: AdminPrincipal, @Query() query: PaymentsFilterDto): Promise<TopItemsResult> {
+    return this.reports.topItems(owner, query)
+  }
+
+  @Get('top-items/export')
+  @Header('Content-Type', 'text/csv')
+  @Header('Content-Disposition', 'attachment; filename="top-items.csv"')
+  exportTopItems(@CurrentOwner() owner: AdminPrincipal, @Query() query: PaymentsFilterDto): Promise<string> {
+    return this.reports.exportTopItemsCsv(owner, query)
   }
 
   @Get('menu-catalogue/export')

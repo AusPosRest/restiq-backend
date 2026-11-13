@@ -117,3 +117,24 @@ export interface PaymentsListResult {
   nextCursor: string | null
   totals: PaymentsTotals
 }
+
+// restiq-backend#288: top-selling items over the same filter as payments
+// (finalized bills, optional outlet and from/to on finalizedAt). One row per
+// item + portion (variant), or per combo for a combo's parent line.
+export interface TopItemRow {
+  // The menu item's id, or the combo's id on a combo row.
+  id: string
+  variantId: string | null
+  name: string
+  portionName: string | null
+  quantity: number
+  // Sum of each line's quantity x (unit price + modifiers) - the same figure
+  // the bill's subtotalMinor is built from (bill-core.ts's computeSubtotal),
+  // so before the bill-level discount and before refunds.
+  salesMinor: number
+}
+
+export interface TopItemsResult {
+  currency: string
+  items: TopItemRow[]
+}

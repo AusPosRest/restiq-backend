@@ -6,6 +6,9 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+### Added
+- **Top-selling items report** (#288): `GET /admin/v1/reports/top-items` and `/top-items/export` (CSV) over the payments filter (finalized bills, outlet, from/to). One row per item + portion (combos as their own row), quantity sold and sales = line totals incl. modifiers, before bill discount and refunds; highest quantity first. `listPayments`/`exportPaymentsCsv` now share `inFilteredBills()`.
+
 ### Changed
 - **pnpm pinned to 10.34.4** (#276): `packageManager` in package.json, so the Docker image's corepack stops pulling the newest pnpm, which ignored the build-script allow-list and failed the Fly build.
 - **Production can boot before Mailjet and an alert webhook exist** (#274): `MAIL_PROVIDER=simulator` is accepted (reset and invite mail goes to the ops dev inbox), and `ALERT_WEBHOOK_URL=off` means log-only alerts. `log` mail and an unset webhook still refuse to boot.

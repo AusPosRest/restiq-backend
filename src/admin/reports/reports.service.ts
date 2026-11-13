@@ -34,6 +34,8 @@ import {
   PaymentsListResult,
   PaymentsTotals,
   ReportCatalogueEntry,
+  TopItemRow,
+  TopItemsResult,
 } from './reports.dtos'
 
 const PENDING_ON_POS_MESSAGE = 'Available once POS Core Loop is live'
@@ -204,6 +206,46 @@ function toPaymentRow(bill: BillWithPaymentsInclude): PaymentRow {
   }
 }
 
+const TOP_ITEM_LINE_SELECT = {
+  itemId: true,
+  variantId: true,
+  comboId: true,
+  quantity: true,
+  unitPriceMinor: true,
+  item: { select: { name: true } },
+  variant: { select: { name: true } },
+  combo: { select: { name: true } },
+  modifiers: { select: { priceMinor: true } },
+} satisfies Prisma.OrderLineSelect
+export type TopItemLine = Prisma.OrderLineGetPayload<{ select: typeof TOP_ITEM_LINE_SELECT }>
+
+/**
+ * restiq-backend#288: groups sold (non-voided) lines by item + portion, or by
+ * combo for a combo's parent line. A combo's child lines still count under
+ * their own item, at their upcharge only (the combo price sits on the parent),
+ * so the salesMinor column sums to the bills' subtotalMinor - same per-line
+ * formula as bill-core.ts's computeSubtotal: before bill discount and refunds.
+ * Quantity desc, then sales desc.
+ */
+export function aggregateTopItems(lines: TopItemLine[]): TopItemRow[] {
+  const rows = new Map<string, { row: TopItemRow; sales: bigint }>()
+  for (const line of lines) {
+    const id = line.comboId ?? line.itemId
+    if (!id) continue
+    const key = `${id}:${line.variantId ?? ''}`
+    const entry = rows.get(key) ?? {
+      row: { id, variantId: line.variantId, name: line.combo?.name ?? line.item?.name ?? '', portionName: line.variant?.name ?? null, quantity: 0, salesMinor: 0 },
+      sales: 0n,
+    }
+    entry.row.quantity += line.quantity
+    entry.sales += BigInt(line.quantity) * (line.unitPriceMinor + line.modifiers.reduce((sum, m) => sum + m.priceMinor, 0n))
+    rows.set(key, entry)
+  }
+  return [...rows.values()]
+    .map(({ row, sales }) => ({ ...row, salesMinor: Number(sales) }))
+    .sort((a, b) => b.quantity - a.quantity || b.salesMinor - a.salesMinor)
+}
+
 @Injectable()
 export class ReportsService {
   constructor(private readonly registry: RegionRegistryService) {}
@@ -272,6 +314,41 @@ export class ReportsService {
     }
   }
 
+  // Tenant-context transaction + outlet ownership check + the shared
+  // finalized-bills WHERE - every filtered report reads through this.
+  private inFilteredBills<T>(owner: AdminPrincipal, filter: PaymentsFilterDto, read: (tx: Prisma.TransactionClient, where: Prisma.BillWhereInput) => Promise<T>): Promise<T> {
+    const plane = this.registry.planeFor(this.registry.homeRegion())
+    return plane.$transaction(async (tx) => {
+      await setTenantContext(tx, owner.tenantId)
+      if (filter.outletId) await this.assertOutlet(tx, owner.tenantId, filter.outletId)
+      return read(tx, paymentsWhere(owner.tenantId, filter))
+    })
+  }
+
+  private async topItemsFor(tx: Prisma.TransactionClient, tenantId: string, where: Prisma.BillWhereInput): Promise<TopItemRow[]> {
+    const lines = await tx.orderLine.findMany({ where: { tenantId, voidedAt: null, order: { bill: { is: where } } }, select: TOP_ITEM_LINE_SELECT })
+    return aggregateTopItems(lines)
+  }
+
+  /** restiq-backend#288: every matching item, no pagination (one row per menu item/portion, bounded by menu size). */
+  topItems(owner: AdminPrincipal, filter: PaymentsFilterDto): Promise<TopItemsResult> {
+    return this.inFilteredBills(owner, filter, async (tx, where) => {
+      const [items, tenant] = await Promise.all([
+        this.topItemsFor(tx, owner.tenantId, where),
+        tx.tenant.findUniqueOrThrow({ where: { id: owner.tenantId }, select: { country: true } }),
+      ])
+      return { currency: tenant.country === 'IN' ? 'INR' : 'AUD', items }
+    })
+  }
+
+  exportTopItemsCsv(owner: AdminPrincipal, filter: PaymentsFilterDto): Promise<string> {
+    return this.inFilteredBills(owner, filter, async (tx, where) => {
+      const items = await this.topItemsFor(tx, owner.tenantId, where)
+      const rows = items.map((row, i) => [String(i + 1), row.name, row.portionName ?? '', String(row.quantity), formatMinor(BigInt(row.salesMinor))])
+      return toCsv(['rank', 'item', 'portion', 'quantity', 'sales'], rows)
+    })
+  }
+
   // totalMinor/refundedMinor can't be a plain _sum aggregate: each bill's
   // (and each of its credit notes') contribution depends on that bill's own
   // pricesIncludeTax (computeTotalMinor above), and Prisma can't group a
@@ -332,12 +409,7 @@ export class ReportsService {
     const limit = parsePaymentsLimit(query.limit)
     const cursor = query.cursor === undefined || query.cursor === '' ? undefined : decodePaymentsCursor(query.cursor)
 
-    const plane = this.registry.planeFor(this.registry.homeRegion())
-    return plane.$transaction(async (tx) => {
-      await setTenantContext(tx, owner.tenantId)
-      if (query.outletId) await this.assertOutlet(tx, owner.tenantId, query.outletId)
-
-      const where = paymentsWhere(owner.tenantId, query)
+    return this.inFilteredBills(owner, query, async (tx, where) => {
       const pageWhere: Prisma.BillWhereInput = cursor
         ? { ...where, OR: [{ finalizedAt: { lt: new Date(cursor.finalizedAt) } }, { finalizedAt: new Date(cursor.finalizedAt), id: { lt: cursor.id } }] }
         : where
@@ -359,13 +431,8 @@ export class ReportsService {
   // Same filters as listPayments, no pagination - one row per bill, tenders
   // and credit notes flattened into "method=amount;method=amount" cells so
   // a variable number of either never needs a variable number of columns.
-  async exportPaymentsCsv(owner: AdminPrincipal, filter: PaymentsFilterDto): Promise<string> {
-    const plane = this.registry.planeFor(this.registry.homeRegion())
-    return plane.$transaction(async (tx) => {
-      await setTenantContext(tx, owner.tenantId)
-      if (filter.outletId) await this.assertOutlet(tx, owner.tenantId, filter.outletId)
-
-      const where = paymentsWhere(owner.tenantId, filter)
+  exportPaymentsCsv(owner: AdminPrincipal, filter: PaymentsFilterDto): Promise<string> {
+    return this.inFilteredBills(owner, filter, async (tx, where) => {
       const bills = await tx.bill.findMany({ where, orderBy: [{ finalizedAt: 'desc' }, { id: 'desc' }], include: PAYMENTS_INCLUDE })
 
       const rows = bills.map((bill) => {
