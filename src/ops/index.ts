@@ -18,3 +18,8 @@ export type { AgreementSignatureView, OwnerAgreementView } from './agreements/ag
 export { CatalogService } from './catalog/catalog.service'
 export { ImportCatalogProductsDto } from './catalog/catalog.dtos'
 export type { CatalogProductView } from './catalog/catalog.dtos'
+// #286: card readers (Stripe Terminal) and reader orders, shared with /admin and /pos.
+export { CardReadersService } from './card-readers/card-readers.service'
+export { ReaderOrdersService } from './card-readers/reader-orders.service'
+export { CreateReaderOrderDto } from './card-readers/card-readers.dtos'
+export type { CardReaderView, ReaderOrderView, ReaderPriceView } from './card-readers/card-readers.dtos'

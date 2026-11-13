@@ -27,6 +27,11 @@ export class CreatePaymentIntentDto {
   // intent to that POS's linked terminal. Absent = the outlet-wide queue.
   @IsOptional() @IsUUID()
   deviceId?: string
+
+  // #286: the Stripe card reader to charge on. Required when the bill's outlet has readers (and the
+  // tenant takes real card payments); ignored otherwise.
+  @IsOptional() @IsUUID()
+  readerId?: string
 }
 
 export const SIMULATED_OUTCOMES = ['success', 'failure'] as const
@@ -35,6 +40,8 @@ export type SimulatedOutcome = (typeof SIMULATED_OUTCOMES)[number]
 // The simulated provider's "webhook" (ADR-004): what the /pos/terminal
 // screen posts when its Approve / Decline is tapped. 404 on any other
 // provider - a real rail's outcome is never the caller's to pick.
+// #286: on a Stripe card-reader intent with a test key, success/failure taps
+// Stripe's test card 4242.../4000...0002 on the simulated reader.
 export class SimulateIntentDto {
   @IsIn(SIMULATED_OUTCOMES)
   outcome!: SimulatedOutcome
@@ -58,4 +65,7 @@ export interface PaymentIntentView {
   expiresAt: string
   succeededAt: string | null
   tenderId: string | null
+  // #286: the Stripe card reader a card_terminal intent was sent to; null for the simulated terminal.
+  readerId: string | null
+  readerLabel: string | null
 }
