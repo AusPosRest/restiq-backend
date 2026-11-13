@@ -184,6 +184,25 @@ describe('hub status, O1 lock and rejections', () => {
     expect(acked).toContain(opId)
   })
 
+  it('lists #306 orphans as sync issues and acknowledges them on the till only', async () => {
+    const lineId = uuidv7()
+    const { rows } = await pg.query<{ id: string }>(`INSERT INTO hub_orphans (entity, entity_id, created_at) VALUES ('order_line', $1, now()) RETURNING id`, [lineId])
+    const id = rows[0].id
+    expect((await request(http).get('/pos/v1/hub/status').set(cashier).expect(200)).body).toMatchObject({ orphans: 1 })
+    const { items } = (await request(http).get('/pos/v1/hub/rejections').set(cashier).expect(200)).body as { items: { opId: string; at: string; message: string }[] }
+    const orphan = items.find((item) => item.opId === id)!
+    expect(orphan).toMatchObject({ type: 'order_line', code: 'orphan', source: 'orphan' })
+    expect(orphan.message).toMatch(/^An order line was saved on this till/)
+    expect(Date.parse(orphan.at)).not.toBeNaN()
+    await request(http).post(`/pos/v1/hub/rejections/${uuidv7()}/acknowledge`).set(waiter).expect(403)
+    worker!.online = true
+    await request(http).post(`/pos/v1/hub/rejections/${id}/acknowledge`).set(cashier).expect(204)
+    expect(acked).not.toContain(id) // never forwarded
+    expect((await request(http).get('/pos/v1/hub/status').set(cashier).expect(200)).body).toMatchObject({ orphans: 0 })
+    const after = (await request(http).get('/pos/v1/hub/rejections').set(cashier).expect(200)).body as { items: { opId: string }[] }
+    expect(after.items.map((item) => item.opId)).not.toContain(id)
+  })
+
   it('refuses every write once the device is revoked', async () => {
     await pg.query(`UPDATE hub_meta SET locked = true, lock_reason = 'revoked'`)
     expect((await request(http).get('/pos/v1/hub/status').set(cashier).expect(200)).body).toMatchObject({ locked: true, lockReason: 'revoked' })

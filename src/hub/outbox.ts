@@ -33,6 +33,16 @@ export async function createOutboxTable(pg: PGlite): Promise<void> {
     at timestamptz NOT NULL,
     acknowledged boolean NOT NULL DEFAULT false
   )`)
+  // H5: sales rows the hub committed with no op recorded (a power cut between the commit and the
+  // journal fsync), found at startup. Shown on Sync issues; never turned into ops automatically.
+  await pg.exec(`CREATE TABLE IF NOT EXISTS hub_orphans (
+    id uuid PRIMARY KEY DEFAULT gen_random_uuid(),
+    entity text NOT NULL,
+    entity_id uuid NOT NULL,
+    created_at timestamptz NOT NULL,
+    acknowledged boolean NOT NULL DEFAULT false,
+    UNIQUE (entity, entity_id)
+  )`)
   // H6: acknowledged on the till but not yet forwarded to the cloud (the sync worker sends these each tick).
   await pg.exec('ALTER TABLE hub_rejections ADD COLUMN IF NOT EXISTS ack_pending boolean NOT NULL DEFAULT false')
 }

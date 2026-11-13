@@ -39,15 +39,17 @@ export class HubStatusController {
     }
   }
 
-  // ponytail: orphan rows (#306) are counted, not listed - list them here once hub_orphans has landed.
   @Get('rejections')
   @RequirePermission('settle_bills')
   async rejections(): Promise<{ items: RejectionItem[] }> {
     const { rows } = await this.hub.pg.query<RejectionItem>(
-      `SELECT op_id AS "opId", type, code, message, to_char(at AT TIME ZONE 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS.MS"Z"') AS at, 'cloud' AS source
-       FROM hub_rejections WHERE NOT acknowledged ORDER BY at`,
+      `SELECT "opId", type, code, message, to_char(r.at AT TIME ZONE 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS.MS"Z"') AS at, source FROM (
+         SELECT op_id AS "opId", type, code, message, at, 'cloud' AS source FROM hub_rejections WHERE NOT acknowledged
+         UNION ALL
+         SELECT id, entity, 'orphan', '', created_at, 'orphan' FROM hub_orphans WHERE NOT acknowledged
+       ) r ORDER BY r.at`,
     )
-    return { items: rows }
+    return { items: rows.map((row) => (row.source === 'orphan' ? { ...row, message: orphanMessage(row.type) } : row)) }
   }
 
   /** Marked here at once; forwarded to the cloud now when online, else by the sync worker's next tick. */
@@ -59,16 +61,24 @@ export class HubStatusController {
       'UPDATE hub_rejections SET ack_pending = ack_pending OR NOT acknowledged, acknowledged = true WHERE op_id = $1',
       [opId],
     )
-    if (!affectedRows) throw new NotFoundException({ code: 'not_found', message: 'No such sync issue' })
+    if (!affectedRows) {
+      // #306: an orphan is the hub's own - acknowledged here only, never sent to the cloud.
+      const orphan = await this.hub.pg.query('UPDATE hub_orphans SET acknowledged = true WHERE id = $1', [opId])
+      if (!orphan.affectedRows) throw new NotFoundException({ code: 'not_found', message: 'No such sync issue' })
+      return
+    }
     const worker = this.hub.worker()
     if (worker?.online) await worker.forwardAcks().catch((error: unknown) => this.logger.warn(`acknowledge queued, cloud call failed: ${String(error)}`))
   }
 
-  /** #306's hub_orphans, when that table exists (either branch may merge first). */
   private async orphans(): Promise<number> {
-    const { pg } = this.hub
-    const { rows } = await pg.query<{ t: string | null }>(`SELECT to_regclass('hub_orphans')::text AS t`)
-    if (!rows[0].t) return 0
-    return (await pg.query<{ n: number }>('SELECT count(*)::int AS n FROM hub_orphans')).rows[0].n
+    return (await this.hub.pg.query<{ n: number }>('SELECT count(*)::int AS n FROM hub_orphans WHERE NOT acknowledged')).rows[0].n
   }
+}
+
+const ORPHAN_LABEL: Record<string, string> = { order: 'An order', order_line: 'An order line', bill: 'A bill', bill_finalized: 'A bill payment' }
+
+/** What staff read for a #306 orphan: a sale the till saved but never recorded for the cloud. */
+function orphanMessage(entity: string): string {
+  return `${ORPHAN_LABEL[entity] ?? 'A sale'} was saved on this till during a power cut but never sent to the cloud. Check it, and enter it again if it should count.`
 }

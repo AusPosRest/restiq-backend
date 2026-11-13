@@ -22,8 +22,8 @@ import { createHubApp } from './hub.module'
 import { HubContext } from './lock.guard'
 import { compactJournal } from './journal'
 import { readMeta } from './meta'
+import { openOrRebuild, reconcile } from './recovery'
 import { devicePrivateKey } from './signer'
-import { openStore } from './store'
 import { SyncWorker } from './sync-worker'
 
 /** Electron's utilityProcess port to the main process; absent under plain node. */
@@ -69,12 +69,15 @@ async function main(): Promise<void> {
   const migrationsDir = [join(__dirname, 'migrations'), join(__dirname, '..', '..', 'prisma', 'migrations')].find((dir) => existsSync(dir))
   if (!migrationsDir) throw new Error('No migrations directory found next to the hub')
 
-  const store = await openStore(dataDir, migrationsDir)
+  // H5 (#306): a broken store is rebuilt from bootstrap.json before anything else touches it.
+  const store = await openOrRebuild(dataDir, migrationsDir)
   const db = (open.pg = store.pg)
   // ponytail: only at startup - nothing appends while this runs.
   compactJournal(dataDir)
   setPrismaClient(store.prisma)
   const app = (open.app = await createHubApp(db, dataDir, () => worker?.kick(), new HubContext(db, undefined, () => worker)))
+  // H5 (#306): journal ops back into the outbox (replayed locally), orphans recorded - before the first request.
+  await reconcile(app, db, dataDir)
   await app.listen(port, '127.0.0.1')
   console.log(`restiq hub listening on 127.0.0.1:${port}`)
   const postStatus = () => {
