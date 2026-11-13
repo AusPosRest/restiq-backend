@@ -33,6 +33,8 @@ export async function createOutboxTable(pg: PGlite): Promise<void> {
     at timestamptz NOT NULL,
     acknowledged boolean NOT NULL DEFAULT false
   )`)
+  // H6: acknowledged on the till but not yet forwarded to the cloud (the sync worker sends these each tick).
+  await pg.exec('ALTER TABLE hub_rejections ADD COLUMN IF NOT EXISTS ack_pending boolean NOT NULL DEFAULT false')
 }
 
 /** The next seq: 1 for the first op, then one more than the last, so pushes see no gap. Call under the write mutex. */

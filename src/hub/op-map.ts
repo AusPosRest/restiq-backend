@@ -202,6 +202,7 @@ export const OP_MAP: Readonly<Record<string, OpMapping>> = {
     return op(input, 'ticket.recall', { orderId: ticket.orderId, stationId: ticket.stationId })
   },
   'POST /kitchen/v1/tickets/:id/refire': 'local', // stays on the hub (restiq-backend#297)
+  'POST /pos/v1/hub/rejections/:op/acknowledge': 'local', // the hub forwards it to /sync/v1 itself (H6)
 }
 
 /** "POST /pos/v1/orders/:orderId/lines" and "POST /pos/v1/orders/:id/lines" are the same route. */
