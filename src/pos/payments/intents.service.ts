@@ -179,7 +179,8 @@ export class PaymentIntentsService {
       // Issue #134: a linked terminal drains only its own queue.
       const targetDeviceId = await queueFor(tx, staff.tenantId, deviceId, 'terminal')
       const rows = await tx.paymentIntent.findMany({
-        where: { tenantId: staff.tenantId, outletId, status: { in: [...ACTIVE_INTENT_STATUSES] }, targetDeviceId },
+        // #284: a Stripe intent is paid on the guest's phone, never on a terminal.
+        where: { tenantId: staff.tenantId, outletId, status: { in: [...ACTIVE_INTENT_STATUSES] }, targetDeviceId, provider: { not: 'stripe' } },
         include: INTENT_INCLUDE,
         orderBy: { createdAt: 'asc' },
       })

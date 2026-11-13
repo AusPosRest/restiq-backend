@@ -20,14 +20,14 @@ import type { Order, Prisma, TableSession } from '../../generated/prisma/client'
 import { buildInvoiceView, commitFinalize, createOrGetBillRecord, createTenderRecord, loadBill, lockBill, refreshOpenBillTotals, toBillView } from '../../pos/bills'
 import type { BillWithTenders, InvoiceView } from '../../pos/bills'
 import { confirmIntent } from '../../pos/payments'
-import { GuestPrincipal, paymentsSimulatorFor, RegionRegistryService, uuidv7 } from '../../platform'
+import { GuestPrincipal, paymentsSimulatorFor, RegionRegistryService, tenantInTestMode, uuidv7 } from '../../platform'
 import { isSessionInactive } from '../sessions/sessions.service'
 import { setTenantContext } from '../tenant-context'
-import { BillShareView, GuestBillView, SimulatedPaymentDto } from './bills.dtos'
+import { BillShareView, CARD_PAYMENT_METHODS, CardPaymentsView, GuestBillView, SimulatedPaymentDto } from './bills.dtos'
 
 type Tx = Prisma.TransactionClient
 
-async function loadOrderForSession(tx: Tx, tenantId: string, sessionId: string, orderId: string): Promise<Order> {
+export async function loadOrderForSession(tx: Tx, tenantId: string, sessionId: string, orderId: string): Promise<Order> {
   const order = await tx.order.findUnique({ where: { id: orderId } })
   if (!order || order.tenantId !== tenantId || order.sessionId !== sessionId) {
     throw new NotFoundException({ code: 'not_found', message: 'No such order' })
@@ -44,7 +44,7 @@ async function loadOrderForSession(tx: Tx, tenantId: string, sessionId: string, 
  * their own bill.status === 'finalized' check above has already returned)
  * never reach this.
  */
-async function assertSessionActive(tx: Tx, tenantId: string, sessionId: string): Promise<TableSession> {
+export async function assertSessionActive(tx: Tx, tenantId: string, sessionId: string): Promise<TableSession> {
   const session = await tx.tableSession.findUnique({ where: { id: sessionId } })
   if (!session || session.tenantId !== tenantId) {
     throw new NotFoundException({ code: 'not_found', message: 'No such session' })
@@ -63,9 +63,26 @@ async function assertSessionActive(tx: Tx, tenantId: string, sessionId: string):
  * tenant pays from the phone with the server switch off; a Live one never does.
  */
 async function assertGuestPaymentsAvailable(tx: Tx, tenantId: string): Promise<void> {
-  if (!(await paymentsSimulatorFor(tx, tenantId))) {
-    throw new ConflictException({ code: 'provider_unavailable', message: 'Paying from your phone is not available here yet - please pay at the counter' })
-  }
+  if (!(await paymentsSimulatorFor(tx, tenantId))) throw providerUnavailable()
+}
+
+export function providerUnavailable(): ConflictException {
+  return new ConflictException({ code: 'provider_unavailable', message: 'Paying from your phone is not available here yet - please pay at the counter' })
+}
+
+/**
+ * #284: what the phone needs to take a real card payment, or null. Only a Live tenant (Test mode
+ * keeps the simulator) whose Stripe account last read as active, on a server with Stripe keys.
+ * A kiosk (table-less) session never gets it - kiosk card is the reader's job.
+ */
+export async function cardPaymentsFor(tx: Tx, guest: Pick<GuestPrincipal, 'tenantId' | 'tableId'>): Promise<CardPaymentsView | null> {
+  const publishableKey = process.env.STRIPE_PUBLISHABLE_KEY
+  if (guest.tableId === null || !publishableKey || !process.env.STRIPE_SECRET_KEY) return null
+  if (await tenantInTestMode(tx, guest.tenantId)) return null
+  const account = await tx.tenantPaymentAccount.findUnique({ where: { tenantId: guest.tenantId } })
+  if (!account?.stripeAccountId || !account.cardPaymentsActive) return null
+  const methods = account.allowedMethods.filter((m): m is CardPaymentsView['allowedMethods'][number] => (CARD_PAYMENT_METHODS as readonly string[]).includes(m))
+  return { provider: 'stripe', publishableKey, stripeAccountId: account.stripeAccountId, allowedMethods: methods.includes('card') ? methods : ['card', ...methods] }
 }
 
 function toShareView(row: { guestId: string; guestName: string; amountMinor: bigint; status: BillShareView['status']; payerPhone: string | null; paidAt: Date | null }): BillShareView {
@@ -117,8 +134,7 @@ export class GuestBillsService {
         orderClosed: order.status === 'closed',
       })
       await this.syncShares(tx, guest.tenantId, bill)
-      const shares = await this.loadShareViews(tx, bill.id)
-      return { view: { ...toBillView(bill), shares, paymentsAvailable: await paymentsSimulatorFor(tx, guest.tenantId) }, created }
+      return { view: await this.buildView(tx, guest, bill.id), created }
     })
   }
 
@@ -133,8 +149,7 @@ export class GuestBillsService {
       }
       const bill = await refreshOpenBillTotals(tx, await loadBill(tx, guest.tenantId, billRow.id))
       await this.syncShares(tx, guest.tenantId, bill)
-      const shares = await this.loadShareViews(tx, bill.id)
-      return { ...toBillView(bill), shares, paymentsAvailable: await paymentsSimulatorFor(tx, guest.tenantId) }
+      return this.buildView(tx, guest, bill.id)
     })
   }
 
@@ -215,7 +230,7 @@ export class GuestBillsService {
       // outstanding, every other guest's paid share (and its real Tender)
       // is untouched, and the bill cannot finalise (UJ-5).
 
-      return this.buildView(tx, guest.tenantId, billId)
+      return this.buildView(tx, guest, billId)
     })
   }
 
@@ -268,7 +283,7 @@ export class GuestBillsService {
         await this.completeBill(tx, guest.tenantId, bill, order)
       }
 
-      return this.buildView(tx, guest.tenantId, billId)
+      return this.buildView(tx, guest, billId)
     })
   }
 
@@ -313,7 +328,7 @@ export class GuestBillsService {
    * minus paid) is split across the outstanding guests in proportion to
    * their own line totals, the last absorbing any rounding remainder.
    */
-  private async syncShares(tx: Tx, tenantId: string, bill: BillWithTenders): Promise<void> {
+  async syncShares(tx: Tx, tenantId: string, bill: BillWithTenders): Promise<void> {
     if (bill.status !== 'open') return
     const lines = await tx.orderLine.findMany({ where: { orderId: bill.orderId, voidedAt: null }, include: { modifiers: true }, orderBy: { createdAt: 'asc' } })
     const weights = new Map<string, { guestName: string; lineTotal: bigint }>()
@@ -358,10 +373,11 @@ export class GuestBillsService {
     return rows.map(toShareView)
   }
 
-  private async buildView(tx: Tx, tenantId: string, billId: string): Promise<GuestBillView> {
-    const bill = await loadBill(tx, tenantId, billId)
+  async buildView(tx: Tx, guest: GuestPrincipal, billId: string): Promise<GuestBillView> {
+    const bill = await loadBill(tx, guest.tenantId, billId)
     const shares = await this.loadShareViews(tx, billId)
-    return { ...toBillView(bill), shares, paymentsAvailable: await paymentsSimulatorFor(tx, tenantId) }
+    const cardPayments = await cardPaymentsFor(tx, guest)
+    return { ...toBillView(bill), shares, cardPayments, paymentsAvailable: (await paymentsSimulatorFor(tx, guest.tenantId)) || cardPayments !== null }
   }
 
   /**
@@ -370,7 +386,7 @@ export class GuestBillsService {
    * discount, no staff finalizer), then settle the table session per its
    * lifecycle (qr-self-order CAP-1's "expires on bill settlement" end).
    */
-  private async completeBill(tx: Tx, tenantId: string, bill: BillWithTenders, order: Order): Promise<void> {
+  async completeBill(tx: Tx, tenantId: string, bill: BillWithTenders, order: Order): Promise<void> {
     const freshBill = await loadBill(tx, tenantId, bill.id)
     await commitFinalize(tx, { tenantId, bill: freshBill, discountMinor: null, discountReason: null, finalizedByStaffId: null })
     if (order.sessionId) {

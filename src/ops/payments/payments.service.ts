@@ -1,7 +1,8 @@
 // #282 restaurant payments: the tenant's Stripe Connect account (Accounts v2) plus
 // the platform's settings for it (which wallets are offered, the platform fee).
 // Settings live in the tenant's region plane; the account's status is read live
-// from Stripe on every view - never stored, so it can't go stale.
+// from Stripe on every view. #284: whether card payments are active is also kept
+// on the row (cardPaymentsActive) so guest bill reads never call Stripe.
 import { Injectable, NotFoundException } from '@nestjs/common'
 import type Stripe from 'stripe'
 import type { Prisma, PrismaClient, TenantPaymentAccount } from '../../generated/prisma/client'
@@ -60,7 +61,7 @@ export class PaymentsService {
   async get(tenantId: string): Promise<{ payments: PaymentsView }> {
     const plane = await this.resolvePlane(tenantId)
     const { tenant, row } = await this.read(plane, tenantId)
-    return { payments: await this.view(tenant, row) }
+    return { payments: await this.view(plane, tenant, row) }
   }
 
   async onboardingLink(tenantId: string): Promise<{ url: string; expiresAt: string; payments: PaymentsView }> {
@@ -97,7 +98,7 @@ export class PaymentsService {
         account_onboarding: { return_url: `${webOrigin}/stripe/done?flow=onboarding`, refresh_url: `${webOrigin}/stripe/done?flow=expired` },
       },
     })
-    return { url: link.url, expiresAt: new Date(link.expires_at).toISOString(), payments: await this.view(tenant, row) }
+    return { url: link.url, expiresAt: new Date(link.expires_at).toISOString(), payments: await this.view(plane, tenant, row) }
   }
 
   async update(operator: OpsPrincipal, tenantId: string, dto: UpdatePaymentsDto): Promise<{ payments: PaymentsView }> {
@@ -115,18 +116,23 @@ export class PaymentsService {
       })
       return { tenant, row }
     })
-    return { payments: await this.view(tenant, row) }
+    return { payments: await this.view(plane, tenant, row) }
   }
 
-  private async view(tenant: TenantRow, row: TenantPaymentAccount | null): Promise<PaymentsView> {
+  private async view(plane: PrismaClient, tenant: TenantRow, row: TenantPaymentAccount | null): Promise<PaymentsView> {
     const accountId = row?.stripeAccountId ?? null
     const account = accountId
       ? await this.stripe.client().v2.core.accounts.retrieve(accountId, { include: ['configuration.merchant', 'requirements'] })
       : null
+    const status = accountStatus(account)
+    const active = status.status === 'active'
+    if (row && row.cardPaymentsActive !== active) {
+      await this.inTenant(plane, tenant.id, (tx) => tx.tenantPaymentAccount.update({ where: { tenantId: tenant.id }, data: { cardPaymentsActive: active } }))
+    }
     return {
       tenantId: tenant.id,
       stripeAccountId: accountId,
-      ...accountStatus(account),
+      ...status,
       allowedMethods: (row?.allowedMethods as PaymentMethod[] | undefined) ?? DEFAULT_METHODS,
       feePercentBps: row?.feePercentBps ?? 0,
       feeFixedMinor: (row?.feeFixedMinor ?? 0n).toString(),

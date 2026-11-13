@@ -1,11 +1,13 @@
 // #282 restaurant payments settings. A change always carries a reason (audited, AD-6).
-import { ArrayMinSize, ArrayUnique, IsArray, IsIn, IsInt, IsNotEmpty, IsOptional, IsString, Matches, Max, MaxLength, Min } from 'class-validator'
+import { ArrayContains, ArrayMinSize, ArrayUnique, IsArray, IsIn, IsInt, IsNotEmpty, IsOptional, IsString, Matches, Max, MaxLength, Min } from 'class-validator'
 
 export const PAYMENT_METHODS = ['card', 'apple_pay', 'google_pay'] as const
 export type PaymentMethod = (typeof PAYMENT_METHODS)[number]
 
 export class UpdatePaymentsDto {
+  // #284: Apple Pay / Google Pay are card payments in a wallet - they never run without Card.
   @IsOptional() @IsArray() @ArrayMinSize(1) @ArrayUnique() @IsIn(PAYMENT_METHODS, { each: true })
+  @ArrayContains(['card'], { message: 'Apple Pay and Google Pay run on card payments, so Card must stay on' })
   allowedMethods?: PaymentMethod[]
 
   @IsOptional() @IsInt() @Min(0) @Max(10_000)

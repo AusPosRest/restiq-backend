@@ -2,12 +2,16 @@ import { Body, Controller, Get, HttpCode, Param, Post, Res } from '@nestjs/commo
 import type { Response } from 'express'
 import type { InvoiceView } from '../../pos/bills'
 import { CurrentGuest, GuestPrincipal } from '../../platform'
-import { GuestBillView, SimulatedPaymentDto } from './bills.dtos'
+import { CardPaymentStartView, GuestBillView, SimulatedPaymentDto, StartCardPaymentDto } from './bills.dtos'
 import { GuestBillsService } from './bills.service'
+import { GuestCardPaymentsService } from './card-payments.service'
 
 @Controller('guest/v1')
 export class GuestBillsController {
-  constructor(private readonly bills: GuestBillsService) {}
+  constructor(
+    private readonly bills: GuestBillsService,
+    private readonly cards: GuestCardPaymentsService,
+  ) {}
 
   // Issue #98: 201 for a genuinely new Bill, 200 when one already existed
   // for this order (idempotent - see GuestBillsService.createBill).
@@ -38,6 +42,19 @@ export class GuestBillsController {
   @HttpCode(200)
   payAll(@CurrentGuest() guest: GuestPrincipal, @Param('id') billId: string, @Body() dto: SimulatedPaymentDto): Promise<GuestBillView> {
     return this.bills.payAll(guest, billId, dto)
+  }
+
+  // #284: real card payments (Stripe) - see card-payments.service.ts.
+  @Post('bills/:id/card-payment')
+  @HttpCode(200)
+  startCardPayment(@CurrentGuest() guest: GuestPrincipal, @Param('id') billId: string, @Body() dto: StartCardPaymentDto): Promise<CardPaymentStartView> {
+    return this.cards.start(guest, billId, dto)
+  }
+
+  @Post('card-payments/:intentId/sync')
+  @HttpCode(200)
+  syncCardPayment(@CurrentGuest() guest: GuestPrincipal, @Param('intentId') intentId: string): Promise<GuestBillView> {
+    return this.cards.sync(guest, intentId)
   }
 
   @Get('bills/:id/invoice')

@@ -1751,6 +1751,8 @@ enum PaymentIntentStatus {
 enum PaymentProviderKind {
   simulated
   razorpay
+  // #284: card on the guest's phone, a direct charge on the restaurant's Connect account.
+  stripe
 }
 
 model PaymentIntent {
@@ -2176,13 +2178,15 @@ model SimulatedMessage {
 
 // #282: the restaurant's Stripe Connect account (v2 Accounts) and the platform's cut of its card payments.
 model TenantPaymentAccount {
-  tenantId        String   @id @map("tenant_id") @db.Uuid
-  stripeAccountId String?  @unique @map("stripe_account_id")
-  allowedMethods  String[] @default(["card", "apple_pay", "google_pay"]) @map("allowed_methods")
-  feePercentBps   Int      @default(0) @map("fee_percent_bps")
-  feeFixedMinor   BigInt   @default(0) @map("fee_fixed_minor")
-  createdAt       DateTime @default(now()) @map("created_at") @db.Timestamptz(6)
-  updatedAt       DateTime @updatedAt @map("updated_at") @db.Timestamptz(6)
+  tenantId           String   @id @map("tenant_id") @db.Uuid
+  stripeAccountId    String?  @unique @map("stripe_account_id")
+  allowedMethods     String[] @default(["card", "apple_pay", "google_pay"]) @map("allowed_methods")
+  feePercentBps      Int      @default(0) @map("fee_percent_bps")
+  feeFixedMinor      BigInt   @default(0) @map("fee_fixed_minor")
+  // #284: last known Stripe card_payments capability, refreshed by the ops Payments tab - guest bill reads use this, never Stripe.
+  cardPaymentsActive Boolean  @default(false) @map("card_payments_active")
+  createdAt          DateTime @default(now()) @map("created_at") @db.Timestamptz(6)
+  updatedAt          DateTime @updatedAt @map("updated_at") @db.Timestamptz(6)
 
   tenant Tenant @relation(fields: [tenantId], references: [id])
 

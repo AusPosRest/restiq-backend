@@ -464,5 +464,14 @@ describe('/ops/v1/tenants/:tenantId/subscription (e2e)', () => {
       }
       expect(await prisma.tenantPaymentAccount.count({ where: { tenantId } })).toBe(0)
     })
+
+    it('PATCH payments refuses wallets without Card (#284)', async () => {
+      const res = await authed(request(httpServer).patch(`/ops/v1/tenants/${tenantId}/payments`)).send({ allowedMethods: ['apple_pay', 'google_pay'], reason: 'x' })
+      expect(res.status).toBe(400)
+      expect((res.body as { error: { code: string; message: string } }).error).toMatchObject({
+        code: 'validation_failed',
+        message: 'Apple Pay and Google Pay run on card payments, so Card must stay on',
+      })
+    })
   })
 })
