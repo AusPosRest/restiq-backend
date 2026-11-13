@@ -162,6 +162,8 @@ export class SubscriptionsService {
     const session = await stripe.checkout.sessions.create({
       mode: 'subscription',
       customer: customerId,
+      // Bill in the restaurant's own currency, never converted to the visitor's local one.
+      adaptive_pricing: { enabled: false },
       line_items: [
         {
           quantity: 1,
