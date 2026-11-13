@@ -6,6 +6,7 @@ import { readdirSync, readFileSync } from 'node:fs'
 import { join } from 'node:path'
 import { PrismaPGlite } from 'pglite-prisma-adapter'
 import { PrismaClient } from '../generated/prisma/client'
+import { createMetaTable } from './meta'
 
 /** PGlite's own user is a superuser, which bypasses RLS - every app query runs as this role instead. */
 export const APP_ROLE = 'restiq_app'
@@ -44,10 +45,14 @@ export interface HubStore {
   prisma: PrismaClient
 }
 
-/** Opens PGlite at dataDir (in memory when undefined), migrates, then switches its one connection to the app role for Prisma. */
+/** Opens PGlite at dataDir (in memory when undefined), migrates, adds hub_meta, then switches its one connection to the app role for Prisma. */
 export async function openStore(dataDir: string | undefined, migrationsDir: string): Promise<HubStore> {
   const pg = await PGlite.create(dataDir)
+  // PGlite's session takes the host's offset (e.g. Etc/GMT-5 on an IST till); the cloud runs UTC (#209), and its
+  // ALTER DATABASE ... timezone migration only reaches sessions opened after it.
+  await pg.exec(`SET TimeZone = 'UTC'`)
   await applyMigrations(pg, migrationsDir)
+  await createMetaTable(pg)
   await grantAppRole(pg)
   await pg.exec(`SET ROLE ${APP_ROLE}`)
   return { pg, prisma: new PrismaClient({ adapter: new PrismaPGlite(pg) }) }
