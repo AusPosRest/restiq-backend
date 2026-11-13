@@ -5,11 +5,14 @@
 // exact same confirmIntent rather than growing their own.
 import type { Prisma } from '../../generated/prisma/client'
 import { ConflictException } from '@nestjs/common'
-import { paymentsSimulatorEnabled } from '../../platform'
-import { createTenderRecord } from '../bills'
+import { paymentsSimulatorFor } from '../../platform'
+import { createTenderRecord, lockBill } from '../bills'
 import { PaymentIntentView } from './intents.dtos'
 
 type Tx = Prisma.TransactionClient
+
+/** failureReason on a succeeded intent whose capture landed on an already-settled bill - the money must go back (SE-28). */
+export const LATE_CAPTURE_REFUND_DUE = 'late_capture_refund_due'
 
 export const ACTIVE_INTENT_STATUSES = ['created', 'pending'] as const
 
@@ -21,7 +24,7 @@ export function isIntentActive(intent: Pick<IntentRow, 'status'>): boolean {
 }
 
 export function toPaymentIntentView(intent: IntentRow): PaymentIntentView {
-  const client = typeof intent.clientPayload === 'object' && intent.clientPayload !== null && !Array.isArray(intent.clientPayload) ? (intent.clientPayload as { simulated?: boolean }) : {}
+  const client = typeof intent.clientPayload === 'object' && intent.clientPayload !== null && !Array.isArray(intent.clientPayload) ? (intent.clientPayload as { simulated?: boolean; readerId?: string; readerLabel?: string }) : {}
   return {
     id: intent.id,
     billId: intent.billId,
@@ -39,6 +42,8 @@ export function toPaymentIntentView(intent: IntentRow): PaymentIntentView {
     expiresAt: intent.expiresAt.toISOString(),
     succeededAt: intent.succeededAt?.toISOString() ?? null,
     tenderId: intent.tender?.id ?? null,
+    readerId: client.readerId ?? null,
+    readerLabel: client.readerLabel ?? null,
   }
 }
 
@@ -49,12 +54,15 @@ export function toPaymentIntentView(intent: IntentRow): PaymentIntentView {
  * write one tender - the loser's updateMany affects zero rows and it simply
  * re-reads the winner's result. `expired` is deliberately in the CAS set
  * (ADR-011): a capture that lands after our clock ran out is still money
- * on the bill, and recording it is not optional.
+ * on the bill, and recording it is not optional - unless the bill was
+ * settled meanwhile, in which case it is flagged for a refund instead.
  */
-export async function confirmIntent(tx: Tx, params: { tenantId: string; intentId: string }): Promise<IntentRow> {
+export async function confirmIntent(tx: Tx, params: { tenantId: string; intentId: string; refundDue?: boolean }): Promise<IntentRow> {
   // #170: a simulated approval is never money - refuse it whenever the simulator is off, whenever the intent was made.
-  const target = await tx.paymentIntent.findUniqueOrThrow({ where: { id: params.intentId }, select: { provider: true } })
-  if (target.provider === 'simulated' && !paymentsSimulatorEnabled()) {
+  const target = await tx.paymentIntent.findUniqueOrThrow({ where: { id: params.intentId }, select: { provider: true, billId: true } })
+  // restiq-backend#227 (G2): takes the bill's row lock so a capture racing a cash/other finalize sees locked data.
+  await lockBill(tx, target.billId)
+  if (target.provider === 'simulated' && !(await paymentsSimulatorFor(tx, params.tenantId))) {
     throw new ConflictException({ code: 'simulator_disabled', message: 'Simulated card payments are turned off' })
   }
   const flipped = await tx.paymentIntent.updateMany({
@@ -63,6 +71,27 @@ export async function confirmIntent(tx: Tx, params: { tenantId: string; intentId
   })
   const intent = await tx.paymentIntent.findUniqueOrThrow({ where: { id: params.intentId }, include: INTENT_INCLUDE })
   if (flipped.count === 0 || intent.tender) return intent
+
+  // restiq-backend#208 (SE-28): a capture that lands after the bill was
+  // settled some other way must never become a second tender on a finalised
+  // bill (the guest would be charged twice, silently). Record that the money
+  // moved, write no tender, and flag it for a refund in the audit trail.
+  // #284: `refundDue` - the caller (under this same bill lock) found the money's target already gone,
+  // e.g. a guest's share paid another way while their card was being charged. Same outcome.
+  const bill = await tx.bill.findUniqueOrThrow({ where: { id: intent.billId }, select: { status: true } })
+  if (bill.status === 'finalized' || params.refundDue) {
+    await tx.paymentIntent.update({ where: { id: intent.id }, data: { failureReason: LATE_CAPTURE_REFUND_DUE } })
+    await tx.auditEvent.create({
+      data: {
+        tenantId: params.tenantId,
+        actorEmail: 'system:payments',
+        action: 'payment.late_capture_refund_due',
+        reason: `Payment intent ${intent.id} (${intent.amountMinor} ${intent.currency}) was captured after bill ${intent.billId} (or this payment's share of it) was already settled - refund it to the customer`,
+        occurredAt: new Date(),
+      },
+    })
+    return tx.paymentIntent.findUniqueOrThrow({ where: { id: params.intentId }, include: INTENT_INCLUDE })
+  }
 
   await createTenderRecord(tx, {
     tenantId: params.tenantId,

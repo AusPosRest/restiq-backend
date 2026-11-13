@@ -1,5 +1,5 @@
 import { BadRequestException, ConflictException, Injectable, NotFoundException } from '@nestjs/common'
-import type { Prisma } from '../../generated/prisma/client'
+import type { GstSplitRounding, Prisma } from '../../generated/prisma/client'
 import { AdminPrincipal, RegionRegistryService } from '../../platform'
 import { setTenantContext } from '../menu/tenant-context'
 import { TaxRegistrationView, UpdateTaxRegistrationDto } from './tax-registration.dtos'
@@ -21,6 +21,7 @@ function toView(country: string, registrationType: 'gstin' | 'abn', registration
   compositionScheme: boolean
   gstRegistered: boolean
   gstRatePercent: Prisma.Decimal | null
+  gstSplitRounding: GstSplitRounding
 } | null, tenantName: string): TaxRegistrationView {
   return {
     country,
@@ -32,6 +33,7 @@ function toView(country: string, registrationType: 'gstin' | 'abn', registration
     compositionScheme: registration?.compositionScheme ?? false,
     gstRegistered: registration?.gstRegistered ?? true,
     gstRatePercent: registration?.gstRatePercent != null ? Number(registration.gstRatePercent) : null,
+    gstSplitRounding: registration?.gstSplitRounding ?? 'exact_total',
   }
 }
 
@@ -89,6 +91,7 @@ export class TaxRegistrationService {
         compositionScheme: dto.compositionScheme ?? existing?.compositionScheme ?? false,
         gstRegistered: effectiveGstRegistered,
         gstRatePercent: dto.gstRatePercent ?? existing?.gstRatePercent ?? null,
+        gstSplitRounding: dto.gstSplitRounding ?? existing?.gstSplitRounding ?? 'exact_total',
       }
 
       try {
@@ -103,6 +106,7 @@ export class TaxRegistrationService {
               registrationNumber: dto.registrationNumber ?? existing.registrationNumber,
               gstRegistered: effectiveGstRegistered,
               gstRatePercent: dto.gstRatePercent ?? existing.gstRatePercent,
+              gstSplitRounding: dto.gstSplitRounding ?? existing.gstSplitRounding,
             },
           })
           return toView(tenant.country, registrationType, updated, tenant.name)

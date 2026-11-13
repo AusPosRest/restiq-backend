@@ -6,11 +6,19 @@ import { OpsAuthController } from './auth.controller'
 import { OpsAuthService } from './auth.service'
 import { OpsCatalogController } from './catalog/catalog.controller'
 import { CatalogService } from './catalog/catalog.service'
+import { OpsCardReadersController } from './card-readers/card-readers.controller'
+import { CardReadersService } from './card-readers/card-readers.service'
+import { ReaderOrdersService } from './card-readers/reader-orders.service'
 import { OpsDashboardController } from './dashboard.controller'
 import { OpsDevicesController } from './devices/devices.controller'
 import { DevicesService } from './devices/devices.service'
 import { OpsDlqController } from './dlq/dlq.controller'
+import { OpsPlanPricesController } from './plan-prices/plan-prices.controller'
+import { PlanPricesService } from './plan-prices/plan-prices.service'
 import { DlqService } from './dlq/dlq.service'
+import { OpsPaymentsController } from './payments/payments.controller'
+import { PaymentsService } from './payments/payments.service'
+import { StripeWebhookController } from './subscriptions/stripe-webhook.controller'
 import { OpsSubscriptionsController } from './subscriptions/subscriptions.controller'
 import { SubscriptionsService } from './subscriptions/subscriptions.service'
 import { ALERT_CHANNEL, WebhookAlertChannel } from './sync-health/alert-channel'
@@ -33,6 +41,10 @@ import { OpsTenantsService } from './tenants/tenants.service'
     OpsDlqController,
     OpsAgreementsController,
     OpsCatalogController,
+    OpsPlanPricesController,
+    OpsPaymentsController,
+    StripeWebhookController,
+    OpsCardReadersController,
   ],
   providers: [
     OpsAuthService,
@@ -44,6 +56,10 @@ import { OpsTenantsService } from './tenants/tenants.service'
     DlqService,
     AgreementsService,
     CatalogService,
+    PlanPricesService,
+    PaymentsService,
+    CardReadersService,
+    ReaderOrdersService,
     { provide: ALERT_CHANNEL, useClass: WebhookAlertChannel },
   ],
   // DevicesService is exported for tenant-admin/CAP-6 (AD-12: one enrolment
@@ -51,6 +67,7 @@ import { OpsTenantsService } from './tenants/tenants.service'
   // than reimplementing enrolment-code generation or fleet queries.
   // AgreementsService likewise: admin/agreement signs through the same service that ops publishes with (#132).
   // CatalogService (#153): operators curate the product directory, owners import from it.
-  exports: [DevicesService, AgreementsService, CatalogService],
+  // #286: card readers are registered from /ops, listed and ordered from /admin, and used from /pos.
+  exports: [DevicesService, AgreementsService, CatalogService, CardReadersService, ReaderOrdersService],
 })
 export class OpsModule {}

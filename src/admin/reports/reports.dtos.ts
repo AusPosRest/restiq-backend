@@ -62,6 +62,8 @@ export interface PaymentTenderRow {
 export interface PaymentCreditNoteRow {
   id: string
   amountMinor: number
+  // How the money went back; null on a note issued before this was recorded.
+  method: string | null
   reason: string
   createdAt: string
 }
@@ -86,6 +88,9 @@ export interface PaymentRow {
   // that predates that column, same "never null" posture as BillView.
   taxBreakdown: TaxBreakdownLineView[]
   totalMinor: number
+  // restiq-backend#241: the cash round-off settled on the bill (tenders sum
+  // to totalMinor + this); null when none. Not part of the GST figures.
+  roundOffMinor: number | null
   tenders: PaymentTenderRow[]
   creditNotes: PaymentCreditNoteRow[]
 }
@@ -96,12 +101,40 @@ export interface PaymentsTotals {
   discountMinor: number
   taxMinor: number
   totalMinor: number
+  // restiq-backend#241: sum of the bills' cash round-offs - tenderedMinor = totalMinor + roundOffMinor.
+  roundOffMinor: number
   tenderedMinor: number
   refundedMinor: number
+  // PE-33: totalMinor - refundedMinor, the one "sales" figure the owner
+  // dashboard shows too.
+  netMinor: number
 }
 
 export interface PaymentsListResult {
+  // The tenant's currency (INR/AUD) - every amount below is in it.
+  currency: string
   items: PaymentRow[]
   nextCursor: string | null
   totals: PaymentsTotals
+}
+
+// restiq-backend#288: top-selling items over the same filter as payments
+// (finalized bills, optional outlet and from/to on finalizedAt). One row per
+// item + portion (variant), or per combo for a combo's parent line.
+export interface TopItemRow {
+  // The menu item's id, or the combo's id on a combo row.
+  id: string
+  variantId: string | null
+  name: string
+  portionName: string | null
+  quantity: number
+  // Sum of each line's quantity x (unit price + modifiers) - the same figure
+  // the bill's subtotalMinor is built from (bill-core.ts's computeSubtotal),
+  // so before the bill-level discount and before refunds.
+  salesMinor: number
+}
+
+export interface TopItemsResult {
+  currency: string
+  items: TopItemRow[]
 }

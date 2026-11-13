@@ -15,6 +15,7 @@ export {
   isUniqueViolation,
   loadBill,
   loadTenantTaxProfile,
+  lockBill,
   refreshOpenBillTotals,
   toBillView,
 } from './bill-core'

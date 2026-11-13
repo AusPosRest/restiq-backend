@@ -5,9 +5,9 @@
 import { ConflictException, ForbiddenException, GoneException, Injectable, NotFoundException } from '@nestjs/common'
 import { randomInt } from 'node:crypto'
 import type { DiningTable, Guest, Outlet, Prisma, TableSession } from '../../generated/prisma/client'
-import { AttemptLimiter, AttemptRule, GuestPrincipal, RegionRegistryService, signGuestToken } from '../../platform'
+import { AttemptLimiter, AttemptRule, GuestPrincipal, liveSince, RegionRegistryService, signGuestToken } from '../../platform'
 import { isUniqueViolation, setGuestEntryContext, setTenantContext } from '../tenant-context'
-import { GuestSummary, JoinSessionDto, KioskSessionStartResult, OutletAvailability, SessionJoinResult, SessionStartResult, StartKioskSessionDto, StartSessionDto, TableSessionView } from './sessions.dtos'
+import { GuestSummary, JoinSessionDto, KioskSessionStartResult, OutletAvailability, SessionJoinResult, SessionStartResult, StartKioskSessionDto, StartSessionDto, TableSessionView, TableWelcomeView } from './sessions.dtos'
 
 type Tx = Prisma.TransactionClient
 
@@ -15,7 +15,13 @@ type Tx = Prisma.TransactionClient
 // product-designed timeout.
 const SESSION_IDLE_TTL_MS = 4 * 60 * 60 * 1000
 
+// CU-26: a session nobody has ordered from and nobody has touched (no guest
+// joined, no cart line added) for this long is abandoned - the next guest to
+// scan starts afresh instead of being asked for a stranger's PIN.
+const ABANDONED_AFTER_MS = 30 * 60 * 1000
+
 const CAPABILITY_KEY = 'qr_ordering'
+const TABLE_BUSY_MESSAGE = 'This table already has an order with our staff - please ask your server to add to it'
 const KIOSK_CAPABILITY_KEY = 'kiosk'
 const KIOSK_STARTER = 'Kiosk'
 const UNAVAILABLE_MESSAGE = 'QR ordering is not available for this table right now - please ask a staff member for help'
@@ -85,6 +91,32 @@ export function isSessionInactive(session: TableSession): boolean {
   return session.status !== 'open' || session.expiresAt.getTime() <= Date.now()
 }
 
+async function isAbandoned(tx: Tx, session: TableSession): Promise<boolean> {
+  const [orders, lastGuest, lastLine] = await Promise.all([
+    tx.order.count({ where: { sessionId: session.id } }),
+    tx.guest.findFirst({ where: { sessionId: session.id }, orderBy: { joinedAt: 'desc' }, select: { joinedAt: true } }),
+    tx.cartLine.findFirst({ where: { sessionId: session.id }, orderBy: { createdAt: 'desc' }, select: { createdAt: true } }),
+  ])
+  if (orders > 0) return false
+  const lastActivity = Math.max(session.createdAt.getTime(), lastGuest?.joinedAt.getTime() ?? 0, lastLine?.createdAt.getTime() ?? 0)
+  return Date.now() - lastActivity > ABANDONED_AFTER_MS
+}
+
+/**
+ * CU-21: a table with a live order that no open QR session at the table owns
+ * (staff opened it, or it was left over from an ended session) can't take a QR
+ * order - one live order per table. Said up front, before a guest builds a
+ * cart, rather than at "Place order".
+ */
+async function isTableBusy(tx: Tx, tenantId: string, tableId: string): Promise<boolean> {
+  // #230: an order opened before the live window is a leftover, not a busy table.
+  const live = await tx.order.findFirst({ where: { tenantId, tableId, status: { not: 'closed' }, createdAt: { gte: liveSince() } }, select: { sessionId: true } })
+  if (!live) return false
+  if (!live.sessionId) return true
+  const session = await tx.tableSession.findUnique({ where: { id: live.sessionId } })
+  return !session || session.tableId !== tableId || isSessionInactive(session)
+}
+
 @Injectable()
 export class GuestSessionsService {
   constructor(
@@ -96,7 +128,7 @@ export class GuestSessionsService {
     return this.registry.planeFor(this.registry.homeRegion())
   }
 
-  async checkAvailability(outletId: string): Promise<OutletAvailability> {
+  async checkAvailability(outletId: string, tableId?: string): Promise<OutletAvailability> {
     const plane = this.plane()
     return plane.$transaction(async (tx) => {
       await setGuestEntryContext(tx)
@@ -116,6 +148,15 @@ export class GuestSessionsService {
       if (!capability?.enabled) {
         return { available: false, reason: 'qr_ordering_disabled' }
       }
+      if (tableId) {
+        const table = await tx.diningTable.findUnique({ where: { id: tableId }, include: { floor: true } })
+        if (!table || table.tenantId !== outlet.tenantId || table.floor.outletId !== outletId) {
+          return { available: false, reason: 'not_found' }
+        }
+        if (await isTableBusy(tx, outlet.tenantId, tableId)) {
+          return { available: false, reason: 'table_busy' }
+        }
+      }
       return { available: true }
     })
   }
@@ -130,14 +171,17 @@ export class GuestSessionsService {
 
         const existing = await tx.tableSession.findFirst({ where: { tenantId: outlet.tenantId, tableId: dto.tableId, status: 'open' } })
         if (existing) {
-          if (!isSessionInactive(existing)) {
+          if (!isSessionInactive(existing) && !(await isAbandoned(tx, existing))) {
             throw new ConflictException({ code: 'session_already_open', message: 'This table already has an open session - join it with its PIN instead' })
           }
-          // Idle-expired (still 'open', past expiresAt) - nothing flips its
-          // status on a timer, and table_sessions_one_open_per_table (a
-          // partial unique index on status = 'open') would otherwise reject
+          // Idle-expired (still 'open', past expiresAt) or abandoned - nothing
+          // flips its status on a timer, and table_sessions_one_open_per_table
+          // (a partial unique index on status = 'open') would otherwise reject
           // the new row below even though this one is no longer live.
           await tx.tableSession.update({ where: { id: existing.id }, data: { status: 'closed', closedAt: new Date() } })
+        }
+        if (await isTableBusy(tx, outlet.tenantId, dto.tableId)) {
+          throw new ConflictException({ code: 'table_has_active_order', message: TABLE_BUSY_MESSAGE })
         }
 
         const pin = generatePin()
@@ -238,9 +282,14 @@ export class GuestSessionsService {
     })
   }
 
-  async joinSession(dto: JoinSessionDto): Promise<SessionJoinResult> {
-    // restiq-backend#171: wrong table-PIN guesses per table, shared across instances (was an in-memory Map).
-    const rules: AttemptRule[] = [{ key: `guest-join:table:${dto.outletId}:${dto.tableId}`, max: 10, windowSeconds: 15 * 60 }]
+  async joinSession(dto: JoinSessionDto, ip: string): Promise<SessionJoinResult> {
+    // restiq-backend#171: wrong table-PIN guesses, shared across instances (was an in-memory Map).
+    // restiq-backend#209 (SE-24): counted per guest address, so one prankster with the printed QR can't lock the
+    // table's real guests out; a looser per-table cap still stops guessing spread over many addresses.
+    const rules: AttemptRule[] = [
+      { key: `guest-join:ip:${dto.outletId}:${dto.tableId}:${ip}`, max: 10, windowSeconds: 15 * 60 },
+      { key: `guest-join:table:${dto.outletId}:${dto.tableId}`, max: 30, windowSeconds: 15 * 60 },
+    ]
     const plane = this.plane()
     return plane.$transaction(async (tx) => {
       const { outlet, table } = await resolveOutletAndTable(tx, dto.outletId, dto.tableId)
@@ -313,6 +362,28 @@ export class GuestSessionsService {
         throw new NotFoundException({ code: 'no_open_session', message: 'This table has no open session to close' })
       }
       await tx.tableSession.update({ where: { id: session.id }, data: { status: 'closed', closedAt: new Date() } })
+    })
+  }
+
+  /**
+   * CU-22/PE-24: names the restaurant, outlet and table for the welcome
+   * screen. A missing/deleted outlet, an inactive tenant (issue #117: never
+   * reveal lifecycle state) or a table of another outlet are all the same 404.
+   */
+  async getTableWelcome(outletId: string, tableId: string): Promise<TableWelcomeView> {
+    const notFound = new NotFoundException({ code: 'not_found', message: 'No such table' })
+    return this.plane().$transaction(async (tx) => {
+      await setGuestEntryContext(tx)
+      const outlet = await tx.outlet.findUnique({ where: { id: outletId } })
+      if (!outlet || outlet.deletedAt) throw notFound
+      await setTenantContext(tx, outlet.tenantId)
+      const [tenant, brand, table] = await Promise.all([
+        tx.tenant.findUnique({ where: { id: outlet.tenantId }, select: { status: true, deletedAt: true } }),
+        tx.brand.findUnique({ where: { id: outlet.brandId }, select: { name: true } }),
+        tx.diningTable.findFirst({ where: { id: tableId, tenantId: outlet.tenantId, floor: { outletId } }, select: { label: true } }),
+      ])
+      if (!tenant || tenant.status === 'inactive' || tenant.deletedAt || !table) throw notFound
+      return { restaurantName: brand?.name ?? outlet.name, outletName: outlet.name, tableLabel: table.label }
     })
   }
 }

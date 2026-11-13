@@ -5,6 +5,7 @@
 // future) must never win; a past/omitted effective_at is immediately
 // current. Extracted as a pure function (no Prisma) so the tiering logic is
 // unit-testable without a database.
+import { BadRequestException } from '@nestjs/common'
 import type { Prisma } from '../../generated/prisma/client'
 import type { PriceChannel } from '../../generated/prisma/client'
 
@@ -75,4 +76,22 @@ export async function resolveCurrentPrice(
     select: { id: true, outletId: true, channel: true, priceMinor: true, currency: true, effectiveAt: true, createdAt: true },
   })
   return pickCurrentPrice(rows, { channel: params.channel, outletId: params.outletId }, asOf)
+}
+
+/**
+ * CAP-2 success criterion: "an 86'd item shows unavailable and cannot be
+ * added" - checks the tenant-wide toggle (MenuItem.available) AND this
+ * outlet's override (ItemOutletOverride), the same two availability sources
+ * Tenant Admin's items.service.ts writes (admin/menu/items.service.ts's
+ * setAvailability/setOutletAvailability). Shared by the guest cart and the POS order lines
+ * (restiq-backend#208, SE-25) - never a per-caller copy of either.
+ */
+export async function assertItemAvailable(tx: Prisma.TransactionClient, outletId: string, item: { id: string; available: boolean }): Promise<void> {
+  if (!item.available) {
+    throw new BadRequestException({ code: 'item_unavailable', message: 'This item is currently unavailable' })
+  }
+  const override = await tx.itemOutletOverride.findUnique({ where: { itemId_outletId: { itemId: item.id, outletId } } })
+  if (override && !override.available) {
+    throw new BadRequestException({ code: 'item_unavailable', message: 'This item is currently unavailable' })
+  }
 }

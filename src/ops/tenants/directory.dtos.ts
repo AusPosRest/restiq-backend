@@ -1,26 +1,6 @@
 // Mutation payloads for Tenant Detail. Every one carries a required reason
 // (AD-6) - a reasonless mutation never reaches a service method.
-import { IsBoolean, IsEmail, IsNotEmpty, IsObject, IsOptional, IsString, MaxLength } from 'class-validator'
-
-export const CAPABILITY_KEYS = [
-  'tables_floor_plan',
-  'kot_kds',
-  'coursing',
-  'aggregators',
-  'reservations',
-  'self_order_qr',
-] as const
-export type CapabilityKey = (typeof CAPABILITY_KEYS)[number]
-
-/** Platform defaults; a tenant_capabilities row overrides its key. */
-export const CAPABILITY_DEFAULTS: Readonly<Record<CapabilityKey, boolean>> = {
-  tables_floor_plan: true,
-  kot_kds: true,
-  coursing: false,
-  aggregators: false,
-  reservations: false,
-  self_order_qr: false,
-}
+import { IsEmail, IsIn, IsNotEmpty, IsObject, IsOptional, IsString, MaxLength } from 'class-validator'
 
 class MutationDto {
   @IsString() @IsNotEmpty() @MaxLength(500)
@@ -44,11 +24,6 @@ export class UpdateTenantDto extends MutationDto {
   contactPhone?: string
 }
 
-export class ToggleCapabilityDto extends MutationDto {
-  @IsBoolean()
-  enabled!: boolean
-}
-
 export class UpdateBrandingDto extends MutationDto {
   // Flat string->string map; shape-checked in the service (class-validator
   // cannot express "every value is a string").
@@ -57,3 +32,9 @@ export class UpdateBrandingDto extends MutationDto {
 }
 
 export class ReasonDto extends MutationDto {}
+
+// #213: switch a tenant between Test and Live mode.
+export class SetModeDto extends MutationDto {
+  @IsIn(['test', 'live'])
+  mode!: 'test' | 'live'
+}

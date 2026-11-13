@@ -33,14 +33,15 @@
 // concrete default threshold value (still an open question there); this
 // story picks 20% of the bill's subtotal, the example the spec's own memlog
 // floated ("any discount over 20%") - see DISCOUNT_THRESHOLD_FRACTION.
-import { BadRequestException, ConflictException, ForbiddenException, Injectable, NotFoundException } from '@nestjs/common'
-import { ManagerApproval, ManagerAuthService, PosPrincipal, RegionRegistryService, uuidv7 } from '../../platform'
+import { BadGatewayException, BadRequestException, ConflictException, ForbiddenException, Injectable, NotFoundException } from '@nestjs/common'
+import Stripe from 'stripe'
+import { ManagerApproval, ManagerAuthService, PosPrincipal, RegionRegistryService, roleHasPermission, StripeService, uuidv7 } from '../../platform'
 import type { Replay } from '../sync/replay'
 import { setTenantContext } from '../tenant-context'
 import { linkedPeripheral, queueFor } from '../device-routing'
 import { localDateKey } from '../clock/clock.util'
 import { assertOwner, loadOrder } from '../orders/orders.service'
-import { buildInvoiceView, commitFinalize, createOrGetBillRecord, createTenderRecord, currencyForCountry, loadBill, loadTenantTaxProfile, refreshOpenBillTotals, toBillView } from './bill-core'
+import { buildInvoiceView, commitFinalize, createOrGetBillRecord, createTenderRecord, currencyForCountry, loadBill, loadTenantTaxProfile, lockBill, refreshOpenBillTotals, toBillView } from './bill-core'
 import { BillView, CreditNoteLineView, CreditNoteView, FinalizeBillDto, InvoiceView, PaymentHistoryEntry, PaymentHistoryView, PaymentMethodTotal, PrintJobView, RefundBillDto } from './bills.dtos'
 import type { Prisma } from '../../generated/prisma/client'
 
@@ -73,6 +74,7 @@ function toCreditNoteView(note: CreditNoteWithLines, pricesIncludeTax: boolean):
     subtotalMinor: Number(note.subtotalMinor),
     taxMinor: Number(note.taxMinor),
     totalMinor: pricesIncludeTax ? Number(note.subtotalMinor) : Number(note.subtotalMinor + note.taxMinor),
+    method: note.method,
     createdAt: note.createdAt.toISOString(),
     lines: note.lines.map(toCreditNoteLineView),
   }
@@ -83,6 +85,7 @@ export class BillsService {
   constructor(
     private readonly registry: RegionRegistryService,
     private readonly managerAuth: ManagerAuthService,
+    private readonly stripe: StripeService,
   ) {}
 
   private plane() {
@@ -109,7 +112,10 @@ export class BillsService {
     return plane.$transaction(async (tx) => {
       await setTenantContext(tx, staff.tenantId)
       const order = await loadOrder(tx, staff.tenantId, orderId)
-      await assertOwner(tx, order, staff)
+      // restiq-backend#210 (SE-23): waiter takes, cashier settles. Anyone who
+      // may settle bills can open the bill for someone else's order (finalize
+      // is not owner-gated either); everyone else still needs to own it.
+      if (!roleHasPermission(staff.role, 'settle_bills')) await assertOwner(tx, order, staff)
 
       const { bill, created } = await createOrGetBillRecord(tx, {
         tenantId: staff.tenantId,
@@ -231,7 +237,10 @@ export class BillsService {
       const job = await tx.printJob.create({
         data: { id: uuidv7(), tenantId: staff.tenantId, outletId: bill.outletId, billId, targetDeviceId, payload: payload as unknown as Prisma.InputJsonValue },
       })
-      return toPrintJobView(job)
+      // restiq-backend#210 (CU-18): the outlet-wide queue is drained only by an active printer not linked to another till.
+      const printerAvailable =
+        targetDeviceId !== null || (await tx.device.count({ where: { tenantId: staff.tenantId, outletId: bill.outletId, type: 'printer', status: 'active', pairedPosId: null } })) > 0
+      return { ...toPrintJobView(job), printerAvailable }
     })
   }
 
@@ -281,6 +290,9 @@ export class BillsService {
     const plane = this.plane()
     return plane.$transaction(async (tx) => {
       await setTenantContext(tx, staff.tenantId)
+      // SE-6: a double-tapped Finalize waits here and then gets 409
+      // already_finalized, instead of deadlocking on the tender/counter writes.
+      await lockBill(tx, billId)
       const bill = await refreshOpenBillTotals(tx, await loadBill(tx, staff.tenantId, billId))
       if (bill.status === 'finalized') {
         throw new ConflictException({ code: 'already_finalized', message: 'This bill has already been finalised' })
@@ -304,7 +316,24 @@ export class BillsService {
         }
       }
 
+      // restiq-backend#208 (PE-17): cash goes into a drawer, so it needs an
+      // open shift at this outlet - otherwise the cash-up can never reconcile it.
+      // Not on a replay (restiq-backend#185): the hub already took the cash
+      // offline, and shifts are not synced ops yet, so refusing it loses a real sale.
+      if (!replay && dto.tenders.some((t) => t.method === 'cash')) {
+        const openShift = await tx.shift.findFirst({ where: { outletId: bill.outletId, closedAt: null }, select: { id: true } })
+        if (!openShift) {
+          throw new ConflictException({ code: 'shift_not_open', message: 'Open a shift with your starting cash float before taking cash' })
+        }
+      }
+
       for (const [i, tender] of dto.tenders.entries()) {
+        if (tender.tenderedMinor !== undefined && (tender.method !== 'cash' || tender.tenderedMinor < tender.amountMinor)) {
+          throw new BadRequestException({
+            code: 'validation_failed',
+            message: tender.method === 'cash' ? 'The cash handed over cannot be less than the cash tender' : 'Only a cash tender records the cash handed over',
+          })
+        }
         await createTenderRecord(tx, {
           replay: replay && { id: replay.tenderIds[i], at: replay.at },
           tenantId: staff.tenantId,
@@ -313,6 +342,7 @@ export class BillsService {
           amountMinor: BigInt(tender.amountMinor),
           riskAcknowledged: tender.riskAcknowledged,
           reference: tender.method === 'external' ? tender.reference?.trim() : undefined,
+          tenderedMinor: tender.tenderedMinor !== undefined ? BigInt(tender.tenderedMinor) : undefined,
         })
       }
 
@@ -345,15 +375,27 @@ export class BillsService {
    * Bill" success criterion structurally, not just by convention.
    */
   async refund(staff: PosPrincipal, billId: string, dto: RefundBillDto): Promise<CreditNoteView> {
+    if (!dto.managerPin) {
+      if (!roleHasPermission(staff.role, 'refunds')) {
+        throw new ForbiddenException({ code: 'forbidden', message: 'Your role cannot do this' })
+      }
+      // Managers still need PIN approval; preserve the existing validation error.
+      throw new BadRequestException({ code: 'validation_failed', message: 'managerPin must be longer than or equal to 1 characters; managerPin must be a string' })
+    }
+    const managerPin = dto.managerPin
     const plane = this.plane()
     return plane.$transaction(async (tx) => {
       await setTenantContext(tx, staff.tenantId)
+      // SE-4: concurrent refunds of one bill are serialised on its row lock,
+      // so each one sees every earlier credit note before checking what is
+      // still refundable.
+      await lockBill(tx, billId)
       const bill = await refreshOpenBillTotals(tx, await loadBill(tx, staff.tenantId, billId))
       if (bill.status !== 'finalized') {
         throw new ConflictException({ code: 'bill_not_finalized', message: 'Only a finalized bill can be refunded' })
       }
 
-      const orderLines = await tx.orderLine.findMany({ where: { orderId: bill.orderId }, include: { modifiers: true } })
+      const orderLines = await tx.orderLine.findMany({ where: { orderId: bill.orderId, voidedAt: null }, include: { modifiers: true } })
       const orderLineById = new Map(orderLines.map((l) => [l.id, l]))
 
       // Sum every earlier credit note's lines for this bill so a line can
@@ -362,7 +404,12 @@ export class BillsService {
       // the same units.
       const priorLines = await tx.creditNoteLine.findMany({ where: { creditNote: { originalBillId: billId } } })
       const refundedSoFar = new Map<string, number>()
-      for (const l of priorLines) refundedSoFar.set(l.orderLineId, (refundedSoFar.get(l.orderLineId) ?? 0) + l.quantity)
+      let priorGrossMinor = 0n
+      for (const l of priorLines) {
+        refundedSoFar.set(l.orderLineId, (refundedSoFar.get(l.orderLineId) ?? 0) + l.quantity)
+        // Gross, not amountMinor - a line's amount is net of the discount (#221).
+        priorGrossMinor += l.unitPriceMinor * BigInt(l.quantity)
+      }
 
       const targets =
         dto.lines ??
@@ -390,7 +437,7 @@ export class BillsService {
         }
       }
 
-      let subtotalMinor = 0n
+      let grossMinor = 0n
       const lineData: { orderLineId: string; quantity: number; unitPriceMinor: bigint; amountMinor: bigint }[] = []
       for (const target of targets) {
         const line = orderLineById.get(target.orderLineId)
@@ -410,26 +457,47 @@ export class BillsService {
         const modifiersTotal = line.modifiers.reduce((sum, m) => sum + m.priceMinor, 0n)
         const unitPriceMinor = line.unitPriceMinor + modifiersTotal
         const amountMinor = unitPriceMinor * BigInt(target.quantity)
-        subtotalMinor += amountMinor
+        grossMinor += amountMinor
+        // SE-3: count this target against the line before the next one is
+        // checked, so naming the same line twice can't refund it twice.
+        refundedSoFar.set(target.orderLineId, (refundedSoFar.get(target.orderLineId) ?? 0) + target.quantity)
         lineData.push({ orderLineId: target.orderLineId, quantity: target.quantity, unitPriceMinor, amountMinor })
       }
 
-      // Correct tax reversal (CAP-9, updated for issue #103's real tax
-      // engine): proportional to the bill's own actual tax rate - taken from
-      // the bill's own subtotalMinor/taxMinor ratio rather than
-      // re-deriving a rate from the tenant's (possibly-since-changed) tax
-      // registration, the same allocation guest/bills' BillShare split
-      // already uses for the identical reason (bills.service.ts here has no
-      // sibling to that file's own comment, so it's restated: this is the
-      // correct inverse of whatever rate actually produced bill.taxMinor,
-      // composition scheme's 0% and AU's inclusive GST included, without
-      // this module needing to know which one applied).
-      const taxMinor = bill.subtotalMinor === 0n ? 0n : (subtotalMinor * bill.taxMinor) / bill.subtotalMinor
+      // SE-1: refund what was actually paid. The lines above are priced
+      // gross (before the bill discount); the credit note's subtotal is that
+      // gross pro-rated by the bill's discount, and its tax pro-rated by the
+      // bill's own stored tax (already on the discounted value - SE-2), so
+      // composition's 0% and AU's inclusive GST need no special case here.
+      // Both are allocated cumulatively - everything refunded so far,
+      // including this note, minus what earlier notes already took, each
+      // rounded down - so partial refunds never add up to more than was
+      // paid, and refunding the whole bill returns exactly what was paid.
+      const billNetMinor = bill.subtotalMinor - (bill.discountMinor ?? 0n)
+      const prorate = (cumGross: bigint, of: bigint) => (bill.subtotalMinor === 0n ? 0n : (cumGross * of) / bill.subtotalMinor)
+      const prior = await tx.creditNote.aggregate({ where: { originalBillId: billId }, _sum: { subtotalMinor: true, taxMinor: true } })
+      const cumGrossMinor = priorGrossMinor + grossMinor
+      const maxZero = (n: bigint) => (n > 0n ? n : 0n)
+      const subtotalMinor = maxZero(prorate(cumGrossMinor, billNetMinor) - (prior._sum.subtotalMinor ?? 0n))
+      const taxMinor = maxZero(prorate(cumGrossMinor, bill.taxMinor) - (prior._sum.taxMinor ?? 0n))
+
+      // restiq-backend#221: each line's amount is its share of that net
+      // subtotal (gross-weighted, rounded down), the last line taking the
+      // remainder, so the lines always add up to the note's subtotal.
+      let allocatedMinor = 0n
+      lineData.forEach((l, i) => {
+        l.amountMinor = i === lineData.length - 1 ? subtotalMinor - allocatedMinor : grossMinor === 0n ? 0n : (subtotalMinor * l.amountMinor) / grossMinor
+        allocatedMinor += l.amountMinor
+      })
+
+      // Default: the bill's main tender - its largest, earliest on a tie.
+      const mainTender = bill.tenders.reduce<(typeof bill.tenders)[number] | null>((best, t) => (!best || t.amountMinor > best.amountMinor ? t : best), null)
+      const method = dto.method ?? mainTender?.method ?? null
 
       // Refund is unconditionally gated (unlike finalize()'s above-threshold
       // discount) - validate the refund request itself first (cheap), then
       // spend a manager-PIN check only on a request that's actually valid.
-      const approval = await this.managerAuth.authorize('refund', staff.tenantId, bill.outletId, dto.managerPin, dto.reason, staff.id)
+      const approval = await this.managerAuth.authorize('refund', staff.tenantId, bill.outletId, managerPin, dto.reason, staff.id)
 
       const created = await tx.creditNote.create({
         data: {
@@ -441,6 +509,7 @@ export class BillsService {
           createdByStaffId: staff.id,
           subtotalMinor,
           taxMinor,
+          method,
           lines: {
             create: lineData.map((l) => ({
               id: uuidv7(),
@@ -455,11 +524,67 @@ export class BillsService {
         include: CREDIT_NOTE_INCLUDE,
       })
 
+      const view = toCreditNoteView(created, bill.pricesIncludeTax)
+      // #284/#286: a card refund on a bill paid through Stripe (on the guest's phone, or on a card reader)
+      // goes back through Stripe. Inside this transaction on purpose - if Stripe refuses, the credit note
+      // above is rolled back.
+      if (method === 'card_online' || method === 'card_terminal') await this.refundToCard(tx, staff.tenantId, billId, created.id, BigInt(view.totalMinor))
+
       await this.managerAuth.recordApproval(tx, approval, { actorId: staff.id, actorEmail: staff.name, occurredAt: new Date() })
 
-      return toCreditNoteView(created, bill.pricesIncludeTax)
+      return view
     })
   }
+
+  /**
+   * #284: refunds `amountMinor` to the card(s) this bill was paid with through Stripe - on the guest's
+   * phone (card_online) or on a card reader (card_terminal, #286). Both rails count whichever card method
+   * the refund names: the till's one "Card" choice sends card_online for a reader-paid bill too. Nothing to
+   * do for a bill with none (e.g. a Test-mode or simulated-terminal card).
+   * ponytail: what each payment can still give back is read live from Stripe and the refund goes to the
+   * fullest first, split over several only when one can't cover it. Ceiling: a split refund is several
+   * Stripe refunds - if a later one fails, the earlier ones stand while this credit note is not written
+   * (a retry sees the smaller refundable balance). Record refunds per tender if that ever bites.
+   */
+  private async refundToCard(tx: Prisma.TransactionClient, tenantId: string, billId: string, creditNoteId: string, amountMinor: bigint): Promise<void> {
+    const intents = await tx.paymentIntent.findMany({ where: { billId, provider: 'stripe', rail: { in: ['card_online', 'card_terminal'] }, tender: { isNot: null } }, orderBy: { createdAt: 'asc' } })
+    const refs = intents.flatMap((i) => (i.providerRef ? [i.providerRef] : []))
+    if (refs.length === 0 || amountMinor <= 0n) return
+    const stripeAccount = (await tx.tenantPaymentAccount.findUnique({ where: { tenantId } }))?.stripeAccountId
+    if (!stripeAccount) throw refundFailed('This restaurant has no card payment account to refund from')
+    try {
+      const stripe = this.stripe.client()
+      const payments = await Promise.all(
+        refs.map(async (ref) => {
+          const pi = await stripe.paymentIntents.retrieve(ref, { expand: ['latest_charge'] }, { stripeAccount })
+          const charge = typeof pi.latest_charge === 'object' ? pi.latest_charge : null
+          // Stripe refuses refund_application_fee on a charge that carried no platform fee (fee 0).
+          return { id: pi.id, refundable: BigInt(pi.amount_received - (charge?.amount_refunded ?? 0)), hadFee: (pi.application_fee_amount ?? 0) > 0 }
+        }),
+      )
+      payments.sort((a, b) => (b.refundable > a.refundable ? 1 : b.refundable < a.refundable ? -1 : 0))
+      const available = payments.reduce((sum, p) => sum + p.refundable, 0n)
+      if (available < amountMinor) throw refundFailed(`Only ${available} can still go back to the card`)
+      let due = amountMinor
+      for (const [i, payment] of payments.entries()) {
+        if (due === 0n) break
+        const part = payment.refundable < due ? payment.refundable : due
+        if (part === 0n) continue
+        await stripe.refunds.create(
+          { payment_intent: payment.id, amount: Number(part), ...(payment.hadFee ? { refund_application_fee: true } : {}), metadata: { creditNoteId } },
+          { stripeAccount, idempotencyKey: i === 0 ? creditNoteId : `${creditNoteId}:${payment.id}` },
+        )
+        due -= part
+      }
+    } catch (error) {
+      if (error instanceof Stripe.errors.StripeError) throw refundFailed(error.message)
+      throw error
+    }
+  }
+}
+
+function refundFailed(message: string): BadGatewayException {
+  return new BadGatewayException({ code: 'refund_failed', message })
 }
 
 function toPrintJobView(job: { id: string; billId: string; payload: unknown; createdAt: Date; printedAt: Date | null }): PrintJobView {

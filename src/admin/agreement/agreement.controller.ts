@@ -1,5 +1,5 @@
-import { Body, Controller, Get, HttpCode, Param, ParseUUIDPipe, Post } from '@nestjs/common'
-import { AgreementsService, SignAgreementDto } from '../../ops'
+import { Body, Controller, Get, Header, HttpCode, Param, ParseUUIDPipe, Post, StreamableFile } from '@nestjs/common'
+import { AgreementsService, pdfResponse, SignAgreementDto } from '../../ops'
 import type { AgreementSignatureView, OwnerAgreementView } from '../../ops'
 import { AdminPrincipal, CurrentOwner } from '../../platform'
 
@@ -13,6 +13,14 @@ export class AdminAgreementController {
   @Get()
   get(@CurrentOwner() owner: AdminPrincipal): Promise<OwnerAgreementView> {
     return this.agreements.ownerView(owner)
+  }
+
+  // The PDF to read before signing; the browser's own viewer shows it.
+  @Get(':versionId/file')
+  @Header('X-Content-Type-Options', 'nosniff')
+  @Header('Cache-Control', 'private, no-store')
+  async file(@Param('versionId', ParseUUIDPipe) versionId: string): Promise<StreamableFile> {
+    return pdfResponse(await this.agreements.file(versionId))
   }
 
   @Post(':versionId/sign')

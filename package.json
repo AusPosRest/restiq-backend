@@ -3,6 +3,7 @@
   "version": "0.1.0",
   "description": "Restiq API",
   "main": "dist/main.js",
+  "packageManager": "pnpm@10.34.4",
   "scripts": {
     "dev": "nest start --watch",
     "build": "nest build",
@@ -15,7 +16,8 @@
     "db:migrate": "prisma migrate deploy",
     "seed:operator": "tsx scripts/seed-operator.ts",
     "seed:sync-health": "tsx scripts/seed-sync-health.ts",
-    "seed:dlq": "tsx scripts/seed-dlq.ts"
+    "seed:dlq": "tsx scripts/seed-dlq.ts",
+    "stripe:check": "node scripts/stripe-check.ts"
   },
   "repository": {
     "type": "git",
@@ -41,7 +43,8 @@
     "multer": "2.2.0",
     "prisma": "7.9.1",
     "reflect-metadata": "^0.2.2",
-    "rxjs": "^7.8.2"
+    "rxjs": "^7.8.2",
+    "stripe": "23.1.0"
   },
   "devDependencies": {
     "@eslint/js": "^10.0.1",

@@ -51,11 +51,14 @@ export class OpsAuthService {
       action: 'operator.login.succeeded',
       occurredAt: new Date(),
     })
+    const principal: OpsPrincipal = { id: user.id, email: user.email, sessionVersion: user.sessionVersion }
     const operator: OpsPrincipal = { id: user.id, email: user.email }
-    return { token: signOpsToken(operator), operator }
+    return { token: signOpsToken(principal), operator }
   }
 
+  // restiq-backend#203: ends every session this operator holds (all browsers) by moving their sessionVersion on.
   async logout(operator: OpsPrincipal): Promise<void> {
+    await this.prisma.client.operatorUser.update({ where: { id: operator.id }, data: { sessionVersion: { increment: 1 } } })
     await this.audit.record({
       actorId: operator.id,
       actorEmail: operator.email,

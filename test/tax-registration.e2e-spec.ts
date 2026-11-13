@@ -17,6 +17,7 @@ interface TaxRegistrationBody {
   compositionScheme: boolean
   gstRegistered: boolean
   gstRatePercent: number | null
+  gstSplitRounding: 'exact_total' | 'equal_half_up' | 'equal_half_even'
 }
 interface ErrorBody {
   error: { code: string; message: string }
@@ -176,6 +177,7 @@ describe('/admin/v1/tax-registration', () => {
     expect(body.compositionScheme).toBe(false)
     expect(body.gstRegistered).toBe(true)
     expect(body.gstRatePercent).toBeNull()
+    expect(body.gstSplitRounding).toBe('exact_total')
   })
 
   it('PUT merges caller-writable fields into the existing TenantTaxRegistration row', async () => {
@@ -254,6 +256,32 @@ describe('/admin/v1/tax-registration', () => {
 
     const db = await prisma.tenantTaxRegistration.findFirstOrThrow({ where: { tenantId } })
     expect(Number(db.gstRatePercent)).toBe(12)
+  })
+
+  it('PUT round-trips gstSplitRounding and keeps it when other fields change (#244)', async () => {
+    const { tenantId, token } = await createOwner(prisma)
+    await seedTenantTaxRegistration(prisma, tenantId, { registrationNumber: '22AAACR1122A1ZZ', legalEntityName: 'Round Co', taxProfile: 'India GST - CGST/SGST split' })
+    expect((await prisma.tenantTaxRegistration.findFirstOrThrow({ where: { tenantId } })).gstSplitRounding).toBe('exact_total')
+
+    const res = await authed(request(httpServer).put('/admin/v1/tax-registration'), token).send({ gstSplitRounding: 'equal_half_even' })
+    expect(res.status).toBe(200)
+    expect((res.body as TaxRegistrationBody).gstSplitRounding).toBe('equal_half_even')
+
+    await authed(request(httpServer).put('/admin/v1/tax-registration'), token).send({ legalEntityName: 'Round Co 2' })
+    const getRes = await authed(request(httpServer).get('/admin/v1/tax-registration'), token)
+    expect((getRes.body as TaxRegistrationBody).gstSplitRounding).toBe('equal_half_even')
+    expect((await prisma.tenantTaxRegistration.findFirstOrThrow({ where: { tenantId } })).gstSplitRounding).toBe('equal_half_even')
+  })
+
+  it('rejects an unknown gstSplitRounding with 400 and leaves the setting unchanged (#244)', async () => {
+    const { tenantId, token } = await createOwner(prisma)
+    await seedTenantTaxRegistration(prisma, tenantId, { registrationNumber: '22AAACQ1122A1ZZ', legalEntityName: 'Round Co', taxProfile: 'India GST' })
+    for (const bad of ['round_down', '', 1, 'EXACT_TOTAL']) {
+      const res = await authed(request(httpServer).put('/admin/v1/tax-registration'), token).send({ gstSplitRounding: bad })
+      expect(res.status).toBe(400)
+      expect((res.body as ErrorBody).error.code).toBe('validation_failed')
+    }
+    expect((await prisma.tenantTaxRegistration.findFirstOrThrow({ where: { tenantId } })).gstSplitRounding).toBe('exact_total')
   })
 
   it('rejects gstRatePercent when gstRegistered is false', async () => {

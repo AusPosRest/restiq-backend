@@ -16,11 +16,13 @@
 // scoped barrel (src/pos/bills/index.ts - see eslint.config.mjs's
 // '!**/pos/bills' exception to the pos-module-boundary rule) with no cycle.
 import { BadRequestException, ConflictException, NotFoundException } from '@nestjs/common'
+import { fireOnSend } from '../../kitchen'
 import type { Prisma } from '../../generated/prisma/client'
-import { paymentsSimulatorEnabled, uuidv7 } from '../../platform'
+import { isTestSale, paymentsSimulatorFor, uuidv7 } from '../../platform'
 import { BillView, InvoiceCreditNoteView, InvoiceLineView, InvoiceView, TaxBreakdownLineView, TenderView } from './bills.dtos'
 import type { Replay } from '../sync/replay'
-import { computeTax, TaxBreakdownLine, TaxCountry, TaxResult } from './tax'
+import { placeOfSupplyFromGstin, RESTAURANT_SAC } from './gst-place-of-supply'
+import { computeTax, GstSplitRounding, TaxCountry, TaxResult } from './tax'
 
 type Tx = Prisma.TransactionClient
 
@@ -34,6 +36,7 @@ export interface TenantTaxProfile {
   compositionScheme: boolean
   gstRegistered: boolean
   gstRatePercent: number | null
+  gstSplitRounding: GstSplitRounding
   legalEntityName: string | null
   registrationNumber: string | null
   fssaiLicense: string | null
@@ -73,6 +76,7 @@ export async function loadTenantTaxProfile(tx: Tx, tenantId: string): Promise<Te
     compositionScheme: registration?.compositionScheme ?? false,
     gstRegistered: registration?.gstRegistered ?? true,
     gstRatePercent: registration?.gstRatePercent != null ? Number(registration.gstRatePercent) : null,
+    gstSplitRounding: registration?.gstSplitRounding ?? 'exact_total',
     legalEntityName: registration?.legalEntityName ?? tenant.name,
     registrationNumber: registration?.registrationNumber ?? null,
     fssaiLicense: registration?.fssaiLicense ?? null,
@@ -90,18 +94,26 @@ export async function loadTenantTaxProfile(tx: Tx, tenantId: string): Promise<Te
 // invoice built later must read the note that actually applied at billing
 // time, not one freshly recomputed against whatever the tenant's tax
 // registration says today.
+// gstSplitRounding (restiq-backend#244) is the CGST/SGST rule the lines were
+// computed with - snapshotted for the same reason, so a finalized bill keeps
+// reporting the rule it was billed under after the tenant changes it.
 interface StoredTaxBreakdown {
   lines: TaxBreakdownLineView[]
   notes: string[]
+  gstSplitRounding: GstSplitRounding | null
 }
 
-function toStoredTaxBreakdown(lines: TaxBreakdownLine[], notes: string[]): StoredTaxBreakdown {
-  return { lines: lines.map((l) => ({ label: l.label, ratePercent: l.ratePercent, amountMinor: Number(l.amountMinor) })), notes }
+function toStoredTaxBreakdown(tax: TaxResult): StoredTaxBreakdown {
+  return {
+    lines: tax.breakdown.map((l) => ({ label: l.label, ratePercent: l.ratePercent, amountMinor: Number(l.amountMinor) })),
+    notes: tax.notes,
+    gstSplitRounding: tax.gstSplitRounding,
+  }
 }
 
 function readStoredTaxBreakdown(taxBreakdown: Prisma.JsonValue | null): StoredTaxBreakdown {
-  const stored = taxBreakdown as StoredTaxBreakdown | null
-  return { lines: stored?.lines ?? [], notes: stored?.notes ?? [] }
+  const stored = taxBreakdown as Partial<StoredTaxBreakdown> | null
+  return { lines: stored?.lines ?? [], notes: stored?.notes ?? [], gstSplitRounding: stored?.gstSplitRounding ?? null }
 }
 
 export function isUniqueViolation(error: unknown): boolean {
@@ -111,7 +123,8 @@ export function isUniqueViolation(error: unknown): boolean {
 /**
  * Issue #103: the customer-payable total, aware of pricesIncludeTax. For an
  * exclusive-tax bill (IN), tax sits on top of subtotalMinor, so the total is
- * subtotal + tax - discount, same formula this module always used. For an
+ * subtotal + tax - discount, same formula this module always used - with
+ * taxMinor already computed on the discounted value (SE-2, commitFinalize). For an
  * inclusive-tax bill (AU), subtotalMinor IS already the tax-inclusive figure
  * (computeSubtotal() sums the order lines' own menu prices unchanged - it
  * has no country awareness of its own) and taxMinor is only how much of that
@@ -134,6 +147,8 @@ function toTenderView(t: BillWithTenders['tenders'][number]): TenderView {
     paymentIntentId: t.paymentIntentId,
     riskAcknowledged: t.riskAcknowledged,
     reference: t.reference,
+    tenderedMinor: t.tenderedMinor === null ? null : Number(t.tenderedMinor),
+    changeMinor: t.tenderedMinor === null ? null : Number(t.tenderedMinor - t.amountMinor),
     createdAt: t.createdAt.toISOString(),
   }
 }
@@ -151,10 +166,12 @@ export function toBillView(bill: BillWithTenders): BillView {
     // [] rather than null for a pre-migration bill that predates this
     // column, so callers never need a null check on top of an array one.
     taxBreakdown: readStoredTaxBreakdown(bill.taxBreakdown).lines,
+    gstSplitRounding: readStoredTaxBreakdown(bill.taxBreakdown).gstSplitRounding,
     pricesIncludeTax: bill.pricesIncludeTax,
     discountMinor: bill.discountMinor === null ? null : Number(bill.discountMinor),
     discountReason: bill.discountReason,
     totalMinor: Number(computeTotalMinor(bill.subtotalMinor, bill.taxMinor, discountMinor, bill.pricesIncludeTax)),
+    roundOffMinor: bill.roundOffMinor === null ? null : Number(bill.roundOffMinor),
     status: bill.status,
     createdByStaffId: bill.createdByStaffId,
     createdAt: bill.createdAt.toISOString(),
@@ -162,6 +179,18 @@ export function toBillView(bill: BillWithTenders): BillView {
     finalizedAt: bill.finalizedAt?.toISOString() ?? null,
     tenders: bill.tenders.map(toTenderView),
   }
+}
+
+/**
+ * SE-4/SE-6: takes the bill's row lock for the rest of the caller's
+ * transaction, so two concurrent refunds/finalises of the same bill run one
+ * after the other - the second then sees the first's committed credit note
+ * or status, instead of both passing their checks (or deadlocking on the
+ * tender/counter writes). Call it first, before anything reads the bill.
+ * RLS still applies, so another tenant's bill id locks nothing.
+ */
+export async function lockBill(tx: Tx, billId: string): Promise<void> {
+  await tx.$queryRaw`SELECT id FROM bills WHERE id = ${billId}::uuid FOR UPDATE`
 }
 
 export async function loadBill(tx: Tx, tenantId: string, billId: string): Promise<BillWithTenders> {
@@ -174,7 +203,8 @@ export async function loadBill(tx: Tx, tenantId: string, billId: string): Promis
 
 /** Sums an order's snapshotted lines (unit price + selected modifiers, times quantity) into subtotalMinor. */
 export async function computeSubtotal(tx: Tx, orderId: string): Promise<bigint> {
-  const lines = await tx.orderLine.findMany({ where: { orderId }, include: { modifiers: true } })
+  // restiq-backend#210: a voided line is no longer billed.
+  const lines = await tx.orderLine.findMany({ where: { orderId, voidedAt: null }, include: { modifiers: true } })
   let subtotal = 0n
   for (const line of lines) {
     const modifiersTotal = line.modifiers.reduce((sum, m) => sum + m.priceMinor, 0n)
@@ -225,18 +255,23 @@ export interface CreateOrGetBillResult {
  * comment) so it calls this directly after its own session/order-active
  * check.
  */
-async function computeBillTotals(tx: Tx, tenantId: string, orderId: string): Promise<{ subtotalMinor: bigint; tax: TaxResult }> {
-  const subtotalMinor = await computeSubtotal(tx, orderId)
+/** Tax on a taxable value (the subtotal, or the subtotal less a bill discount - SE-2) under the tenant's current tax registration. */
+async function computeTaxOn(tx: Tx, tenantId: string, taxableMinor: bigint): Promise<TaxResult> {
   const taxContext = await loadTenantTaxProfile(tx, tenantId)
-  const tax = computeTax({
+  return computeTax({
     country: taxContext.country,
     taxProfile: taxContext.taxProfile,
     compositionScheme: taxContext.compositionScheme,
     gstRegistered: taxContext.gstRegistered,
     gstRatePercent: taxContext.gstRatePercent,
-    subtotalMinor,
+    gstSplitRounding: taxContext.gstSplitRounding,
+    subtotalMinor: taxableMinor,
   })
-  return { subtotalMinor, tax }
+}
+
+async function computeBillTotals(tx: Tx, tenantId: string, orderId: string): Promise<{ subtotalMinor: bigint; tax: TaxResult }> {
+  const subtotalMinor = await computeSubtotal(tx, orderId)
+  return { subtotalMinor, tax: await computeTaxOn(tx, tenantId, subtotalMinor) }
 }
 
 /**
@@ -249,13 +284,14 @@ async function computeBillTotals(tx: Tx, tenantId: string, orderId: string): Pro
 export async function refreshOpenBillTotals(tx: Tx, bill: BillWithTenders): Promise<BillWithTenders> {
   if (bill.status !== 'open') return bill
   const { subtotalMinor, tax } = await computeBillTotals(tx, bill.tenantId, bill.orderId)
-  if (subtotalMinor === bill.subtotalMinor && tax.taxMinor === bill.taxMinor) return bill
+  // gstSplitRounding too (#244): a changed rule can leave taxMinor equal.
+  if (subtotalMinor === bill.subtotalMinor && tax.taxMinor === bill.taxMinor && tax.gstSplitRounding === readStoredTaxBreakdown(bill.taxBreakdown).gstSplitRounding) return bill
   return tx.bill.update({
     where: { id: bill.id },
     data: {
       subtotalMinor,
       taxMinor: tax.taxMinor,
-      taxBreakdown: toStoredTaxBreakdown(tax.breakdown, tax.notes) as unknown as Prisma.InputJsonValue,
+      taxBreakdown: toStoredTaxBreakdown(tax) as unknown as Prisma.InputJsonValue,
       pricesIncludeTax: tax.pricesIncludeTax,
     },
     include: BILL_INCLUDE,
@@ -287,7 +323,7 @@ export async function createOrGetBillRecord(tx: Tx, params: CreateBillParams): P
         orderId: params.orderId,
         subtotalMinor,
         taxMinor: tax.taxMinor,
-        taxBreakdown: toStoredTaxBreakdown(tax.breakdown, tax.notes) as unknown as Prisma.InputJsonValue,
+        taxBreakdown: toStoredTaxBreakdown(tax) as unknown as Prisma.InputJsonValue,
         pricesIncludeTax: tax.pricesIncludeTax,
         createdByStaffId: params.createdByStaffId,
       },
@@ -321,6 +357,8 @@ export async function createTenderRecord(
     riskAcknowledged?: boolean
     // External tenders only (issue #146) - the CHECK rejects it on any other method.
     reference?: string
+    // Cash only, >= amountMinor (restiq-backend#241) - the CHECK rejects anything else.
+    tenderedMinor?: bigint
     // Offline sync (restiq-backend#185): the hub's tender id and time.
     replay?: Replay
   },
@@ -336,6 +374,7 @@ export async function createTenderRecord(
       paymentIntentId: params.paymentIntentId ?? null,
       riskAcknowledged: params.riskAcknowledged ?? false,
       reference: params.reference ?? null,
+      tenderedMinor: params.tenderedMinor ?? null,
     },
   })
 }
@@ -383,7 +422,7 @@ export async function commitFinalize(tx: Tx, params: CommitFinalizeParams): Prom
 
   // #170: a tender written by the simulated terminal (while it was on)
   // collected no money - with the simulator off it can't settle a bill.
-  if (!paymentsSimulatorEnabled()) {
+  if (!(await paymentsSimulatorFor(tx, bill.tenantId))) {
     const simulated = await tx.tender.count({ where: { billId: bill.id, paymentIntent: { provider: 'simulated' } } })
     if (simulated > 0) {
       throw new ConflictException({
@@ -393,14 +432,39 @@ export async function commitFinalize(tx: Tx, params: CommitFinalizeParams): Prom
     }
   }
 
-  const totalMinor = computeTotalMinor(bill.subtotalMinor, bill.taxMinor, params.discountMinor ?? 0n, bill.pricesIncludeTax)
-  const tenderAgg = await tx.tender.aggregate({ where: { billId: bill.id }, _sum: { amountMinor: true } })
-  const tenderTotal = tenderAgg._sum.amountMinor ?? 0n
+  // SE-2: a discount given at the time of sale reduces the taxable value
+  // (IN GST s.15(3)(a); for AU the GST share is backed out of the discounted
+  // price), so the tax is recomputed on subtotal - discount and that figure
+  // is what gets stored - the total, invoice and refunds all read it.
+  const discountMinor = params.discountMinor ?? 0n
+  if (discountMinor > bill.subtotalMinor) {
+    throw new BadRequestException({ code: 'validation_failed', message: 'The discount cannot be more than the bill subtotal' })
+  }
+  const tax = discountMinor > 0n ? await computeTaxOn(tx, params.tenantId, bill.subtotalMinor - discountMinor) : null
+  const taxMinor = tax?.taxMinor ?? bill.taxMinor
+  const totalMinor = computeTotalMinor(bill.subtotalMinor, taxMinor, discountMinor, bill.pricesIncludeTax)
+  // restiq-backend#241 (Q28): the tenders cover the exact total, or the
+  // total with the cash part rounded per market rule - only the cash share
+  // (what is left after every other tender) is rounded, and the round-off is
+  // stored on the bill. The exact sum (round-off null) still settles, so an
+  // older client that adds the round-off back onto the cash keeps working.
+  const tenders = await tx.tender.findMany({ where: { billId: bill.id }, select: { method: true, amountMinor: true } })
+  const tenderTotal = tenders.reduce((sum, t) => sum + t.amountMinor, 0n)
+  const cashMinor = tenders.reduce((sum, t) => (t.method === 'cash' ? sum + t.amountMinor : sum), 0n)
+  let roundOffMinor: bigint | null = null
   if (tenderTotal !== totalMinor) {
-    throw new BadRequestException({
-      code: 'tender_mismatch',
-      message: `Tenders sum to ${tenderTotal} but the bill total is ${totalMinor}`,
-    })
+    const country = cashMinor > 0n ? (await tx.tenant.findUniqueOrThrow({ where: { id: params.tenantId }, select: { country: true } })).country : null
+    const cashRoundOff = country ? cashRoundOffMinor(totalMinor - (tenderTotal - cashMinor), country) : 0n
+    if (cashRoundOff === 0n || tenderTotal !== totalMinor + cashRoundOff) {
+      throw new BadRequestException({
+        code: 'tender_mismatch',
+        message:
+          cashRoundOff === 0n
+            ? `Tenders sum to ${tenderTotal} but the bill total is ${totalMinor}`
+            : `Tenders sum to ${tenderTotal} but the bill total is ${totalMinor} (${totalMinor + cashRoundOff} with the cash rounded)`,
+      })
+    }
+    roundOffMinor = cashRoundOff
   }
 
   // Reserve-then-commit (AD-14): the counter is touched only now, after
@@ -423,6 +487,11 @@ export async function commitFinalize(tx: Tx, params: CommitFinalizeParams): Prom
       billNumber: counter.lastNumber,
       discountMinor: params.discountMinor,
       discountReason: params.discountReason,
+      roundOffMinor,
+      ...(tax && {
+        taxMinor: tax.taxMinor,
+        taxBreakdown: toStoredTaxBreakdown(tax) as unknown as Prisma.InputJsonValue,
+      }),
       status: 'finalized',
       finalizedByStaffId: params.finalizedByStaffId,
       finalizedAt: params.finalizedAt ?? new Date(),
@@ -432,12 +501,34 @@ export async function commitFinalize(tx: Tx, params: CommitFinalizeParams): Prom
     throw new ConflictException({ code: 'already_finalized', message: 'This bill has already been finalised' })
   }
 
+  // Every finalize path sends unticketed lines in the settlement transaction.
+  // A failure anywhere in the transaction rolls the kitchen writes back too.
+  await fireOnSend(tx, { id: bill.orderId, tenantId: bill.tenantId, outletId: bill.outletId })
+
   // pos/CAP-2's comment on Order.status calls this out explicitly: "closed"
   // was a placeholder ahead of this exact story - finalising a Bill is what
   // actually closes the order, written directly (not through
   // orders.service.ts's FORWARD_TRANSITIONS-checked updateStatus) since that
   // guard is for staff-driven transitions, not this one.
   await tx.order.update({ where: { id: bill.orderId }, data: { status: 'closed' } })
+
+  // issue #189: a restaurant that is taking real money is live. The first
+  // finalised bill of a still-provisioning tenant flips it to active (the
+  // owner's Go live and ops Activate stay as the other ways in), audited once
+  // with the same action Go live writes.
+  const wentLive = await tx.tenant.updateMany({ where: { id: params.tenantId, status: 'provisioning' }, data: { status: 'active' } })
+  if (wentLive.count > 0) {
+    await tx.auditEvent.create({
+      data: {
+        tenantId: params.tenantId,
+        actorId: null,
+        actorEmail: 'system:first-sale',
+        action: 'tenant.went_live',
+        reason: 'First sale',
+        occurredAt: new Date(),
+      },
+    })
+  }
 
   return loadBill(tx, params.tenantId, bill.id)
 }
@@ -448,6 +539,18 @@ export async function commitFinalize(tx: Tx, params: CommitFinalizeParams): Prom
 // than read back.
 export function currencyForCountry(country: TaxCountry): string {
   return country === 'IN' ? 'INR' : 'AUD'
+}
+
+/**
+ * restiq-backend#241 (Q28): the one server-side cash rounding rule - cash due
+ * is settled to the nearest Rs 1 (IN) or 5c (AU), halves rounding up (same as
+ * restiq-web's src/lib/money.ts cashRoundOffMinor for INR). Returns the
+ * adjustment to add to what is due: -46 for 24046 paise, +4 for 8296.
+ */
+export function cashRoundOffMinor(dueMinor: bigint, country: TaxCountry): bigint {
+  if (dueMinor <= 0n) return 0n
+  const unit = country === 'IN' ? 100n : 5n
+  return ((dueMinor * 2n + unit) / (2n * unit)) * unit - dueMinor
 }
 
 /**
@@ -474,15 +577,17 @@ export async function buildInvoiceView(tx: Tx, tenantId: string, billId: string)
   const bill = await refreshOpenBillTotals(tx, await loadBill(tx, tenantId, billId))
   const isFinalized = bill.status === 'finalized'
 
-  const [orderLines, outlet, taxContext, creditNotes] = await Promise.all([
+  const [orderLines, outlet, taxContext, creditNotes, order, mode] = await Promise.all([
     tx.orderLine.findMany({
-      where: { orderId: bill.orderId },
+      where: { orderId: bill.orderId, voidedAt: null },
       include: { item: true, variant: true, combo: true, modifiers: { include: { modifier: true } } },
       orderBy: { createdAt: 'asc' },
     }),
     tx.outlet.findUniqueOrThrow({ where: { id: bill.outletId }, select: { name: true, address: true } }),
     loadTenantTaxProfile(tx, tenantId),
     tx.creditNote.findMany({ where: { originalBillId: bill.id }, orderBy: { createdAt: 'asc' } }),
+    tx.order.findUniqueOrThrow({ where: { id: bill.orderId }, select: { tokenNumber: true } }),
+    tx.tenant.findUniqueOrThrow({ where: { id: tenantId }, select: { liveSince: true } }),
   ])
 
   const unitOf = (line: (typeof orderLines)[number]) => line.unitPriceMinor + line.modifiers.reduce((sum, m) => sum + m.priceMinor, 0n)
@@ -500,7 +605,8 @@ export async function buildInvoiceView(tx: Tx, tenantId: string, billId: string)
         return `${perCombo > 1 ? `${perCombo}× ` : ''}${c.item?.name ?? ''}${extras.length ? ` (${extras.join(', ')})` : ''}`
       })
       return {
-        name: line.combo?.name ?? line.item?.name ?? '',
+        // PE-18/CU-10: "Biryani (Half)" - two portions at two prices must not print as two identical names.
+        name: line.combo?.name ?? `${line.item?.name ?? ''}${line.variant ? ` (${line.variant.name})` : ''}`,
         quantity: line.quantity,
         unitPriceMinor: Number(lineTotal / qty),
         lineTotalMinor: Number(lineTotal),
@@ -515,17 +621,25 @@ export async function buildInvoiceView(tx: Tx, tenantId: string, billId: string)
     // bills.service.ts's toCreditNoteView: an AU/inclusive bill's refunded
     // subtotal already contains its own tax.
     amountMinor: Number(bill.pricesIncludeTax ? note.subtotalMinor : note.subtotalMinor + note.taxMinor),
+    method: note.method,
     reason: note.reason,
     createdAt: note.createdAt.toISOString(),
   }))
 
   const { lines: taxBreakdown, notes } = readStoredTaxBreakdown(bill.taxBreakdown)
   const discountMinor = bill.discountMinor ?? 0n
+  const isIndia = taxContext.country === 'IN'
+  // PE-18: a GST-registered Indian restaurant issues a "Tax Invoice"; a
+  // composition dealer may not, and issues a "Bill of Supply" instead.
+  const finalTitle = isIndia ? (taxContext.compositionScheme ? 'Bill of Supply' : 'Tax Invoice') : taxContext.gstRegistered ? 'Tax Invoice' : 'Receipt'
+  const chargesGst = isIndia && !taxContext.compositionScheme
 
   return {
     status: bill.status,
     invoiceNumber: isFinalized ? String(bill.billNumber) : null,
-    title: isFinalized ? (taxContext.country === 'AU' ? (taxContext.gstRegistered ? 'Tax Invoice' : 'Receipt') : 'Invoice') : 'Bill',
+    // #213: rung up while the tenant was in Test mode - not a valid tax invoice.
+    testMode: isTestSale(mode.liveSince, bill.finalizedAt),
+    title: isFinalized ? finalTitle : 'Bill',
     issuedAt: isFinalized ? bill.finalizedAt!.toISOString() : null,
     currency: currencyForCountry(taxContext.country),
     seller: {
@@ -540,12 +654,16 @@ export async function buildInvoiceView(tx: Tx, tenantId: string, billId: string)
     },
     footerMessage: readReceiptFooter(taxContext.brandingTokens),
     lines,
+    sacCode: chargesGst ? RESTAURANT_SAC : null,
+    placeOfSupply: chargesGst ? placeOfSupplyFromGstin(taxContext.registrationNumber) : null,
+    tokenNumber: order.tokenNumber,
     subtotalMinor: Number(bill.subtotalMinor),
     discountMinor: bill.discountMinor === null ? null : Number(bill.discountMinor),
     discountReason: bill.discountReason,
     taxBreakdown,
     taxMinor: Number(bill.taxMinor),
     totalMinor: Number(computeTotalMinor(bill.subtotalMinor, bill.taxMinor, discountMinor, bill.pricesIncludeTax)),
+    roundOffMinor: bill.roundOffMinor === null ? null : Number(bill.roundOffMinor),
     pricesIncludeTax: bill.pricesIncludeTax,
     tenders: isFinalized ? bill.tenders.map(toTenderView) : [],
     creditNotes: creditNoteViews,

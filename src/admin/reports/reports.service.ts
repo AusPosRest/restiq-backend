@@ -34,6 +34,8 @@ import {
   PaymentsListResult,
   PaymentsTotals,
   ReportCatalogueEntry,
+  TopItemRow,
+  TopItemsResult,
 } from './reports.dtos'
 
 const PENDING_ON_POS_MESSAGE = 'Available once POS Core Loop is live'
@@ -132,7 +134,7 @@ function paymentsWhere(tenantId: string, filter: PaymentsFilterDto): Prisma.Bill
 }
 
 const PAYMENTS_INCLUDE = {
-  outlet: { select: { name: true } },
+  outlet: { select: { name: true, timezone: true } },
   order: { select: { source: true, tokenNumber: true, table: { select: { label: true } } } },
   finalizedByStaff: { select: { name: true } },
   tenders: { orderBy: { createdAt: 'asc' as const } },
@@ -159,12 +161,21 @@ function readTaxBreakdownLines(taxBreakdown: Prisma.JsonValue | null): TaxBreakd
   return stored?.lines ?? []
 }
 
+/** PE-23: "2026-10-11T18:35:03+05:30" - the outlet's own wall-clock time, still unambiguous for a spreadsheet. */
+export function localIsoWithOffset(instant: Date, timeZone: string): string {
+  const wall = instant.toLocaleString('sv-SE', { timeZone, hour12: false }).replace(' ', 'T')
+  const offsetMinutes = Math.round((Date.parse(`${wall}Z`) - Math.floor(instant.getTime() / 1000) * 1000) / 60_000)
+  const sign = offsetMinutes < 0 ? '-' : '+'
+  const abs = Math.abs(offsetMinutes)
+  return `${wall}${sign}${String(Math.floor(abs / 60)).padStart(2, '0')}:${String(abs % 60).padStart(2, '0')}`
+}
+
 function toCreditNoteRow(note: BillWithPaymentsInclude['creditNotes'][number], pricesIncludeTax: boolean): PaymentCreditNoteRow {
   // CreditNote has no single amountMinor column, and pricesIncludeTax comes
   // from the originating Bill, not CreditNote itself - same formula as
   // bill-core.ts's buildInvoiceView and bills.service.ts's toCreditNoteView.
   const amountMinor = pricesIncludeTax ? note.subtotalMinor : note.subtotalMinor + note.taxMinor
-  return { id: note.id, amountMinor: Number(amountMinor), reason: note.reason, createdAt: note.createdAt.toISOString() }
+  return { id: note.id, amountMinor: Number(amountMinor), method: note.method, reason: note.reason, createdAt: note.createdAt.toISOString() }
 }
 
 function toPaymentRow(bill: BillWithPaymentsInclude): PaymentRow {
@@ -189,9 +200,50 @@ function toPaymentRow(bill: BillWithPaymentsInclude): PaymentRow {
     taxMinor: Number(bill.taxMinor),
     taxBreakdown: readTaxBreakdownLines(bill.taxBreakdown),
     totalMinor: Number(computeTotalMinor(bill.subtotalMinor, bill.taxMinor, discountMinor, bill.pricesIncludeTax)),
+    roundOffMinor: bill.roundOffMinor === null ? null : Number(bill.roundOffMinor),
     tenders: bill.tenders.map((t) => ({ method: t.method, amountMinor: Number(t.amountMinor), createdAt: t.createdAt.toISOString() })),
     creditNotes: bill.creditNotes.map((n) => toCreditNoteRow(n, bill.pricesIncludeTax)),
   }
+}
+
+const TOP_ITEM_LINE_SELECT = {
+  itemId: true,
+  variantId: true,
+  comboId: true,
+  quantity: true,
+  unitPriceMinor: true,
+  item: { select: { name: true } },
+  variant: { select: { name: true } },
+  combo: { select: { name: true } },
+  modifiers: { select: { priceMinor: true } },
+} satisfies Prisma.OrderLineSelect
+export type TopItemLine = Prisma.OrderLineGetPayload<{ select: typeof TOP_ITEM_LINE_SELECT }>
+
+/**
+ * restiq-backend#288: groups sold (non-voided) lines by item + portion, or by
+ * combo for a combo's parent line. A combo's child lines still count under
+ * their own item, at their upcharge only (the combo price sits on the parent),
+ * so the salesMinor column sums to the bills' subtotalMinor - same per-line
+ * formula as bill-core.ts's computeSubtotal: before bill discount and refunds.
+ * Quantity desc, then sales desc.
+ */
+export function aggregateTopItems(lines: TopItemLine[]): TopItemRow[] {
+  const rows = new Map<string, { row: TopItemRow; sales: bigint }>()
+  for (const line of lines) {
+    const id = line.comboId ?? line.itemId
+    if (!id) continue
+    const key = `${id}:${line.variantId ?? ''}`
+    const entry = rows.get(key) ?? {
+      row: { id, variantId: line.variantId, name: line.combo?.name ?? line.item?.name ?? '', portionName: line.variant?.name ?? null, quantity: 0, salesMinor: 0 },
+      sales: 0n,
+    }
+    entry.row.quantity += line.quantity
+    entry.sales += BigInt(line.quantity) * (line.unitPriceMinor + line.modifiers.reduce((sum, m) => sum + m.priceMinor, 0n))
+    rows.set(key, entry)
+  }
+  return [...rows.values()]
+    .map(({ row, sales }) => ({ ...row, salesMinor: Number(sales) }))
+    .sort((a, b) => b.quantity - a.quantity || b.salesMinor - a.salesMinor)
 }
 
 @Injectable()
@@ -262,6 +314,41 @@ export class ReportsService {
     }
   }
 
+  // Tenant-context transaction + outlet ownership check + the shared
+  // finalized-bills WHERE - every filtered report reads through this.
+  private inFilteredBills<T>(owner: AdminPrincipal, filter: PaymentsFilterDto, read: (tx: Prisma.TransactionClient, where: Prisma.BillWhereInput) => Promise<T>): Promise<T> {
+    const plane = this.registry.planeFor(this.registry.homeRegion())
+    return plane.$transaction(async (tx) => {
+      await setTenantContext(tx, owner.tenantId)
+      if (filter.outletId) await this.assertOutlet(tx, owner.tenantId, filter.outletId)
+      return read(tx, paymentsWhere(owner.tenantId, filter))
+    })
+  }
+
+  private async topItemsFor(tx: Prisma.TransactionClient, tenantId: string, where: Prisma.BillWhereInput): Promise<TopItemRow[]> {
+    const lines = await tx.orderLine.findMany({ where: { tenantId, voidedAt: null, order: { bill: { is: where } } }, select: TOP_ITEM_LINE_SELECT })
+    return aggregateTopItems(lines)
+  }
+
+  /** restiq-backend#288: every matching item, no pagination (one row per menu item/portion, bounded by menu size). */
+  topItems(owner: AdminPrincipal, filter: PaymentsFilterDto): Promise<TopItemsResult> {
+    return this.inFilteredBills(owner, filter, async (tx, where) => {
+      const [items, tenant] = await Promise.all([
+        this.topItemsFor(tx, owner.tenantId, where),
+        tx.tenant.findUniqueOrThrow({ where: { id: owner.tenantId }, select: { country: true } }),
+      ])
+      return { currency: tenant.country === 'IN' ? 'INR' : 'AUD', items }
+    })
+  }
+
+  exportTopItemsCsv(owner: AdminPrincipal, filter: PaymentsFilterDto): Promise<string> {
+    return this.inFilteredBills(owner, filter, async (tx, where) => {
+      const items = await this.topItemsFor(tx, owner.tenantId, where)
+      const rows = items.map((row, i) => [String(i + 1), row.name, row.portionName ?? '', String(row.quantity), formatMinor(BigInt(row.salesMinor))])
+      return toCsv(['rank', 'item', 'portion', 'quantity', 'sales'], rows)
+    })
+  }
+
   // totalMinor/refundedMinor can't be a plain _sum aggregate: each bill's
   // (and each of its credit notes') contribution depends on that bill's own
   // pricesIncludeTax (computeTotalMinor above), and Prisma can't group a
@@ -269,7 +356,7 @@ export class ReportsService {
   // scalar columns needed for that per-bill formula and reduces them in JS -
   // the same "no cap on range size" posture exportPaymentsCsv already has.
   private async totalsFor(tx: Prisma.TransactionClient, where: Prisma.BillWhereInput): Promise<PaymentsTotals> {
-    const bills = await tx.bill.findMany({ where, select: { id: true, subtotalMinor: true, discountMinor: true, taxMinor: true, pricesIncludeTax: true } })
+    const bills = await tx.bill.findMany({ where, select: { id: true, subtotalMinor: true, discountMinor: true, taxMinor: true, pricesIncludeTax: true, roundOffMinor: true } })
     const billIds = bills.map((b) => b.id)
     const pricesIncludeTaxByBillId = new Map(bills.map((b) => [b.id, b.pricesIncludeTax]))
 
@@ -282,7 +369,9 @@ export class ReportsService {
     let discountMinor = 0n
     let taxMinor = 0n
     let totalMinor = 0n
+    let roundOffMinor = 0n
     for (const bill of bills) {
+      roundOffMinor += bill.roundOffMinor ?? 0n
       const billDiscount = bill.discountMinor ?? 0n
       subtotalMinor += bill.subtotalMinor
       discountMinor += billDiscount
@@ -297,11 +386,13 @@ export class ReportsService {
     }
 
     return {
+      netMinor: Number(totalMinor - refundedMinor),
       count: bills.length,
       subtotalMinor: Number(subtotalMinor),
       discountMinor: Number(discountMinor),
       taxMinor: Number(taxMinor),
       totalMinor: Number(totalMinor),
+      roundOffMinor: Number(roundOffMinor),
       tenderedMinor: Number(tenderAgg._sum.amountMinor ?? 0n),
       refundedMinor: Number(refundedMinor),
     }
@@ -318,39 +409,30 @@ export class ReportsService {
     const limit = parsePaymentsLimit(query.limit)
     const cursor = query.cursor === undefined || query.cursor === '' ? undefined : decodePaymentsCursor(query.cursor)
 
-    const plane = this.registry.planeFor(this.registry.homeRegion())
-    return plane.$transaction(async (tx) => {
-      await setTenantContext(tx, owner.tenantId)
-      if (query.outletId) await this.assertOutlet(tx, owner.tenantId, query.outletId)
-
-      const where = paymentsWhere(owner.tenantId, query)
+    return this.inFilteredBills(owner, query, async (tx, where) => {
       const pageWhere: Prisma.BillWhereInput = cursor
         ? { ...where, OR: [{ finalizedAt: { lt: new Date(cursor.finalizedAt) } }, { finalizedAt: new Date(cursor.finalizedAt), id: { lt: cursor.id } }] }
         : where
 
-      const [rows, totals] = await Promise.all([
+      const [rows, totals, tenant] = await Promise.all([
         tx.bill.findMany({ where: pageWhere, orderBy: [{ finalizedAt: 'desc' }, { id: 'desc' }], take: limit + 1, include: PAYMENTS_INCLUDE }),
         this.totalsFor(tx, where),
+        tx.tenant.findUniqueOrThrow({ where: { id: owner.tenantId }, select: { country: true } }),
       ])
 
       const page = rows.slice(0, limit)
       const last = page[page.length - 1]
       const nextCursor = rows.length > limit && last?.finalizedAt ? encodePaymentsCursor({ finalizedAt: last.finalizedAt.toISOString(), id: last.id }) : null
 
-      return { items: page.map(toPaymentRow), nextCursor, totals }
+      return { currency: tenant.country === 'IN' ? 'INR' : 'AUD', items: page.map(toPaymentRow), nextCursor, totals }
     })
   }
 
   // Same filters as listPayments, no pagination - one row per bill, tenders
   // and credit notes flattened into "method=amount;method=amount" cells so
   // a variable number of either never needs a variable number of columns.
-  async exportPaymentsCsv(owner: AdminPrincipal, filter: PaymentsFilterDto): Promise<string> {
-    const plane = this.registry.planeFor(this.registry.homeRegion())
-    return plane.$transaction(async (tx) => {
-      await setTenantContext(tx, owner.tenantId)
-      if (filter.outletId) await this.assertOutlet(tx, owner.tenantId, filter.outletId)
-
-      const where = paymentsWhere(owner.tenantId, filter)
+  exportPaymentsCsv(owner: AdminPrincipal, filter: PaymentsFilterDto): Promise<string> {
+    return this.inFilteredBills(owner, filter, async (tx, where) => {
       const bills = await tx.bill.findMany({ where, orderBy: [{ finalizedAt: 'desc' }, { id: 'desc' }], include: PAYMENTS_INCLUDE })
 
       const rows = bills.map((bill) => {
@@ -359,7 +441,7 @@ export class ReportsService {
         const creditNotes = row.creditNotes.map((c) => `${c.reason}=${formatMinor(BigInt(c.amountMinor))}`).join(';')
         return [
           row.billNumber.toString(),
-          row.finalizedAt,
+          localIsoWithOffset(bill.finalizedAt as Date, bill.outlet.timezone),
           row.outletName,
           row.source,
           row.tableLabel ?? '',
@@ -372,11 +454,12 @@ export class ReportsService {
           formatMinor(BigInt(row.totalMinor)),
           tenders,
           creditNotes,
+          formatMinor(BigInt(row.roundOffMinor ?? 0)),
         ]
       })
 
       return toCsv(
-        ['bill_number', 'finalized_at', 'outlet', 'source', 'table', 'token_number', 'cashier', 'subtotal', 'discount', 'discount_reason', 'tax', 'total', 'tenders', 'credit_notes'],
+        ['bill_number', 'finalized_at', 'outlet', 'source', 'table', 'token_number', 'cashier', 'subtotal', 'discount', 'discount_reason', 'tax', 'total', 'tenders', 'credit_notes', 'round_off'],
         rows,
       )
     })

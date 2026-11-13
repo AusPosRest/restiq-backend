@@ -130,6 +130,24 @@ describe('/ops realm separation (e2e)', () => {
     expect(audit.length).toBeGreaterThan(0)
   })
 
+  it('restiq-backend#203: logout ends that session - the same token is then refused, and a fresh login still works', async () => {
+    const token = await loginToken()
+    await request(httpServer).post('/ops/v1/auth/logout').set('Authorization', `Bearer ${token}`)
+
+    const stale = await request(httpServer).get('/ops/v1/auth/session').set('Authorization', `Bearer ${token}`)
+    expect(stale.status).toBe(401)
+    expect((stale.body as { error: { code: string } }).error.code).toBe('session_revoked')
+
+    const freshToken = await loginToken()
+    const fresh = await request(httpServer).get('/ops/v1/auth/session').set('Authorization', `Bearer ${freshToken}`)
+    expect(fresh.status).toBe(200)
+  })
+
+  it('restiq-backend#203: trims surrounding whitespace from the login email', async () => {
+    const res = await request(httpServer).post('/ops/v1/auth/login').send({ email: `  ${EMAIL.toUpperCase()}  `, password: PASSWORD })
+    expect(res.status).toBe(200)
+  })
+
   it('leaves non-ops routes (health) untouched by the ops guard', async () => {
     const res = await request(httpServer).get('/health')
     expect(res.status).toBe(200)

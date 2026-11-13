@@ -22,7 +22,7 @@ import { BadRequestException, ConflictException, GoneException, Injectable, NotF
 import { resolveComboSelection, resolveCurrentPrice } from '../../admin'
 import type { Order, Prisma, PriceChannel, TableSession, Ticket } from '../../generated/prisma/client'
 import { KitchenTicketsService } from '../../kitchen'
-import { GuestPrincipal, RegionRegistryService, reserveTokenNumber } from '../../platform'
+import { detachStaleTableOrder, GuestPrincipal, RegionRegistryService, reserveTokenNumber } from '../../platform'
 import { isSessionInactive } from '../sessions/sessions.service'
 import { setTenantContext } from '../tenant-context'
 import { GuestOrderStatusView, GuestOrderStep, GuestOrderStepView, GuestSessionOrdersView, PlacedOrderLineModifierView, PlacedOrderLineView, PlacedOrderView } from './orders.dtos'
@@ -159,6 +159,7 @@ export class GuestOrdersService {
       const tokenNumber = kiosk ? await reserveTokenNumber(tx, guest.tenantId, guest.outletId) : null
       // One live order per table (orders_one_active_per_table): say so with a 409 instead of letting the unique index surface as a 500.
       if (session.tableId) {
+        await detachStaleTableOrder(tx, guest.tenantId, session.tableId, { actorId: null, actorEmail: `guest:${guest.name}` })
         const live = await tx.order.findFirst({ where: { tenantId: guest.tenantId, tableId: session.tableId, status: { not: 'closed' } }, select: { id: true } })
         if (live) throw new ConflictException({ code: 'table_has_active_order', message: 'This table already has an order in progress - ask your server to add to it' })
       }
@@ -192,7 +193,7 @@ export class GuestOrdersService {
           const { combo, children } = await resolveComboSelection(tx, guest.tenantId, guest.outletId, line.comboId, selections)
           const who = { seatNumber: seatByGuest.get(line.guestId) ?? null, guestId: line.guestId, guestName: line.guestName }
           const shared = { ...who, tenantId: guest.tenantId, orderId: order.id, addedByStaffId: null }
-          const parent = await tx.orderLine.create({ data: { ...shared, comboId: combo.id, quantity: line.quantity, unitPriceMinor: combo.priceMinor } })
+          const parent = await tx.orderLine.create({ data: { ...shared, comboId: combo.id, note: line.note, quantity: line.quantity, unitPriceMinor: combo.priceMinor } })
           lineViews.push({ ...who, id: parent.id, itemId: null, comboId: combo.id, parentLineId: null, itemName: combo.name, variantId: null, variantName: null, quantity: line.quantity, unitPriceMinor: Number(combo.priceMinor), modifiers: [] })
           for (const child of children) {
             const quantity = child.quantity * line.quantity
@@ -244,6 +245,7 @@ export class GuestOrdersService {
             itemId: line.itemId,
             variantId: line.variantId,
             quantity: line.quantity,
+            note: line.note,
             unitPriceMinor: price.priceMinor,
             seatNumber,
             // No staff adder - see OrderLine.addedByStaffId's schema comment.

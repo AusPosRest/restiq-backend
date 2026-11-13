@@ -1,7 +1,7 @@
-import { Body, Controller, Get, HttpCode, Param, ParseUUIDPipe, Post } from '@nestjs/common'
+import { Body, Controller, Get, HttpCode, Param, ParseUUIDPipe, Post, Put } from '@nestjs/common'
 import { CurrentOperator, OpsPrincipal } from '../../platform'
-import { ReactivateDto, SuspendDto } from './subscriptions.dtos'
-import { InvoiceView, SubscriptionsService, SubscriptionView } from './subscriptions.service'
+import { ReactivateDto, SaveContractDto, SuspendDto } from './subscriptions.dtos'
+import { ContractView, InvoiceView, SubscriptionsService, SubscriptionView } from './subscriptions.service'
 
 // Tenant-scoped only (Tenant Detail's Subscription tab): same read/mutation
 // pattern as devices, nested under the owning tenant per the URL convention.
@@ -17,6 +17,28 @@ export class OpsSubscriptionsController {
   @Get('invoices')
   listInvoices(@Param('tenantId', ParseUUIDPipe) tenantId: string): Promise<{ invoices: InvoiceView[] }> {
     return this.subscriptions.listInvoices(tenantId)
+  }
+
+  // #290: per-restaurant billing contract (line items replacing the plan price).
+  @Get('contract')
+  getContract(@Param('tenantId', ParseUUIDPipe) tenantId: string): Promise<ContractView> {
+    return this.subscriptions.getContract(tenantId)
+  }
+
+  @Put('contract')
+  saveContract(
+    @CurrentOperator() operator: OpsPrincipal,
+    @Param('tenantId', ParseUUIDPipe) tenantId: string,
+    @Body() dto: SaveContractDto,
+  ): Promise<ContractView> {
+    return this.subscriptions.saveContract(operator, tenantId, dto.items, dto.reason)
+  }
+
+  // #282: Stripe Checkout link where the owner sets up card billing.
+  @Post('billing-link')
+  @HttpCode(200)
+  billingLink(@Param('tenantId', ParseUUIDPipe) tenantId: string): Promise<{ url: string; expiresAt: string }> {
+    return this.subscriptions.billingLink(tenantId)
   }
 
   @Post('suspend')

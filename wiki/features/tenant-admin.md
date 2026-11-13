@@ -418,7 +418,7 @@ built here, story by story.
 - **Built** (`src/admin/tax/`, merged into `src/admin/admin.module.ts`):
   - `GET /admin/v1/tax-registration` -> `{ country, registrationType,
     registrationNumber, legalEntityName, taxProfile, fssaiLicense,
-    compositionScheme, gstRegistered, gstRatePercent }`. `country` comes from
+    compositionScheme, gstRegistered, gstRatePercent, gstSplitRounding }`. `country` comes from
     `tenants.country`; `registrationType` is derived (`IN -> gstin`, otherwise
     `abn`). If no row exists, values are returned as defaults/nulls and
     `gstRegistered` defaults to `true` (no 404) to keep the settings UI
@@ -426,7 +426,7 @@ built here, story by story.
   - `PUT /admin/v1/tax-registration` - merge-update semantics with
     `@IsOptional()`-validated writable fields: `registrationNumber`,
     `legalEntityName`, `taxProfile`, `fssaiLicense`, `compositionScheme`,
-    `gstRegistered`, `gstRatePercent`.
+    `gstRegistered`, `gstRatePercent`, `gstSplitRounding`.
     Omitted fields keep their current value; missing row is created
     transactionally using a `findFirst(owner.tenantId)` first because
     `tenant_tax_registrations.tenantId` is not `@@unique`.
@@ -441,6 +441,17 @@ built here, story by story.
     finalisation: for IN it splits the configured rate into CGST/SGST (or a
     single IGST line for an interstate profile) instead of the fixed 2.5%/
     2.5%; for AU it replaces the fixed 10% inclusive rate.
+  - `gstSplitRounding` (issue #244, enum `GstSplitRounding`, column
+    `tenant_tax_registrations.gst_split_rounding`, non-null, default
+    `exact_total`) picks the India CGST/SGST odd-paisa rule `computeTax()`
+    uses: `exact_total` (round total GST once, CGST = lower half, SGST =
+    remainder; Rs 289 at 5% = 7.22 + 7.23), `equal_half_up` (each half
+    rounded half-up, the pre-#244 rule; 7.23 + 7.23) or `equal_half_even`
+    (each half rounded half-to-even; 7.22 + 7.22). Any other value is `400
+    validation_failed`. IGST, composition and AU ignore it. The rule is
+    snapshotted with the bill's tax breakdown, and every POS and guest bill
+    response carries `gstSplitRounding` (null for AU/IGST/composition).
+    Finalized bills keep their stored lines when the setting changes.
   - Writes are tenant-scoped through `setTenantContext` and `owner.tenantId`
     checks in an interactive transaction; `registrationType` and
     `country` are read-only inputs and are not accepted from request body.

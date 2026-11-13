@@ -187,7 +187,7 @@ describe('/pos/v1 table map and order ownership (e2e)', () => {
       expect(res.status).toBe(200)
       const map = res.body as TableMapEntryBody[]
       expect(map).toEqual([
-        { tableId, floorId: expect.any(String) as string, floorName: 'Ground Floor', label: 'T1', seatCapacity: 4, status: 'empty', orderId: null, ownerId: null },
+        { tableId, floorId: expect.any(String) as string, floorName: 'Ground Floor', label: 'T1', seatCapacity: 4, status: 'empty', orderId: null, ownerId: null, ownerName: null, guestSessionOpen: false },
       ])
     })
 
@@ -206,11 +206,25 @@ describe('/pos/v1 table map and order ownership (e2e)', () => {
       expect(occupiedMap[0]).toMatchObject({ tableId, status: 'occupied', orderId: order.id, ownerId: waiter.id })
 
       await authed(request(httpServer).patch(`/pos/v1/orders/${order.id}/status`), waiter.token).send({ status: 'sent' })
-      const closeRes = await authed(request(httpServer).patch(`/pos/v1/orders/${order.id}/status`), waiter.token).send({ status: 'closed' })
-      expect(closeRes.status).toBe(200)
+      // Only finalising a bill closes an order (restiq-backend#208, SE-5) - closed directly here.
+      await prisma.order.update({ where: { id: order.id }, data: { status: 'closed' } })
 
       const emptyAgainMap = (await authed(request(httpServer).get(`/pos/v1/outlets/${outletId}/table-map`), waiter.token)).body as TableMapEntryBody[]
       expect(emptyAgainMap[0]).toMatchObject({ tableId, status: 'empty', orderId: null, ownerId: null })
+    })
+
+    it('refuses to close a sent order through the status route - only a finalised bill closes it (restiq-backend#208, SE-5)', async () => {
+      const tenantId = await createTenant(prisma)
+      const outletId = await createOutlet(prisma, tenantId)
+      const tableId = await createTable(prisma, tenantId, outletId)
+      const waiter = await createStaff(prisma, tenantId, 'Asha')
+      const order = (await authed(request(httpServer).post(`/pos/v1/outlets/${outletId}/tables/${tableId}/order`), waiter.token).send()).body as OrderBody
+      await authed(request(httpServer).patch(`/pos/v1/orders/${order.id}/status`), waiter.token).send({ status: 'sent' })
+
+      const res = await authed(request(httpServer).patch(`/pos/v1/orders/${order.id}/status`), waiter.token).send({ status: 'closed' })
+      expect(res.status).toBe(409)
+      expect((res.body as ErrorBody).error.code).toBe('invalid_transition')
+      expect((await prisma.order.findUniqueOrThrow({ where: { id: order.id } })).status).toBe('sent')
     })
 
     it('rejects an invalid forward transition (open straight to closed)', async () => {
@@ -223,6 +237,41 @@ describe('/pos/v1 table map and order ownership (e2e)', () => {
       const res = await authed(request(httpServer).patch(`/pos/v1/orders/${order.id}/status`), waiter.token).send({ status: 'closed' })
       expect(res.status).toBe(409)
       expect((res.body as ErrorBody).error.code).toBe('invalid_transition')
+    })
+
+    it('does not show a table occupied by an order left open past the 12-hour live window (#230); a recent one still is', async () => {
+      const tenantId = await createTenant(prisma)
+      const outletId = await createOutlet(prisma, tenantId)
+      const staleTable = await createTable(prisma, tenantId, outletId)
+      const recentTable = await createTable(prisma, tenantId, outletId, 'T2')
+      const waiter = await createStaff(prisma, tenantId, 'Asha')
+      const stale = await prisma.order.create({ data: { tenantId, outletId, tableId: staleTable, ownerId: waiter.id, status: 'sent', createdAt: new Date(Date.now() - 13 * 60 * 60 * 1000) } })
+      const recent = await prisma.order.create({ data: { tenantId, outletId, tableId: recentTable, ownerId: waiter.id, status: 'open', createdAt: new Date(Date.now() - 11 * 60 * 60 * 1000) } })
+
+      const map = (await authed(request(httpServer).get(`/pos/v1/outlets/${outletId}/table-map`), waiter.token)).body as TableMapEntryBody[]
+      expect(map.find((t) => t.tableId === staleTable)).toMatchObject({ status: 'empty', orderId: null, ownerId: null })
+      expect(map.find((t) => t.tableId === recentTable)).toMatchObject({ status: 'occupied', orderId: recent.id, ownerId: waiter.id })
+      // The leftover order is untouched - not closed or deleted.
+      expect((await prisma.order.findUnique({ where: { id: stale.id } }))?.status).toBe('sent')
+    })
+
+    it('opening a table whose only order is over 12 hours old starts a new order and moves the old one off the table (#230)', async () => {
+      const tenantId = await createTenant(prisma)
+      const outletId = await createOutlet(prisma, tenantId)
+      const tableId = await createTable(prisma, tenantId, outletId)
+      const waiter = await createStaff(prisma, tenantId, 'Asha')
+      const stale = await prisma.order.create({ data: { tenantId, outletId, tableId, ownerId: waiter.id, status: 'sent', createdAt: new Date(Date.now() - 13 * 60 * 60 * 1000) } })
+
+      const res = await authed(request(httpServer).post(`/pos/v1/outlets/${outletId}/tables/${tableId}/order`), waiter.token)
+      expect(res.status).toBe(200)
+      const order = res.body as OrderBody
+      expect(order.id).not.toBe(stale.id)
+      expect(order).toMatchObject({ tableId, status: 'open', ownerId: waiter.id })
+      expect(await prisma.order.findUnique({ where: { id: stale.id } })).toMatchObject({ status: 'sent', tableId: null })
+      expect(await prisma.auditEvent.count({ where: { tenantId, action: 'order.detached_stale_table', actorId: waiter.id } })).toBe(1)
+
+      const open = (await authed(request(httpServer).get(`/pos/v1/outlets/${outletId}/orders`), waiter.token)).body as OrderBody[]
+      expect(open.map((o) => o.id)).toEqual(expect.arrayContaining([stale.id, order.id]))
     })
 
     it('claiming an already-occupied table returns the existing order, never a second one', async () => {

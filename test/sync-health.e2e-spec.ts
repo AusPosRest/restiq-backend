@@ -8,7 +8,7 @@ import request from 'supertest'
 import { afterAll, beforeAll, beforeEach, describe, expect, it, vi } from 'vitest'
 import { AppModule } from '../src/app.module'
 import { createPrismaClient, PrismaClient } from '../src/db/client'
-import { ALERT_CHANNEL, AlertChannel, SilentDeviceAlert } from '../src/ops'
+import { ALERT_CHANNEL, AlertChannel, SilentDeviceAlert, SyncHealthService } from '../src/ops'
 import { signOpsToken, uuidv7 } from '../src/platform'
 
 const EMAIL = 'sync-health-operator@restiq.example'
@@ -260,6 +260,15 @@ describe('/ops/v1/sync-health and heartbeat (e2e)', () => {
       const row = body.devices.find((d) => d.deviceId === id)
       expect(row?.severity).toBe('silent')
       expect(row?.lastContactAt).toBeNull()
+    })
+
+    it('sweeps without a page visit and does not repeat on page reads', async () => {
+      const silentId = await makeDevice({ lastContactAt: new Date(Date.now() - 49 * HOUR) })
+      await app.get(SyncHealthService).sweep()
+      await app.get(SyncHealthService).sweep()
+      await authed(request(httpServer).get('/ops/v1/sync-health'))
+      expect(notifySilentDevice).toHaveBeenCalledTimes(1)
+      expect(notifySilentDevice.mock.calls[0][0].deviceId).toBe(silentId)
     })
 
     it('a 48h-silent device triggers the alert abstraction', async () => {

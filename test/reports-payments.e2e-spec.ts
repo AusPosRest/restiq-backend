@@ -57,6 +57,7 @@ interface PaymentRowBody {
   taxMinor: number
   taxBreakdown: TaxBreakdownLineBody[]
   totalMinor: number
+  roundOffMinor: number | null
   tenders: TenderRowBody[]
   creditNotes: CreditNoteRowBody[]
 }
@@ -66,10 +67,13 @@ interface PaymentsTotalsBody {
   discountMinor: number
   taxMinor: number
   totalMinor: number
+  roundOffMinor: number
   tenderedMinor: number
   refundedMinor: number
+  netMinor: number
 }
 interface PaymentsListBody {
+  currency: string
   items: PaymentRowBody[]
   nextCursor: string | null
   totals: PaymentsTotalsBody
@@ -113,6 +117,8 @@ async function wipe(prisma: PrismaClient): Promise<void> {
   await prisma.ticket.deleteMany()
   await prisma.order.deleteMany()
   await prisma.clockEvent.deleteMany()
+  await prisma.cashMovement.deleteMany()
+  await prisma.shift.deleteMany()
   await prisma.staffUser.deleteMany()
   await prisma.role.deleteMany()
   await prisma.outletCapability.deleteMany()
@@ -171,9 +177,14 @@ async function createTable(prisma: PrismaClient, tenantId: string, outletId: str
   return table.id
 }
 
-async function createStaff(prisma: PrismaClient, tenantId: string, outletId: string, name: string): Promise<{ id: string; token: string }> {
-  const role = await prisma.role.upsert({ where: { tenantId_name: { tenantId, name: 'Cashier' } }, update: {}, create: { tenantId, name: 'Cashier', isSystem: true, isManager: false } })
+async function createStaff(prisma: PrismaClient, tenantId: string, outletId: string, name: string, roleName = 'Cashier'): Promise<{ id: string; token: string }> {
+  const role = await prisma.role.upsert({ where: { tenantId_name: { tenantId, name: roleName } }, update: {}, create: { tenantId, name: roleName, isSystem: true, isManager: false } })
   const staff = await prisma.staffUser.create({ data: { tenantId, roleId: role.id, name } })
+  // restiq-backend#208 (PE-17): cash needs an open shift at the outlet - the
+  // first staff member created for an outlet opens one.
+  if (!(await prisma.shift.findFirst({ where: { outletId, closedAt: null } }))) {
+    await prisma.shift.create({ data: { tenantId, outletId, openedByStaffId: staff.id, floatMinor: 0n } })
+  }
   const token = signPosToken({ sessionVersion: 0, id: staff.id, tenantId, outletId, name })
   return { id: staff.id, token }
 }
@@ -204,6 +215,9 @@ describe('/admin/v1/reports/payments (e2e)', () => {
   })
 
   afterAll(async () => {
+    // Leave no shifts behind (PE-17 fixtures open them): other spec files'
+    // wipe() helpers predate them and would trip their FK on staff_users.
+    await wipe(prisma)
     await app.close()
     await prisma.$disconnect()
   })
@@ -256,6 +270,7 @@ describe('/admin/v1/reports/payments (e2e)', () => {
     const cashier2 = await createStaff(prisma, tenantId, outlet2, 'Vikram')
     const managerPin = '1234'
     await createManagerPin(prisma, tenantId, managerPin)
+    const refunder = await createStaff(prisma, tenantId, outlet1, 'Meera', 'Manager') // #209: refunds need the Refunds permission
 
     const now = Date.now()
     const t1 = new Date(now - 3 * 3600_000) // oldest
@@ -269,7 +284,7 @@ describe('/admin/v1/reports/payments (e2e)', () => {
     await prisma.bill.update({ where: { id: b2.billId }, data: { finalizedAt: t2 } })
 
     const b3 = await createBill(tenantId, outlet1, table1, cashier.token, 10000, 3, { tenderMethod: 'cash' }) // subtotal 30000, tax 1500, total 31500
-    await authed(request(httpServer).post(`/pos/v1/bills/${b3.billId}/refund`), cashier.token).send({ managerPin, reason: 'Sent back' })
+    await authed(request(httpServer).post(`/pos/v1/bills/${b3.billId}/refund`), refunder.token).send({ managerPin, reason: 'Sent back' })
     await prisma.bill.update({ where: { id: b3.billId }, data: { finalizedAt: t3 } })
 
     const openBill = await createBill(tenantId, outlet1, table1, cashier.token, 10000, 1, { skipFinalize: true })
@@ -333,9 +348,13 @@ describe('/admin/v1/reports/payments (e2e)', () => {
         discountMinor: 0,
         taxMinor: 3000,
         totalMinor: 63000,
+        roundOffMinor: 0,
         tenderedMinor: 63000,
         refundedMinor: 31500,
+        // PE-33: net of refunds - the same figure the dashboard calls "Sales today".
+        netMinor: 31500,
       })
+      expect(body.currency).toBe('INR')
     })
 
     it('paginates with a keyset cursor (limit=2) covering all 3 finalized bills with no gaps or repeats', async () => {
@@ -390,6 +409,21 @@ describe('/admin/v1/reports/payments (e2e)', () => {
     })
   })
 
+  it('shows a bill\'s stored cash round-off on its row, in the totals and in the CSV (restiq-backend#241)', async () => {
+    const seed = await seedTenant('Round Off')
+    // Fixture: store a round-off on b1 directly - the finalize path that sets it is covered in pos-bills.e2e-spec.ts.
+    await prisma.bill.update({ where: { id: seed.b1.billId }, data: { roundOffMinor: -46n } })
+
+    const body = (await authed(request(httpServer).get(`/admin/v1/reports/payments?outletId=${seed.outlet1}`), seed.token)).body as PaymentsListBody
+    expect(body.items.find((i) => i.billId === seed.b1.billId)?.roundOffMinor).toBe(-46)
+    expect(body.items.find((i) => i.billId === seed.b2.billId)?.roundOffMinor).toBeNull()
+    expect(body.totals).toMatchObject({ totalMinor: 63000, roundOffMinor: -46 })
+
+    const csv = (await authed(request(httpServer).get(`/admin/v1/reports/payments/export?outletId=${seed.outlet1}`), seed.token)).text
+    const rows = csv.trim().split('\r\n').map((line) => line.split(','))
+    expect(rows[3][14]).toBe('-0.46') // oldest last: b1
+  })
+
   describe('GET /admin/v1/reports/payments/export', () => {
     it('exports a real CSV with the right header and one row per finalized bill', async () => {
       const seed = await seedTenant('CSV Export')
@@ -402,11 +436,58 @@ describe('/admin/v1/reports/payments (e2e)', () => {
         .trim()
         .split('\r\n')
         .map((line) => line.split(','))
-      expect(rows[0]).toEqual(['bill_number', 'finalized_at', 'outlet', 'source', 'table', 'token_number', 'cashier', 'subtotal', 'discount', 'discount_reason', 'tax', 'total', 'tenders', 'credit_notes'])
+      expect(rows[0]).toEqual(['bill_number', 'finalized_at', 'outlet', 'source', 'table', 'token_number', 'cashier', 'subtotal', 'discount', 'discount_reason', 'tax', 'total', 'tenders', 'credit_notes', 'round_off'])
       expect(rows).toHaveLength(4) // header + 3 finalized bills
 
       const b3Row = rows[1] // newest first
-      expect(b3Row.slice(2)).toEqual(['CSV Export Main', 'pos', 'T1', '', 'Asha', '300.00', '0.00', '', '15.00', '315.00', 'cash=315.00', 'Sent back=315.00'])
+      // PE-23: the outlet's local time with its offset, not UTC.
+      expect(b3Row[1]).toMatch(/^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\+05:30$/)
+      expect(b3Row.slice(2)).toEqual(['CSV Export Main', 'pos', 'T1', '', 'Asha', '300.00', '0.00', '', '15.00', '315.00', 'cash=315.00', 'Sent back=315.00', '0.00'])
+    })
+  })
+
+  // restiq-backend#288: top-selling items over the same finalized-bills filter.
+  describe('GET /admin/v1/reports/top-items', () => {
+    it('groups sold lines of finalized bills by item, excluding open bills and voided lines, quantity desc', async () => {
+      const seed = await seedTenant('Top Items')
+      const res = await authed(request(httpServer).get(`/admin/v1/reports/top-items?outletId=${seed.outlet1}`), seed.token)
+      expect(res.status).toBe(200)
+      const body = res.body as { currency: string; items: { name: string; portionName: string | null; quantity: number; salesMinor: number }[] }
+      expect(body.currency).toBe('INR')
+      // b3 (3 x 100.00), b2 (2 x 100.00), b1 (1 x 100.00) - each its own item; the open bill's item is absent.
+      expect(body.items.map((i) => [i.quantity, i.salesMinor, i.portionName])).toEqual([
+        [3, 30000, null],
+        [2, 20000, null],
+        [1, 10000, null],
+      ])
+    })
+
+    it('drops a voided line', async () => {
+      const seed = await seedTenant('Top Items Void')
+      await prisma.orderLine.updateMany({ where: { orderId: seed.b2.orderId }, data: { voidedAt: new Date(), voidReason: 'test' } })
+      const res = await authed(request(httpServer).get(`/admin/v1/reports/top-items?outletId=${seed.outlet1}`), seed.token)
+      expect((res.body as { items: { quantity: number }[] }).items.map((i) => i.quantity)).toEqual([3, 1])
+    })
+
+    it('404s on another tenant\'s outlet', async () => {
+      const seedA = await seedTenant('Top Items A')
+      const seedB = await seedTenant('Top Items B')
+      const res = await authed(request(httpServer).get(`/admin/v1/reports/top-items?outletId=${seedA.outlet1}`), seedB.token)
+      expect(res.status).toBe(404)
+    })
+
+    it('exports a CSV with rank, item, portion, quantity, sales', async () => {
+      const seed = await seedTenant('Top Items CSV')
+      const res = await authed(request(httpServer).get(`/admin/v1/reports/top-items/export?outletId=${seed.outlet1}`), seed.token)
+      expect(res.status).toBe(200)
+      expect(res.headers['content-disposition']).toContain('top-items.csv')
+      const rows = res.text.trim().split('\r\n').map((line) => line.split(','))
+      expect(rows[0]).toEqual(['rank', 'item', 'portion', 'quantity', 'sales'])
+      expect(rows.slice(1).map((r) => [r[0], r[2], r[3], r[4]])).toEqual([
+        ['1', '', '3', '300.00'],
+        ['2', '', '2', '200.00'],
+        ['3', '', '1', '100.00'],
+      ])
     })
   })
 })
