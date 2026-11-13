@@ -428,6 +428,10 @@ describe('/ops/v1/tenants/:tenantId/subscription (e2e)', () => {
         stripeAccountId: null,
         status: 'not_connected',
         requirementsDue: 0,
+        cardPaymentsActive: false,
+        payoutsActive: false,
+        detailsSubmitted: false,
+        requirements: [],
         allowedMethods: ['card', 'apple_pay', 'google_pay'],
         feePercentBps: 0,
         feeFixedMinor: '0',
@@ -463,6 +467,15 @@ describe('/ops/v1/tenants/:tenantId/subscription (e2e)', () => {
         expect(res.status, JSON.stringify(body)).toBe(400)
       }
       expect(await prisma.tenantPaymentAccount.count({ where: { tenantId } })).toBe(0)
+    })
+
+    it('PATCH payments refuses wallets without Card (#284)', async () => {
+      const res = await authed(request(httpServer).patch(`/ops/v1/tenants/${tenantId}/payments`)).send({ allowedMethods: ['apple_pay', 'google_pay'], reason: 'x' })
+      expect(res.status).toBe(400)
+      expect((res.body as { error: { code: string; message: string } }).error).toMatchObject({
+        code: 'validation_failed',
+        message: 'Apple Pay and Google Pay run on card payments, so Card must stay on',
+      })
     })
   })
 })

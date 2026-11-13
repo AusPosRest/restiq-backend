@@ -33,8 +33,9 @@
 // concrete default threshold value (still an open question there); this
 // story picks 20% of the bill's subtotal, the example the spec's own memlog
 // floated ("any discount over 20%") - see DISCOUNT_THRESHOLD_FRACTION.
-import { BadRequestException, ConflictException, ForbiddenException, Injectable, NotFoundException } from '@nestjs/common'
-import { ManagerApproval, ManagerAuthService, PosPrincipal, RegionRegistryService, roleHasPermission, uuidv7 } from '../../platform'
+import { BadGatewayException, BadRequestException, ConflictException, ForbiddenException, Injectable, NotFoundException } from '@nestjs/common'
+import Stripe from 'stripe'
+import { ManagerApproval, ManagerAuthService, PosPrincipal, RegionRegistryService, roleHasPermission, StripeService, uuidv7 } from '../../platform'
 import { setTenantContext } from '../tenant-context'
 import { linkedPeripheral, queueFor } from '../device-routing'
 import { localDateKey } from '../clock/clock.util'
@@ -83,6 +84,7 @@ export class BillsService {
   constructor(
     private readonly registry: RegionRegistryService,
     private readonly managerAuth: ManagerAuthService,
+    private readonly stripe: StripeService,
   ) {}
 
   private plane() {
@@ -507,11 +509,64 @@ export class BillsService {
         include: CREDIT_NOTE_INCLUDE,
       })
 
+      const view = toCreditNoteView(created, bill.pricesIncludeTax)
+      // #284: a card refund on a bill paid by card on the guest's phone goes back through Stripe. Inside
+      // this transaction on purpose - if Stripe refuses, the credit note above is rolled back.
+      if (method === 'card_online') await this.refundToCard(tx, staff.tenantId, billId, created.id, BigInt(view.totalMinor))
+
       await this.managerAuth.recordApproval(tx, approval, { actorId: staff.id, actorEmail: staff.name, occurredAt: new Date() })
 
-      return toCreditNoteView(created, bill.pricesIncludeTax)
+      return view
     })
   }
+
+  /**
+   * #284: refunds `amountMinor` to the card(s) this bill was paid with on the guest's phone (Stripe
+   * card_online tenders). Nothing to do for a bill with none (e.g. a Test-mode simulated card).
+   * ponytail: what each payment can still give back is read live from Stripe and the refund goes to the
+   * fullest first, split over several only when one can't cover it. Ceiling: a split refund is several
+   * Stripe refunds - if a later one fails, the earlier ones stand while this credit note is not written
+   * (a retry sees the smaller refundable balance). Record refunds per tender if that ever bites.
+   */
+  private async refundToCard(tx: Prisma.TransactionClient, tenantId: string, billId: string, creditNoteId: string, amountMinor: bigint): Promise<void> {
+    const intents = await tx.paymentIntent.findMany({ where: { billId, provider: 'stripe', rail: 'card_online', tender: { isNot: null } }, orderBy: { createdAt: 'asc' } })
+    const refs = intents.flatMap((i) => (i.providerRef ? [i.providerRef] : []))
+    if (refs.length === 0 || amountMinor <= 0n) return
+    const stripeAccount = (await tx.tenantPaymentAccount.findUnique({ where: { tenantId } }))?.stripeAccountId
+    if (!stripeAccount) throw refundFailed('This restaurant has no card payment account to refund from')
+    try {
+      const stripe = this.stripe.client()
+      const payments = await Promise.all(
+        refs.map(async (ref) => {
+          const pi = await stripe.paymentIntents.retrieve(ref, { expand: ['latest_charge'] }, { stripeAccount })
+          const charge = typeof pi.latest_charge === 'object' ? pi.latest_charge : null
+          // Stripe refuses refund_application_fee on a charge that carried no platform fee (fee 0).
+          return { id: pi.id, refundable: BigInt(pi.amount_received - (charge?.amount_refunded ?? 0)), hadFee: (pi.application_fee_amount ?? 0) > 0 }
+        }),
+      )
+      payments.sort((a, b) => (b.refundable > a.refundable ? 1 : b.refundable < a.refundable ? -1 : 0))
+      const available = payments.reduce((sum, p) => sum + p.refundable, 0n)
+      if (available < amountMinor) throw refundFailed(`Only ${available} can still go back to the card`)
+      let due = amountMinor
+      for (const [i, payment] of payments.entries()) {
+        if (due === 0n) break
+        const part = payment.refundable < due ? payment.refundable : due
+        if (part === 0n) continue
+        await stripe.refunds.create(
+          { payment_intent: payment.id, amount: Number(part), ...(payment.hadFee ? { refund_application_fee: true } : {}), metadata: { creditNoteId } },
+          { stripeAccount, idempotencyKey: i === 0 ? creditNoteId : `${creditNoteId}:${payment.id}` },
+        )
+        due -= part
+      }
+    } catch (error) {
+      if (error instanceof Stripe.errors.StripeError) throw refundFailed(error.message)
+      throw error
+    }
+  }
+}
+
+function refundFailed(message: string): BadGatewayException {
+  return new BadGatewayException({ code: 'refund_failed', message })
 }
 
 function toPrintJobView(job: { id: string; billId: string; payload: unknown; createdAt: Date; printedAt: Date | null }): PrintJobView {

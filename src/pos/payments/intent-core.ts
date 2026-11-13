@@ -55,7 +55,7 @@ export function toPaymentIntentView(intent: IntentRow): PaymentIntentView {
  * on the bill, and recording it is not optional - unless the bill was
  * settled meanwhile, in which case it is flagged for a refund instead.
  */
-export async function confirmIntent(tx: Tx, params: { tenantId: string; intentId: string }): Promise<IntentRow> {
+export async function confirmIntent(tx: Tx, params: { tenantId: string; intentId: string; refundDue?: boolean }): Promise<IntentRow> {
   // #170: a simulated approval is never money - refuse it whenever the simulator is off, whenever the intent was made.
   const target = await tx.paymentIntent.findUniqueOrThrow({ where: { id: params.intentId }, select: { provider: true, billId: true } })
   // restiq-backend#227 (G2): takes the bill's row lock so a capture racing a cash/other finalize sees locked data.
@@ -74,15 +74,17 @@ export async function confirmIntent(tx: Tx, params: { tenantId: string; intentId
   // settled some other way must never become a second tender on a finalised
   // bill (the guest would be charged twice, silently). Record that the money
   // moved, write no tender, and flag it for a refund in the audit trail.
+  // #284: `refundDue` - the caller (under this same bill lock) found the money's target already gone,
+  // e.g. a guest's share paid another way while their card was being charged. Same outcome.
   const bill = await tx.bill.findUniqueOrThrow({ where: { id: intent.billId }, select: { status: true } })
-  if (bill.status === 'finalized') {
+  if (bill.status === 'finalized' || params.refundDue) {
     await tx.paymentIntent.update({ where: { id: intent.id }, data: { failureReason: LATE_CAPTURE_REFUND_DUE } })
     await tx.auditEvent.create({
       data: {
         tenantId: params.tenantId,
         actorEmail: 'system:payments',
         action: 'payment.late_capture_refund_due',
-        reason: `Payment intent ${intent.id} (${intent.amountMinor} ${intent.currency}) was captured after bill ${intent.billId} was already settled - refund it to the customer`,
+        reason: `Payment intent ${intent.id} (${intent.amountMinor} ${intent.currency}) was captured after bill ${intent.billId} (or this payment's share of it) was already settled - refund it to the customer`,
         occurredAt: new Date(),
       },
     })

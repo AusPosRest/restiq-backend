@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest'
 import type Stripe from 'stripe'
-import { accountStatus } from './payments.service'
+import { accountStatus, detailsSubmitted, doneUrl, requirementTitle, toRequirement } from './payments.service'
 
 type Entry = Stripe.V2.Core.Account.Requirements.Entry
 
@@ -45,5 +45,72 @@ describe('accountStatus', () => {
   it('not active with nothing outstanding is restricted', () => {
     expect(accountStatus(account('pending', []))).toEqual({ status: 'restricted', requirementsDue: 0 })
     expect(accountStatus(account(undefined, []))).toEqual({ status: 'restricted', requirementsDue: 0 })
+  })
+})
+
+describe('toRequirement', () => {
+  it('maps a real Stripe verification entry', () => {
+    const e = entry({
+      description: 'identity.individual.documents.primary_verification',
+      minimum_deadline: { status: 'past_due' },
+      errors: [{ code: 'verification_failed_keyed_identity', description: 'Could not be verified.' }],
+      impact: {
+        restricts_capabilities: [
+          { capability: 'card_payments', configuration: 'merchant', deadline: { status: 'currently_due' } },
+          { capability: 'stripe_balance.payouts', configuration: 'merchant', deadline: { status: 'currently_due' } },
+        ],
+      },
+    })
+    expect(toRequirement(e)).toEqual({
+      code: 'identity.individual.documents.primary_verification',
+      title: 'Identity document',
+      problem: 'Could not be verified.',
+      urgency: 'past_due',
+      blocks: ['card_payments', 'payouts'],
+      waitingOn: 'owner',
+    })
+  })
+
+  it('defaults to eventually_due, no problem, waiting on stripe', () => {
+    expect(toRequirement(entry({ minimum_deadline: { status: 'some_future' } as never, awaiting_action_from: 'stripe' }))).toMatchObject({
+      urgency: 'eventually_due',
+      problem: null,
+      blocks: [],
+      waitingOn: 'stripe',
+    })
+  })
+})
+
+describe('requirementTitle', () => {
+  it.each([
+    ['identity.individual.documents.primary_verification', 'Identity document'],
+    ['identity.individual.dob', "Owner's personal details"],
+    ['identity.business_profile.url', 'Business details'],
+    ['identity.business_details.registration_number', 'Company details'],
+    ['identity.company.tax_id', 'Company details'],
+    ['external_account', 'Bank account for payouts'],
+    ['tos_acceptance', "Accept Stripe's terms"],
+    ['identity.attestations.directors_provided', 'Owners and directors'],
+    ['some.odd_thing_here', 'Some odd thing here'],
+  ])('%s -> %s', (code, title) => expect(requirementTitle(code)).toBe(title))
+})
+
+describe('detailsSubmitted', () => {
+  it('is false with no account or only routine onboarding entries', () => {
+    expect(detailsSubmitted(null)).toBe(false)
+    expect(detailsSubmitted(account('pending', [entry()]))).toBe(false)
+  })
+  it('is true once an entry is not routine onboarding, there are none, or card is active', () => {
+    expect(detailsSubmitted(account('pending', [entry({ requested_reasons: [{ code: 'routine_verification' }] })]))).toBe(true)
+    expect(detailsSubmitted(account('pending', []))).toBe(true)
+    expect(detailsSubmitted(account('active', [entry()]))).toBe(true)
+  })
+})
+
+describe('doneUrl', () => {
+  it('carries flow, tenant and slug', () => {
+    process.env.WEB_ORIGIN = 'https://web.test'
+    expect(doneUrl({ id: 't1', slug: 'cafe' }, 'onboarding')).toBe('https://web.test/stripe/done?flow=onboarding&tenant=t1&slug=cafe')
+    expect(doneUrl({ id: 't1', slug: null }, 'expired')).toBe('https://web.test/stripe/done?flow=expired&tenant=t1')
   })
 })

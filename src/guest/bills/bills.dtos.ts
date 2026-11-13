@@ -1,7 +1,7 @@
 // qr-self-order/CAP-5 (issue #80). guestId/tenantId/sessionId are never
 // accepted from the request body - they come from the signed guest token or
 // the URL path, same posture as every other guest DTO (AD-5).
-import { IsIn, IsOptional, IsString, MinLength } from 'class-validator'
+import { IsIn, IsOptional, IsString, IsUUID, MinLength } from 'class-validator'
 import type { BillShareStatus } from '../../generated/prisma/client'
 import type { BillView } from '../../pos/bills'
 
@@ -32,8 +32,38 @@ export interface BillShareView {
   paidAt: string | null
 }
 
+// #284: the same three ops can allow (ops/payments' PAYMENT_METHODS - not imported across modules, AD-2).
+export const CARD_PAYMENT_METHODS = ['card', 'apple_pay', 'google_pay'] as const
+
+/** #284: what the phone needs for Stripe's Payment Element - null when card payments aren't on here. */
+export interface CardPaymentsView {
+  provider: 'stripe'
+  publishableKey: string
+  /** The restaurant's connected account - loadStripe(publishableKey, { stripeAccount }). */
+  stripeAccountId: string
+  /** Always includes 'card'. */
+  allowedMethods: Array<(typeof CARD_PAYMENT_METHODS)[number]>
+}
+
+/** #284 POST bills/:id/card-payment - guestId pays that guest's share; omitted pays the whole bill (pay-all's rule). */
+export class StartCardPaymentDto {
+  @IsOptional() @IsUUID()
+  guestId?: string
+
+  @IsOptional() @IsString() @MinLength(1)
+  payerPhone?: string
+}
+
+export interface CardPaymentStartView {
+  intentId: string
+  clientSecret: string
+  amountMinor: number
+  currency: 'AUD' | 'INR'
+}
+
 export interface GuestBillView extends BillView {
   shares: BillShareView[]
-  /** restiq-backend#278: false when this tenant can't take payment from the phone - show "pay at the counter" up front. */
+  cardPayments: CardPaymentsView | null
+  /** restiq-backend#278: false when this tenant can't take payment from the phone - show "pay at the counter" up front. #284: simulator on, or cardPayments set. */
   paymentsAvailable: boolean
 }
