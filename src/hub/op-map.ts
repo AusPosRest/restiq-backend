@@ -97,12 +97,15 @@ export const OP_MAP: Readonly<Record<string, OpMapping>> = {
   },
   'PATCH /pos/v1/orders/:id/lines/:l': (input) => {
     const body = input.body as UpdateOrderLineDto
+    const line = order(input).lines.find((l) => l.id === input.params.lineId)
+    if (!line) throw new Error('The updated line is not in the response')
     return op(input, 'order.line.update', {
       orderId: input.params.orderId,
       lineId: input.params.lineId,
       quantity: body.quantity,
       modifierIds: body.modifierIds,
       seatNumber: body.seatNumber,
+      modifierPriceMinor: body.modifierIds ? modifierPrices(line) : undefined,
     })
   },
   'DELETE /pos/v1/orders/:id/lines/:l': (input) => op(input, 'order.line.remove', { orderId: input.params.orderId, lineId: input.params.lineId }),

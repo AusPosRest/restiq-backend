@@ -115,6 +115,8 @@ describe('hub ops pushed to the cloud (e2e)', () => {
     const ops = await readOutbox(hub)
     expect(ops.map((op) => op.type)).toEqual(SALE_OP_TYPES)
 
+    // The cloud's ghee price changes while the hub is offline: pushed lines keep the hub's 1500 (add and update alike).
+    await cloud.modifier.update({ where: { id: f.gheeId }, data: { priceMinor: 9900n } })
     const results = await cloudApp.get(SyncPushService).push(device, uuidv7(), ops)
     expect(results.filter((r) => r.status !== 'accepted')).toEqual([])
     expect(results).toHaveLength(ops.length)
@@ -135,6 +137,8 @@ describe('hub ops pushed to the cloud (e2e)', () => {
       finalized_by_staff_id: cloudBill.finalizedByStaffId,
     }).toEqual(hubBill)
     expect(Number(cloudBill.taxMinor)).toBeGreaterThan(0)
+    expect(Number(cloudBill.discountMinor)).toBeGreaterThan(Number(cloudBill.subtotalMinor) / 5) // above the manager threshold
+    expect(await cloud.orderLineModifier.count({ where: { tenantId: f.tenantId, modifierId: f.gheeId, priceMinor: 1500n } })).toBe(3)
 
     const hubTenders = await hubRows(`SELECT id, method::text, amount_minor::text, tendered_minor::text FROM tenders WHERE bill_id = $1 ORDER BY id`, [billId])
     expect(cloudBill.tenders.map((t) => ({ id: t.id, method: t.method, amount_minor: String(t.amountMinor), tendered_minor: t.tenderedMinor === null ? null : String(t.tenderedMinor) }))).toEqual(
@@ -147,7 +151,7 @@ describe('hub ops pushed to the cloud (e2e)', () => {
       FROM order_lines l WHERE l.tenant_id = $1::uuid ORDER BY l.id`
     const cloudLines = await cloud.$queryRawUnsafe<Row[]>(lines, f.tenantId)
     expect(cloudLines).toEqual(await hubRows(lines, [f.tenantId]))
-    expect(cloudLines).toHaveLength(4) // dosa, the voided coffee, the combo and its child - the removed line is gone on both
+    expect(cloudLines).toHaveLength(5) // dosa, the voided coffee, the updated coffee, the combo and its child - the removed line is gone on both
 
     const hubShift = await hubRows(`SELECT id, float_minor::text, counted_minor::text, expected_minor::text FROM shifts`, [])
     const cloudShift = await cloud.$queryRawUnsafe<Row[]>(`SELECT id, float_minor::text, counted_minor::text, expected_minor::text FROM shifts WHERE tenant_id = $1::uuid`, f.tenantId)

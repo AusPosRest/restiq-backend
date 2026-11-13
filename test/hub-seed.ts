@@ -7,6 +7,7 @@ import * as argon2 from 'argon2'
 import request from 'supertest'
 import type { PrismaClient } from '../src/db/client'
 import { APP_ROLE } from '../src/hub/store'
+import { computeTax } from '../src/pos/bills/tax'
 import { uuidv7 } from '../src/platform'
 
 export const HUB_PIN = '4321'
@@ -104,6 +105,7 @@ export const SALE_OP_TYPES = [
   'order.line.void',
   'order.line.add',
   'order.line.update',
+  'order.line.add',
   'order.line.remove',
   'order.create',
   'order.discard',
@@ -148,18 +150,28 @@ export async function ringUpSale(http: Parameters<typeof request>[0], f: SaleFix
   const extra = ((await post(`/pos/v1/orders/${order.id}/lines`, { itemId: f.coffeeId, quantity: 1 }).expect(201)).body as { lines: Line[] }).lines.find(
     (l) => l.itemId === f.coffeeId && l.id !== coffeeLine.id,
   )!
-  await request(http).patch(`/pos/v1/orders/${order.id}/lines/${extra.id}`).set(auth).send({ quantity: 3 }).expect(200)
-  await request(http).delete(`/pos/v1/orders/${order.id}/lines/${extra.id}`).set(auth).expect(200)
+  // Kept on the bill: the cloud must charge the hub's ghee price even if the cloud's changes before the push.
+  await request(http).patch(`/pos/v1/orders/${order.id}/lines/${extra.id}`).set(auth).send({ quantity: 3, modifierIds: [f.gheeId] }).expect(200)
+  const gone = ((await post(`/pos/v1/orders/${order.id}/lines`, { itemId: f.coffeeId, quantity: 1 }).expect(201)).body as { lines: Line[] }).lines.find(
+    (l) => l.itemId === f.coffeeId && l.id !== coffeeLine.id && l.id !== extra.id,
+  )!
+  await request(http).delete(`/pos/v1/orders/${order.id}/lines/${gone.id}`).set(auth).expect(200)
 
   const mistake = (await post(`/pos/v1/outlets/${f.outletId}/counter-orders`).expect(201)).body as { id: string }
   await request(http).delete(`/pos/v1/orders/${mistake.id}`).set(auth).expect(204)
   const handover = (await post(`/pos/v1/outlets/${f.outletId}/counter-orders`).expect(201)).body as { id: string }
   await post(`/pos/v1/orders/${handover.id}/transfer`, { newOwnerStaffId: f.managerId, reason: 'Shift change' }).expect(201)
 
-  const bill = (await post(`/pos/v1/orders/${order.id}/bill`).expect(201)).body as { id: string; totalMinor: number }
-  const due = bill.totalMinor
+  const bill = (await post(`/pos/v1/orders/${order.id}/bill`).expect(201)).body as { id: string; subtotalMinor: number }
+  // A discount over the 20% threshold needs a manager PIN; tax is recomputed on the discounted value.
+  const discountMinor = Math.floor(bill.subtotalMinor * 0.3)
+  const taxable = BigInt(bill.subtotalMinor - discountMinor)
+  const due = Number(taxable + computeTax({ country: 'IN', taxProfile: '', compositionScheme: false, gstRegistered: true, subtotalMinor: taxable }).taxMinor)
+  const discount = { discountMinor, discountReason: 'Regular guest' }
+  await post(`/pos/v1/bills/${bill.id}/finalize`, { ...discount, managerPin: '0000', tenders: [{ method: 'cash', amountMinor: due }] }).expect(401)
   await post(`/pos/v1/bills/${bill.id}/finalize`, {
-    managerPin: MANAGER_PIN, // not needed here; must never reach the op
+    ...discount,
+    managerPin: MANAGER_PIN, // checked on the hub; must never reach the op
     tenders: [
       { method: 'cash', amountMinor: 1000, tenderedMinor: 1000 },
       { method: 'cash', amountMinor: due - 1000, tenderedMinor: due },

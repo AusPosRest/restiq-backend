@@ -287,6 +287,16 @@ export class BillsService {
       throw new BadRequestException({ code: 'validation_failed', message: 'discountMinor and discountReason must be given together' })
     }
 
+    // restiq-backend#300: the PIN is verified before the transaction, not inside it - authorize runs its own
+    // queries, which on the hub's single PGlite connection would wait behind this transaction until it timed out.
+    // Its outcome (approval or error) is only used below if the discount turns out to be above the threshold.
+    const preApproval: ManagerApproval | Error | null =
+      !replay && dto.discountMinor !== undefined && dto.managerPin
+        ? await this.managerAuth
+            .authorize('discount_above_threshold', staff.tenantId, staff.outletId, dto.managerPin, dto.discountReason as string, staff.id)
+            .catch((error: unknown) => (error instanceof Error ? error : new Error(String(error))))
+        : null
+
     const plane = this.plane()
     return plane.$transaction(async (tx) => {
       await setTenantContext(tx, staff.tenantId)
@@ -309,10 +319,11 @@ export class BillsService {
             data: { tenantId: staff.tenantId, actorId: staff.id, actorEmail: staff.name, action: 'sync.discount_approved_offline', reason: discountReason as string, occurredAt: replay.at },
           })
         } else if (discountMinor > thresholdMinor) {
-          if (!dto.managerPin) {
+          if (!dto.managerPin || !preApproval) {
             throw new BadRequestException({ code: 'manager_pin_required', message: 'A manager PIN is required for a discount above the threshold' })
           }
-          approval = await this.managerAuth.authorize('discount_above_threshold', staff.tenantId, bill.outletId, dto.managerPin, discountReason as string, staff.id)
+          if (preApproval instanceof Error) throw preApproval
+          approval = preApproval
         }
       }
 

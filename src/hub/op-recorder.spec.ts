@@ -16,6 +16,7 @@ import request from 'supertest'
 import { afterAll, beforeAll, describe, expect, it } from 'vitest'
 import { HUB_PIN, ringUpSale, SALE_OP_TYPES, seedSaleFixture, seedTenantRows, type SaleFixture } from '../../test/hub-seed'
 import { setPrismaClient } from '../db/client'
+import { uuidv7 } from '../platform'
 import { UpdateOrderLineDto, UpdateOrderStatusDto } from '../pos/orders/orders.dtos'
 import * as dtos from '../pos/sync/sync.dtos'
 import { ROUTES } from './allowlist'
@@ -31,7 +32,7 @@ const MIGRATIONS = join(__dirname, '..', '..', 'prisma', 'migrations')
 const PAYLOAD_CLASSES: Record<string, (new () => object)[]> = {
   'order.create': [dtos.SyncOrderCreatePayload],
   'order.line.add': [dtos.SyncLineAddPayload],
-  'order.line.update': [dtos.SyncLineRefPayload, UpdateOrderLineDto],
+  'order.line.update': [dtos.SyncLineUpdatePayload, UpdateOrderLineDto],
   'order.line.remove': [dtos.SyncLineRefPayload],
   'order.status': [dtos.SyncOrderRefPayload, UpdateOrderStatusDto],
   'bill.create': [dtos.SyncBillCreatePayload],
@@ -112,6 +113,10 @@ describe('hub op recorder on PGlite', () => {
       unitPriceMinor: '15000',
       children: [{ itemId: f.itemId, quantity: 1, unitPriceMinor: '500', modifierPriceMinor: { [f.gheeId]: '1500' } }],
     })
+    expect(ops.find((op) => op.type === 'order.line.update')!.payload).toMatchObject({ quantity: 3, modifierIds: [f.gheeId], modifierPriceMinor: { [f.gheeId]: '1500' } })
+    // The wrong-PIN finalize (401) recorded nothing; the big discount travels without the PIN.
+    expect(ops.filter((op) => op.type === 'bill.finalize')).toEqual([finalize])
+    expect(finalize.payload).toMatchObject({ discountMinor: expect.any(Number) as number, discountReason: 'Regular guest' })
     expect(ops.find((op) => op.type === 'order.line.void')!.payload).toMatchObject({ reason: 'Spilled', approvedByStaffId: f.managerId })
     expect(ops.find((op) => op.type === 'ticket.bump')!.payload).toEqual({ orderId: expect.any(String) as string, stationId: f.stationId })
     // No PIN ever leaves the hub.
@@ -139,11 +144,32 @@ describe('hub op recorder on PGlite', () => {
     const auth = { Authorization: `Bearer ${(login.body as { token: string }).token}` }
     const billId = ops.find((op) => op.type === 'bill.create')!.payload.billId as string
     const before = (await readOutbox(pg)).length
-    const refund = await request(http).post(`/pos/v1/bills/${billId}/refund`).set(auth).send({ managerPin: '8765', reason: 'Cold' }).expect(409)
+    const refund = await request(http).post(`/pos/v1/bills/${billId}/refund`).set(auth).send({ managerPin: '8765', reason: 'Cold' })
+    expect(refund.status, JSON.stringify(refund.body)).toBe(409)
     expect(refund.body).toMatchObject({ error: { code: 'offline_unsupported' } })
     await request(http).post(`/pos/v1/bills/${billId}/intents`).set(auth).send({}).expect(409)
     expect(await readOutbox(pg)).toHaveLength(before)
     expect(readJournal(dataDir)).toHaveLength(before)
+  })
+
+  // No write route may open a second query while its transaction holds PGlite's one connection (it would hang 5 s, then 500).
+  it('answers the local-only writes promptly on the hub, recording nothing', async () => {
+    const login = await request(http).post('/pos/v1/auth/login').send({ tenantId: f.tenantId, pin: HUB_PIN }).expect(200)
+    const auth = { Authorization: `Bearer ${(login.body as { token: string }).token}` }
+    const post = (path: string) => request(http).post(path).set(auth).send()
+    const before = (await readOutbox(pg)).length
+    const billId = ops.find((op) => op.type === 'bill.create')!.payload.billId as string
+    const job = (await post(`/pos/v1/bills/${billId}/print`).expect(201)).body as { id: string }
+    await post(`/pos/v1/print-jobs/${job.id}/printed`).expect(200)
+    const ticket = (await pg.transaction(async (tx) => {
+      await tx.exec('SET LOCAL ROLE NONE')
+      return (await tx.query<{ id: string }>('SELECT id FROM tickets LIMIT 1')).rows[0]
+    }))
+    await post(`/kitchen/v1/tickets/${ticket.id}/refire`).expect(200)
+    await post(`/pos/v1/tables/${f.tableId}/close-session`).expect(404) // no_open_session: no guest QR sessions on the hub
+    await post(`/pos/v1/devices/${uuidv7()}/heartbeat`).expect(404)
+    await post('/pos/v1/auth/logout').expect(204)
+    expect(await readOutbox(pg)).toHaveLength(before)
   })
 
   it('records nothing for a write that fails', async () => {

@@ -310,7 +310,8 @@ export class OrderLinesService {
     })
   }
 
-  async updateLine(staff: PosPrincipal, orderId: string, lineId: string, dto: UpdateOrderLineDto): Promise<OrderView> {
+  /** `replay` (restiq-backend#300): new modifiers keep the prices the hub charged, as addLine's replay does. */
+  async updateLine(staff: PosPrincipal, orderId: string, lineId: string, dto: UpdateOrderLineDto, replay?: { modifierPriceMinor: Record<string, bigint> }): Promise<OrderView> {
     const plane = this.plane()
     return plane.$transaction(async (tx) => {
       await setTenantContext(tx, staff.tenantId)
@@ -336,7 +337,7 @@ export class OrderLinesService {
       if (dto.modifierIds !== undefined) {
         const item = await loadItemForOrderLine(tx, staff.tenantId, line.itemId!)
         assertModifierSelectionValid(item, dto.modifierIds)
-        const modifierPrices = await resolveModifierPrices(tx, staff.tenantId, dto.modifierIds)
+        const modifierPrices = replay ? new Map(Object.entries(replay.modifierPriceMinor)) : await resolveModifierPrices(tx, staff.tenantId, dto.modifierIds)
         const previous = await tx.orderLineModifier.findMany({ where: { orderLineId: lineId }, select: { priceMinor: true } })
         const oldPrice = previous.reduce((sum, modifier) => sum + modifier.priceMinor, 0n)
         const newPrice = dto.modifierIds.reduce((sum, id) => sum + (modifierPrices.get(id) ?? 0n), 0n)

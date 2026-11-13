@@ -93,6 +93,12 @@ export class SyncLineRefPayload {
   lineId!: string
 }
 
+// restiq-backend#300: with modifierIds, the price the hub charged for each (as on order.line.add).
+export class SyncLineUpdatePayload extends SyncLineRefPayload {
+  @IsOptional() @IsObject()
+  modifierPriceMinor?: Record<string, string>
+}
+
 export class SyncOrderRefPayload {
   @IsUUID()
   orderId!: string
