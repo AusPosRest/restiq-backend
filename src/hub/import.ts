@@ -93,7 +93,7 @@ export async function applyPull(pg: PGlite, page: PullPage): Promise<void> {
 
 // Temp file + fsync + rename, so a power cut leaves the old file or the new one, never half of one.
 // ponytail: the directory itself is not fsynced (Windows can't); NTFS journals the rename.
-function writeDurably(path: string, text: string): void {
+export function writeDurably(path: string, text: string): void {
   const tmp = `${path}.tmp`
   const fd = openSync(tmp, 'w')
   try {

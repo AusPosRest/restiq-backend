@@ -32,6 +32,7 @@ import {
   SyncComboAddPayload,
   SyncLineAddPayload,
   SyncLineRefPayload,
+  SyncLineUpdatePayload,
   SyncLineVoidPayload,
   SyncOpDto,
   SyncOpResult,
@@ -293,9 +294,13 @@ export class SyncPushService {
         return
       }
       case 'order.line.update': {
-        const ref = await parse(SyncLineRefPayload, op.payload)
+        const ref = await parse(SyncLineUpdatePayload, op.payload)
         const dto = await parse(UpdateOrderLineDto, op.payload)
-        await this.orderLines.updateLine(staff, ref.orderId, ref.lineId, dto)
+        const prices = minorMap(ref.modifierPriceMinor)
+        for (const id of dto.modifierIds ?? []) {
+          if (prices[id] === undefined) throw new Rejection('invalid_payload', `modifierPriceMinor is missing a price for modifier ${id}`)
+        }
+        await this.orderLines.updateLine(staff, ref.orderId, ref.lineId, dto, dto.modifierIds && { modifierPriceMinor: prices })
         return
       }
       case 'order.line.remove': {

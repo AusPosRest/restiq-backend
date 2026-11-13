@@ -310,7 +310,8 @@ export class OrderLinesService {
     })
   }
 
-  async updateLine(staff: PosPrincipal, orderId: string, lineId: string, dto: UpdateOrderLineDto): Promise<OrderView> {
+  /** `replay` (restiq-backend#300): new modifiers keep the prices the hub charged, as addLine's replay does. */
+  async updateLine(staff: PosPrincipal, orderId: string, lineId: string, dto: UpdateOrderLineDto, replay?: { modifierPriceMinor: Record<string, bigint> }): Promise<OrderView> {
     const plane = this.plane()
     return plane.$transaction(async (tx) => {
       await setTenantContext(tx, staff.tenantId)
@@ -336,7 +337,7 @@ export class OrderLinesService {
       if (dto.modifierIds !== undefined) {
         const item = await loadItemForOrderLine(tx, staff.tenantId, line.itemId!)
         assertModifierSelectionValid(item, dto.modifierIds)
-        const modifierPrices = await resolveModifierPrices(tx, staff.tenantId, dto.modifierIds)
+        const modifierPrices = replay ? new Map(Object.entries(replay.modifierPriceMinor)) : await resolveModifierPrices(tx, staff.tenantId, dto.modifierIds)
         const previous = await tx.orderLineModifier.findMany({ where: { orderLineId: lineId }, select: { priceMinor: true } })
         const oldPrice = previous.reduce((sum, modifier) => sum + modifier.priceMinor, 0n)
         const newPrice = dto.modifierIds.reduce((sum, id) => sum + (modifierPrices.get(id) ?? 0n), 0n)
@@ -383,6 +384,9 @@ export class OrderLinesService {
    * recorded as an audit event `sync.void_approved_offline` instead.
    */
   async voidLine(staff: PosPrincipal, orderId: string, lineId: string, dto: VoidOrderLineDto, replay?: { at: Date; approverId: string }): Promise<OrderView> {
+    // Checked before the transaction, not inside it (restiq-backend#300): authorize runs its own queries, which on the
+    // hub's single PGlite connection would wait behind this transaction until it timed out.
+    const approval = replay ? null : await this.managerAuth.authorize('void_after_fire', staff.tenantId, staff.outletId, dto.managerPin, dto.reason.trim(), staff.id)
     return this.plane().$transaction(async (tx) => {
       await setTenantContext(tx, staff.tenantId)
       const order = await loadOrder(tx, staff.tenantId, orderId)
@@ -406,7 +410,6 @@ export class OrderLinesService {
           data: { tenantId: staff.tenantId, actorId: staff.id, actorEmail: staff.name, approverId: replay.approverId, approverName: approver.name, action: 'sync.void_approved_offline', reason, occurredAt: replay.at },
         })
       }
-      const approval = replay ? null : await this.managerAuth.authorize('void_after_fire', staff.tenantId, order.outletId, dto.managerPin, reason, staff.id)
       const at = replay?.at ?? new Date()
       await tx.orderLine.updateMany({ where: { id: { in: ids } }, data: { voidedAt: at, voidReason: reason } })
       await tx.ticketLine.updateMany({ where: { orderLineId: { in: ids } }, data: { voided: true } })

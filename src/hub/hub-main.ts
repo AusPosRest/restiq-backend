@@ -7,6 +7,7 @@ import { existsSync } from 'node:fs'
 import { join } from 'node:path'
 import { setPrismaClient } from '../db/client'
 import { createHubApp } from './hub.module'
+import { compactJournal } from './journal'
 import { openStore } from './store'
 
 function required(name: string): string {
@@ -27,9 +28,11 @@ async function main(): Promise<void> {
   const migrationsDir = [join(__dirname, 'migrations'), join(__dirname, '..', '..', 'prisma', 'migrations')].find((dir) => existsSync(dir))
   if (!migrationsDir) throw new Error('No migrations directory found next to the hub')
 
-  const { prisma } = await openStore(dataDir, migrationsDir)
+  const { pg, prisma } = await openStore(dataDir, migrationsDir)
+  // ponytail: only at startup - nothing appends while this runs.
+  compactJournal(dataDir)
   setPrismaClient(prisma)
-  const app = await createHubApp()
+  const app = await createHubApp(pg, dataDir)
   app.enableShutdownHooks()
   await app.listen(port, '127.0.0.1')
   console.log(`restiq hub listening on 127.0.0.1:${port}`)

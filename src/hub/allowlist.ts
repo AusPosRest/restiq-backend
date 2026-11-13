@@ -3,7 +3,7 @@
 // Nest module graph happens to mount.
 import type { NextFunction, Request, Response } from 'express'
 
-const ROUTES = [
+export const ROUTES = [
   'GET /health',
   // Auth
   'POST /pos/v1/auth/login',

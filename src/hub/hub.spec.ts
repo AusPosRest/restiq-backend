@@ -4,7 +4,8 @@
 // off the allowlist answers 404 not_on_hub.
 import type { PGlite } from '@electric-sql/pglite'
 import type { INestApplication } from '@nestjs/common'
-import { readdirSync } from 'node:fs'
+import { mkdtempSync, readdirSync, rmSync } from 'node:fs'
+import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import request from 'supertest'
 import { afterAll, beforeAll, describe, expect, it } from 'vitest'
@@ -23,6 +24,7 @@ describe('hub mode on PGlite', () => {
   let http: Parameters<typeof request>[0]
   let a: HubSeed
   let b: HubSeed
+  const journalDir = mkdtempSync(join(tmpdir(), 'restiq-hub-spec-'))
 
   beforeAll(async () => {
     process.env.POS_JWT_SECRET = 'hub-spec-secret'
@@ -30,7 +32,7 @@ describe('hub mode on PGlite', () => {
     setPrismaClient(prisma)
     a = await seedHubTenant(pg, prisma, 'Tenant A')
     b = await seedHubTenant(pg, prisma, 'Tenant B')
-    app = await createHubApp()
+    app = await createHubApp(pg, journalDir)
     await app.init()
     http = app.getHttpServer() as Parameters<typeof request>[0]
   }, 60_000)
@@ -38,6 +40,7 @@ describe('hub mode on PGlite', () => {
   afterAll(async () => {
     await app?.close()
     await pg?.close()
+    rmSync(journalDir, { recursive: true, force: true })
   })
 
   it('applies every migration once, and none again on reopen', async () => {
