@@ -16,6 +16,7 @@ import { ConflictException, Injectable, Logger, NotFoundException } from '@nestj
 import type Stripe from 'stripe'
 import type { CardBillingStatus, Prisma, PrismaClient } from '../../generated/prisma/client'
 import { OpsPrincipal, PrismaService, RegionRegistryService, StripeService } from '../../platform'
+import { doneUrl } from '../payments/payments.service'
 
 const GRACE_WINDOW_HOURS_DEFAULT = 72
 
@@ -52,7 +53,7 @@ type SubRow = {
   stripeSubscriptionId: string | null
   cardBillingStatus: CardBillingStatus | null
 }
-type TenantRow = { id: string; name: string; contactEmail: string; country: 'AU' | 'IN'; plan: 'standard' | 'enterprise'; billingPeriod: string }
+type TenantRow = { id: string; name: string; contactEmail: string; country: 'AU' | 'IN'; plan: 'standard' | 'enterprise'; billingPeriod: string; slug: string | null }
 type Price = { monthlyPriceMinor: bigint | null; annualDiscountPercent: number } | null
 type SubPatch = Partial<Pick<SubRow, 'status' | 'suspendedAt' | 'stripeCustomerId' | 'stripeSubscriptionId' | 'cardBillingStatus'>>
 
@@ -158,7 +159,6 @@ export class SubscriptionsService {
           { idempotencyKey: `restiq-billing-customer-${tenantId}` },
         )
       ).id
-    const webOrigin = process.env.WEB_ORIGIN
     const session = await stripe.checkout.sessions.create({
       mode: 'subscription',
       customer: customerId,
@@ -175,8 +175,8 @@ export class SubscriptionsService {
       ],
       metadata: { tenantId },
       subscription_data: { metadata: { tenantId } },
-      success_url: `${webOrigin}/stripe/done?flow=billing`,
-      cancel_url: `${webOrigin}/stripe/done?flow=billing`,
+      success_url: doneUrl(tenant, 'billing'),
+      cancel_url: `${doneUrl(tenant, 'billing')}&cancelled=1`,
     })
     await this.write(tenantId, (tx, tenant, sub) =>
       this.persistSubscription(tx, tenant, sub, { stripeCustomerId: customerId, cardBillingStatus: 'pending' }),
@@ -393,7 +393,7 @@ export class SubscriptionsService {
   private async requireTenant(tx: Prisma.TransactionClient, tenantId: string): Promise<TenantRow> {
     const tenant = await tx.tenant.findUnique({
       where: { id: tenantId, deletedAt: null },
-      select: { id: true, name: true, contactEmail: true, country: true, plan: true, billingPeriod: true },
+      select: { id: true, name: true, contactEmail: true, country: true, plan: true, billingPeriod: true, slug: true },
     })
     if (!tenant) throw new NotFoundException({ code: 'not_found', message: 'No such tenant' })
     return tenant
