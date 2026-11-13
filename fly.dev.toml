@@ -1,0 +1,45 @@
+# Fly.io configuration for the DEV API (restiq-backend#280).
+# Deploy: fly deploy -c fly.dev.toml
+#
+# Same image as production (fly.toml), separate app, database and secrets.
+# Secrets (fly secrets set -a restiq-backend-dev): DATABASE_URL, DIRECT_URL,
+# WEB_ORIGIN=https://dev.niftypos.com.au, BASE_DOMAIN=dev.niftypos.com.au,
+# HOME_REGION, the four *_JWT_SECRETs, PROXY_SHARED_SECRET (same value as the
+# restiq-web-dev Worker), MAIL_PROVIDER=simulator, ALERT_WEBHOOK_URL=off and
+# Stripe sandbox keys only.
+app = "restiq-backend-dev"
+# Next to the dev Neon database (us-east-1); production stays in syd.
+primary_region = "iad"
+
+[deploy]
+  release_command = "npx prisma migrate deploy"
+
+  # See fly.toml: Prisma's migrate needs 2gb.
+  [deploy.release_command_vm]
+    size = "performance-1x"
+    memory = "2gb"
+
+[env]
+  PAYMENTS_SIMULATOR = "off"
+  # api.dev.niftypos.com.au is DNS-only (grey cloud): Fly's edge is the one hop.
+  TRUST_PROXY_HOPS = "1"
+
+[build]
+
+[http_service]
+  internal_port = 8080
+  force_https = true
+  # ponytail: dev sleeps when idle (a few seconds' cold start); production keeps one machine up.
+  auto_stop_machines = "stop"
+  auto_start_machines = true
+  min_machines_running = 0
+
+  [[http_service.checks]]
+    path = "/health"
+    interval = "30s"
+    timeout = "5s"
+    grace_period = "10s"
+
+[[vm]]
+  size = "shared-cpu-1x"
+  memory = "1gb"

@@ -6,6 +6,9 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+### Added
+- **Dev environment** (#280): Fly app `restiq-backend-dev` (`fly.dev.toml`, region iad, own Neon database and secrets, Stripe sandbox keys only) behind https://dev.niftypos.com.au. `pnpm stripe:check` verifies the Stripe keys in `.env` (refuses live keys; creates and cancels a test PaymentIntent).
+
 ### Changed
 - **pnpm pinned to 10.34.4** (#276): `packageManager` in package.json, so the Docker image's corepack stops pulling the newest pnpm, which ignored the build-script allow-list and failed the Fly build.
 - **Production can boot before Mailjet and an alert webhook exist** (#274): `MAIL_PROVIDER=simulator` is accepted (reset and invite mail goes to the ops dev inbox), and `ALERT_WEBHOOK_URL=off` means log-only alerts. `log` mail and an unset webhook still refuse to boot.
