@@ -28,6 +28,11 @@ export function getPrisma(): PrismaClient {
   return shared
 }
 
+/** Hub mode (#293): installs a client built elsewhere (PGlite) before Nest boots. */
+export function setPrismaClient(client: PrismaClient): void {
+  shared = client
+}
+
 export async function disconnectPrisma(): Promise<void> {
   await shared?.$disconnect()
   shared = undefined

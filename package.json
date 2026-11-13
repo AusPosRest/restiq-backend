@@ -7,6 +7,8 @@
   "scripts": {
     "dev": "nest start --watch",
     "build": "nest build",
+    "build:hub": "tsx scripts/build-hub.ts",
+    "smoke:hub": "tsx scripts/smoke-hub.ts",
     "start": "node dist/main.js",
     "typecheck": "tsc --noEmit -p tsconfig.check.json",
     "lint": "eslint",
@@ -47,6 +49,7 @@
     "stripe": "23.1.0"
   },
   "devDependencies": {
+    "@electric-sql/pglite": "0.5.8",
     "@eslint/js": "^10.0.1",
     "@nestjs/cli": "^11.0.10",
     "@nestjs/testing": "^11.1.6",
@@ -56,7 +59,9 @@
     "@types/multer": "^2.2.0",
     "@types/node": "^26.1.2",
     "@types/supertest": "^6.0.3",
+    "esbuild": "0.28.2",
     "eslint": "^10.8.0",
+    "pglite-prisma-adapter": "0.7.2",
     "supertest": "^7.1.4",
     "tsx": "^4.23.5",
     "typescript": "^5.9.3",

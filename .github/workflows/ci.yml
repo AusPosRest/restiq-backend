@@ -68,3 +68,42 @@ jobs:
 
       - name: Build
         run: pnpm run build
+
+  # #293 (HUB-BUILD-PLAN H7): build the offline hub bundle and boot it on a
+  # temp PGlite dir - /health, a PIN login and the menu. windows-latest proves
+  # the argon2 win32 prebuild and PGlite on NTFS. Not a required check.
+  hub-smoke:
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest]
+    runs-on: ${{ matrix.os }}
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: pnpm/action-setup@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version-file: .nvmrc
+          cache: pnpm
+
+      - run: pnpm install --frozen-lockfile
+
+      - name: Generate Prisma client
+        run: pnpm run db:generate
+
+      - name: Build hub
+        run: pnpm run build:hub
+
+      - name: Smoke hub
+        run: pnpm run smoke:hub
+
+      # The bundle the desktop installer picks up (restiq-hub), from the Windows build.
+      - name: Upload hub artifact
+        if: matrix.os == 'windows-latest' && github.event_name == 'push' && github.ref == 'refs/heads/main'
+        uses: actions/upload-artifact@v4
+        with:
+          name: restiq-hub
+          path: dist-hub
