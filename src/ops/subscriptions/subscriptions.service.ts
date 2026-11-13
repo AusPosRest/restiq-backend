@@ -12,9 +12,14 @@
 // #282 card billing: the owner enters a card once in Stripe Checkout (platform
 // account, mode=subscription); Stripe webhooks then keep cardBillingStatus,
 // invoices and arrears in step (applyStripeEvent).
-import { ConflictException, Injectable, Logger, NotFoundException } from '@nestjs/common'
+//
+// #290 billing contract: typed line items per tenant. While a tenant has unbilled
+// items they replace the plan price (billingLink, cardBilling.amountMinor); a save
+// while card billing is active is pushed to the live Stripe subscription.
+import { createHash } from 'node:crypto'
+import { BadGatewayException, BadRequestException, ConflictException, Injectable, Logger, NotFoundException } from '@nestjs/common'
 import type Stripe from 'stripe'
-import type { CardBillingStatus, Prisma, PrismaClient } from '../../generated/prisma/client'
+import type { BillingLineItem, CardBillingStatus, Prisma, PrismaClient } from '../../generated/prisma/client'
 import { OpsPrincipal, PrismaService, RegionRegistryService, StripeService } from '../../platform'
 import { doneUrl } from '../payments/payments.service'
 
@@ -34,6 +39,24 @@ export interface SubscriptionView {
     amountMinor: string | null
     currency: 'AUD' | 'INR'
   }
+}
+
+export interface ContractItemInput {
+  description: string
+  quantity: number
+  unitAmountMinor: number
+  kind: 'recurring' | 'one_time'
+}
+
+export interface ContractView {
+  currency: 'AUD' | 'INR'
+  billingPeriod: 'monthly' | 'annual'
+  items: Array<ContractItemInput & { id: string; billedAt: string | null }>
+  source: 'contract' | 'plan'
+  recurringTotalMinor: string | null
+  nextInvoiceOneTimeMinor: string
+  planAmountMinor: string | null
+  appliesFromNextInvoice: boolean
 }
 
 export interface InvoiceView {
@@ -58,6 +81,10 @@ type Price = { monthlyPriceMinor: bigint | null; annualDiscountPercent: number }
 type SubPatch = Partial<Pick<SubRow, 'status' | 'suspendedAt' | 'stripeCustomerId' | 'stripeSubscriptionId' | 'cardBillingStatus'>>
 
 const CURRENCY = { AU: 'AUD', IN: 'INR' } as const
+// Stripe metadata values are capped at 500 characters.
+const METADATA_MAX = 500
+// Stripe allows at most 20 items on one subscription.
+const MAX_RECURRING_ITEMS = 20
 
 /** What one billing period charges: the monthly list price, or 12 months less the annual discount (rounded half up). */
 export function periodAmountMinor(monthlyPriceMinor: bigint, billingPeriod: string, annualDiscountPercent: number): bigint {
@@ -95,7 +122,29 @@ function defaultSubRow(tenant: TenantRow, now = new Date()): SubRow {
   }
 }
 
-function toView(sub: SubRow, tenant: TenantRow, price: Price): SubscriptionView {
+function planAmount(tenant: TenantRow, price: Price): bigint | null {
+  return price?.monthlyPriceMinor == null ? null : periodAmountMinor(price.monthlyPriceMinor, tenant.billingPeriod, price.annualDiscountPercent)
+}
+
+function lineTotal(item: BillingLineItem): bigint {
+  return BigInt(item.quantity) * item.unitAmountMinor
+}
+
+function sum(items: BillingLineItem[]): bigint {
+  return items.reduce((total, item) => total + lineTotal(item), 0n)
+}
+
+/** Recurring contract items, or null when there are none (the plan price applies). */
+function recurringTotal(items: BillingLineItem[]): bigint | null {
+  const recurring = items.filter((item) => item.kind === 'recurring')
+  return recurring.length ? sum(recurring) : null
+}
+
+function interval(tenant: TenantRow): 'year' | 'month' {
+  return tenant.billingPeriod === 'annual' ? 'year' : 'month'
+}
+
+function toView(sub: SubRow, tenant: TenantRow, price: Price, items: BillingLineItem[]): SubscriptionView {
   return {
     tenantId: tenant.id,
     status: sub.status,
@@ -107,7 +156,7 @@ function toView(sub: SubRow, tenant: TenantRow, price: Price): SubscriptionView 
     graceWindowHours: graceWindowHours(),
     cardBilling: {
       status: sub.cardBillingStatus ?? 'not_set_up',
-      amountMinor: price?.monthlyPriceMinor == null ? null : periodAmountMinor(price.monthlyPriceMinor, tenant.billingPeriod, price.annualDiscountPercent).toString(),
+      amountMinor: (recurringTotal(items) ?? planAmount(tenant, price))?.toString() ?? null,
       currency: CURRENCY[tenant.country],
     },
   }
@@ -115,6 +164,40 @@ function toView(sub: SubRow, tenant: TenantRow, price: Price): SubscriptionView 
 
 async function setOperatorContext(tx: Prisma.TransactionClient): Promise<void> {
   await tx.$executeRaw`SELECT set_config('app.operator_context', 'operator', true)`
+}
+
+function toContractView(sub: SubRow, tenant: TenantRow, price: Price, items: BillingLineItem[]): ContractView {
+  const unbilled = items.filter((item) => !item.billedAt)
+  const plan = planAmount(tenant, price)
+  const source = unbilled.length ? 'contract' : 'plan'
+  return {
+    currency: CURRENCY[tenant.country],
+    billingPeriod: tenant.billingPeriod === 'annual' ? 'annual' : 'monthly',
+    // items arrive in sortOrder; billed one-time items go last.
+    items: [...unbilled, ...items.filter((item) => item.billedAt)].map((item) => ({
+      id: item.id,
+      description: item.description,
+      quantity: item.quantity,
+      unitAmountMinor: Number(item.unitAmountMinor),
+      kind: item.kind,
+      billedAt: item.billedAt ? item.billedAt.toISOString() : null,
+    })),
+    source,
+    // With no recurring line the plan price is what Stripe charges (syncStripe/billingLink fall back to it).
+    recurringTotalMinor: (recurringTotal(items) ?? plan)?.toString() ?? null,
+    nextInvoiceOneTimeMinor: sum(unbilled.filter((item) => item.kind === 'one_time')).toString(),
+    planAmountMinor: plan?.toString() ?? null,
+    appliesFromNextInvoice: sub.cardBillingStatus === 'active',
+  }
+}
+
+function contractItems(tx: Prisma.TransactionClient, tenantId: string): Promise<BillingLineItem[]> {
+  return tx.billingLineItem.findMany({ where: { tenantId }, orderBy: [{ sortOrder: 'asc' }, { createdAt: 'asc' }] })
+}
+
+/** One-time items are billed once: only still-unbilled ones are stamped, so a redelivery changes nothing. */
+async function markBilled(tx: Prisma.TransactionClient, tenantId: string, ids: string[]): Promise<void> {
+  await tx.billingLineItem.updateMany({ where: { tenantId, id: { in: ids }, kind: 'one_time', billedAt: null }, data: { billedAt: new Date() } })
 }
 
 function isRecordNotFound(error: unknown): boolean {
@@ -132,8 +215,100 @@ export class SubscriptionsService {
   ) {}
 
   async get(tenantId: string): Promise<SubscriptionView> {
-    const { tenant, sub } = await this.read(tenantId)
-    return toView(sub, tenant, await this.planPrice(tenant))
+    const { tenant, sub, items } = await this.read(tenantId)
+    return toView(sub, tenant, await this.planPrice(tenant), items)
+  }
+
+  async getContract(tenantId: string): Promise<ContractView> {
+    const { tenant, sub, items } = await this.read(tenantId)
+    return toContractView(sub, tenant, await this.planPrice(tenant), items)
+  }
+
+  /**
+   * Replaces every unbilled item (billed one-time items stay), audited. While card
+   * billing is active the change is then pushed to the Stripe subscription; if that
+   * fails the saved contract stays and the caller gets 502 stripe_sync_failed.
+   */
+  async saveContract(operator: OpsPrincipal, tenantId: string, input: ContractItemInput[], reason: string): Promise<ContractView> {
+    if (input.filter((item) => item.kind === 'recurring').length > MAX_RECURRING_ITEMS) {
+      throw new BadRequestException({ code: 'validation_failed', message: `A contract can have at most ${MAX_RECURRING_ITEMS} recurring lines (Stripe's limit per subscription)` })
+    }
+    const { tenant: current } = await this.read(tenantId)
+    const price = await this.planPrice(current)
+    const { tenant, sub, items } = await this.mutate(operator, tenantId, 'billing.contract_updated', reason, async (tx, tenant, sub) => {
+      const syncs = sub.cardBillingStatus === 'active' && sub.stripeSubscriptionId
+      // A live Stripe subscription needs one recurring item: the contract's, or the plan price.
+      if (syncs && !input.some((item) => item.kind === 'recurring') && planAmount(tenant, price) == null) {
+        throw new ConflictException({ code: 'price_not_set', message: `Card billing is active: add a recurring line, or set a price for the ${tenant.country} ${tenant.plan} plan first` })
+      }
+      await tx.billingLineItem.deleteMany({ where: { tenantId, billedAt: null } })
+      await tx.billingLineItem.createMany({
+        data: input.map((item, sortOrder) => ({
+          tenantId,
+          description: item.description.trim(),
+          quantity: item.quantity,
+          unitAmountMinor: BigInt(item.unitAmountMinor),
+          kind: item.kind,
+          sortOrder,
+        })),
+      })
+      return { tenant, sub, items: await contractItems(tx, tenantId) }
+    })
+    if (sub.cardBillingStatus !== 'active' || !sub.stripeSubscriptionId) return toContractView(sub, tenant, price, items)
+    try {
+      await this.syncStripe(tenant, sub, price, items)
+    } catch (error) {
+      this.logger.error(`Billing contract Stripe sync failed for tenant ${tenantId}`, error instanceof Error ? error.stack : String(error))
+      const detail = error instanceof Error ? error.message : 'unknown error'
+      throw new BadGatewayException({
+        code: 'stripe_sync_failed',
+        message: `The contract was saved, but Stripe could not be updated (${detail}). Save again to retry.`,
+      })
+    }
+    return this.getContract(tenantId)
+  }
+
+  /** Replaces the subscription's recurring items (no proration) and puts new one-time items on the next invoice. */
+  private async syncStripe(tenant: TenantRow, sub: SubRow, price: Price, items: BillingLineItem[]): Promise<void> {
+    const stripe = this.stripe.client()
+    const subscriptionId = sub.stripeSubscriptionId as string
+    const currency = CURRENCY[tenant.country].toLowerCase()
+    const recurring = items.filter((item) => item.kind === 'recurring')
+    const lines = recurring.length
+      ? recurring.map((item) => ({ key: item.id, name: item.description, unitAmount: Number(item.unitAmountMinor), quantity: item.quantity }))
+      : [{ key: `plan-${tenant.plan}`, name: `Restiq ${tenant.plan} plan (${tenant.billingPeriod})`, unitAmount: Number(planAmount(tenant, price)), quantity: 1 }]
+    const newItems: Stripe.SubscriptionUpdateParams.Item[] = []
+    for (const line of lines) {
+      const product = await stripe.products.create(
+        { name: line.name, metadata: { tenantId: tenant.id } },
+        { idempotencyKey: `restiq-contract-product-${tenant.id}-${line.key}` },
+      )
+      newItems.push({ price_data: { currency, product: product.id, unit_amount: line.unitAmount, recurring: { interval: interval(tenant) } }, quantity: line.quantity })
+    }
+    const existing = await stripe.subscriptions.retrieve(subscriptionId)
+    const syncKey = createHash('sha256').update(lines.map((line) => line.key).join(',')).digest('hex').slice(0, 32)
+    await stripe.subscriptions.update(
+      subscriptionId,
+      { items: [...existing.items.data.map((item) => ({ id: item.id, deleted: true })), ...newItems], proration_behavior: 'none' },
+      { idempotencyKey: `restiq-contract-sync-${tenant.id}-${syncKey}` },
+    )
+
+    const oneTime = items.filter((item) => item.kind === 'one_time' && !item.billedAt)
+    if (!oneTime.length) return
+    if (!sub.stripeCustomerId) throw new Error('the subscription has no Stripe customer')
+    const billed: string[] = []
+    try {
+      for (const item of oneTime) {
+        await stripe.invoiceItems.create(
+          { customer: sub.stripeCustomerId, subscription: subscriptionId, currency, amount: Number(lineTotal(item)), description: `${item.description} × ${item.quantity}` },
+          { idempotencyKey: `restiq-contract-invoice-item-${tenant.id}-${item.id}` },
+        )
+        billed.push(item.id)
+      }
+    } finally {
+      // Whatever reached Stripe rides on the next invoice: never offer it again.
+      if (billed.length) await this.write(tenant.id, (tx) => markBilled(tx, tenant.id, billed))
+    }
   }
 
   /**
@@ -143,13 +318,40 @@ export class SubscriptionsService {
    */
   async billingLink(tenantId: string): Promise<{ url: string; expiresAt: string }> {
     const stripe = this.stripe.client()
-    const { tenant, sub } = await this.read(tenantId)
+    const { tenant, sub, items } = await this.read(tenantId)
     if (sub.cardBillingStatus === 'active') {
       throw new ConflictException({ code: 'conflict', message: 'Card billing is already active for this tenant' })
     }
-    const price = await this.planPrice(tenant)
-    if (price?.monthlyPriceMinor == null) {
-      throw new ConflictException({ code: 'price_not_set', message: `No monthly price is set for the ${tenant.country} ${tenant.plan} plan` })
+    const currency = CURRENCY[tenant.country].toLowerCase()
+    const recurring = { interval: interval(tenant) }
+    let lineItems: Stripe.Checkout.SessionCreateParams.LineItem[]
+    let oneTimeItemIds = ''
+    const unbilled = items.filter((item) => !item.billedAt)
+    if (unbilled.length) {
+      // #290 contract: recurring items every period, unbilled one-time items on the first invoice only.
+      if (!unbilled.some((item) => item.kind === 'recurring')) {
+        throw new ConflictException({ code: 'no_recurring_items', message: 'The billing contract needs at least one recurring line before card billing can start' })
+      }
+      const oneTime = unbilled.filter((item) => item.kind === 'one_time')
+      oneTimeItemIds = oneTime.map((item) => item.id).join(',')
+      if (oneTimeItemIds.length > METADATA_MAX) {
+        throw new ConflictException({ code: 'too_many_one_time_items', message: 'Too many one-time lines for one checkout: combine some of them' })
+      }
+      lineItems = unbilled.map((item) => ({
+        quantity: item.quantity,
+        price_data: {
+          currency,
+          unit_amount: Number(item.unitAmountMinor),
+          ...(item.kind === 'recurring' ? { recurring } : {}),
+          product_data: { name: item.description },
+        },
+      }))
+    } else {
+      const amount = planAmount(tenant, await this.planPrice(tenant))
+      if (amount == null) {
+        throw new ConflictException({ code: 'price_not_set', message: `No monthly price is set for the ${tenant.country} ${tenant.plan} plan` })
+      }
+      lineItems = [{ quantity: 1, price_data: { currency, unit_amount: Number(amount), recurring, product_data: { name: `Restiq ${tenant.plan} plan (${tenant.billingPeriod})` } } }]
     }
     const customerId =
       sub.stripeCustomerId ??
@@ -164,18 +366,8 @@ export class SubscriptionsService {
       customer: customerId,
       // Bill in the restaurant's own currency, never converted to the visitor's local one.
       adaptive_pricing: { enabled: false },
-      line_items: [
-        {
-          quantity: 1,
-          price_data: {
-            currency: CURRENCY[tenant.country].toLowerCase(),
-            unit_amount: Number(periodAmountMinor(price.monthlyPriceMinor, tenant.billingPeriod, price.annualDiscountPercent)),
-            recurring: { interval: tenant.billingPeriod === 'annual' ? 'year' : 'month' },
-            product_data: { name: `Restiq ${tenant.plan} plan (${tenant.billingPeriod})` },
-          },
-        },
-      ],
-      metadata: { tenantId },
+      line_items: lineItems,
+      metadata: oneTimeItemIds ? { tenantId, oneTimeItemIds } : { tenantId },
       subscription_data: { metadata: { tenantId } },
       success_url: doneUrl(tenant, 'billing'),
       cancel_url: `${doneUrl(tenant, 'billing')}&cancelled=1`,
@@ -200,13 +392,16 @@ export class SubscriptionsService {
         if (session.mode !== 'subscription' || !tenantId) return 'ignored'
         const subscriptionId = typeof session.subscription === 'string' ? session.subscription : (session.subscription?.id ?? null)
         const customerId = typeof session.customer === 'string' ? session.customer : (session.customer?.id ?? null)
-        return this.applyFor(tenantId, (tx, tenant, sub) =>
-          this.persistSubscription(tx, tenant, sub, {
+        // #290: the one-time contract items this checkout charged (redelivery only re-marks nothing).
+        const oneTimeItemIds = (session.metadata?.oneTimeItemIds ?? '').split(',').filter(Boolean)
+        return this.applyFor(tenantId, async (tx, tenant, sub) => {
+          await this.persistSubscription(tx, tenant, sub, {
             stripeSubscriptionId: subscriptionId,
             stripeCustomerId: customerId ?? sub.stripeCustomerId,
             cardBillingStatus: 'active',
-          }),
-        )
+          })
+          if (oneTimeItemIds.length) await markBilled(tx, tenantId, oneTimeItemIds)
+        })
       }
       case 'invoice.paid':
       case 'invoice.payment_failed': {
@@ -272,13 +467,13 @@ export class SubscriptionsService {
     }
   }
 
-  private async read(tenantId: string): Promise<{ tenant: TenantRow; sub: SubRow }> {
+  private async read(tenantId: string): Promise<{ tenant: TenantRow; sub: SubRow; items: BillingLineItem[] }> {
     const { plane } = await this.resolvePlane(tenantId)
     return plane.$transaction(async (tx) => {
       await setOperatorContext(tx)
       const tenant = await this.requireTenant(tx, tenantId)
       const sub = (await tx.subscription.findUnique({ where: { tenantId } })) ?? defaultSubRow(tenant)
-      return { tenant, sub }
+      return { tenant, sub, items: await contractItems(tx, tenantId) }
     })
   }
 
@@ -324,9 +519,9 @@ export class SubscriptionsService {
       if (sub.status === 'suspended') {
         throw new ConflictException({ code: 'conflict', message: 'This subscription is already suspended' })
       }
-      return { tenant, sub: await this.persistSubscription(tx, tenant, sub, { status: 'suspended', suspendedAt: new Date() }) }
+      return { tenant, sub: await this.persistSubscription(tx, tenant, sub, { status: 'suspended', suspendedAt: new Date() }), items: await contractItems(tx, tenantId) }
     })
-    return { subscription: toView(result.sub, result.tenant, await this.planPrice(result.tenant)) }
+    return { subscription: toView(result.sub, result.tenant, await this.planPrice(result.tenant), result.items) }
   }
 
   async reactivate(operator: OpsPrincipal, tenantId: string, reason: string): Promise<{ subscription: SubscriptionView }> {
@@ -334,9 +529,9 @@ export class SubscriptionsService {
       if (sub.status !== 'suspended') {
         throw new ConflictException({ code: 'conflict', message: 'This subscription is not suspended' })
       }
-      return { tenant, sub: await this.persistSubscription(tx, tenant, sub, { status: 'active', suspendedAt: null }) }
+      return { tenant, sub: await this.persistSubscription(tx, tenant, sub, { status: 'active', suspendedAt: null }), items: await contractItems(tx, tenantId) }
     })
-    return { subscription: toView(result.sub, result.tenant, await this.planPrice(result.tenant)) }
+    return { subscription: toView(result.sub, result.tenant, await this.planPrice(result.tenant), result.items) }
   }
 
   /**

@@ -41,6 +41,7 @@ async function wipe(prisma: PrismaClient): Promise<void> {
   await prisma.tenantPaymentAccount.deleteMany()
   await prisma.invoice.deleteMany()
   await prisma.subscription.deleteMany()
+  await prisma.billingLineItem.deleteMany()
   await prisma.appliedOp.deleteMany()
   await prisma.syncDeadLetter.deleteMany()
   await prisma.device.deleteMany()
@@ -122,6 +123,7 @@ describe('/ops/v1/tenants/:tenantId/subscription (e2e)', () => {
   afterAll(async () => {
     // Other suites delete tenants; a leftover payments row would block them (FK).
     await prisma.tenantPaymentAccount.deleteMany()
+    await prisma.billingLineItem.deleteMany()
     await app.close()
     await prisma.$disconnect()
   })
@@ -467,6 +469,86 @@ describe('/ops/v1/tenants/:tenantId/subscription (e2e)', () => {
         expect(res.status, JSON.stringify(body)).toBe(400)
       }
       expect(await prisma.tenantPaymentAccount.count({ where: { tenantId } })).toBe(0)
+    })
+
+    // #290 billing contracts.
+    it('GET contract without items reports the plan price', async () => {
+      await setPrice(99900n)
+      const res = await authed(request(httpServer).get(`/ops/v1/tenants/${tenantId}/subscription/contract`))
+      expect(res.status).toBe(200)
+      expect(res.body).toEqual({
+        currency: 'INR',
+        billingPeriod: 'monthly',
+        items: [],
+        source: 'plan',
+        recurringTotalMinor: '99900',
+        nextInvoiceOneTimeMinor: '0',
+        planAmountMinor: '99900',
+        appliesFromNextInvoice: false,
+      })
+    })
+
+    it('PUT contract replaces unbilled items, keeps billed ones, audits the reason, and drives cardBilling.amountMinor', async () => {
+      await setPrice(99900n)
+      const billed = await prisma.billingLineItem.create({
+        data: { tenantId, description: 'Install', quantity: 1, unitAmountMinor: 50000n, kind: 'one_time', sortOrder: 0, billedAt: new Date() },
+      })
+      await prisma.billingLineItem.create({ data: { tenantId, description: 'Old line', quantity: 1, unitAmountMinor: 1n, kind: 'recurring', sortOrder: 1 } })
+      const url = `/ops/v1/tenants/${tenantId}/subscription/contract`
+      const res = await authed(request(httpServer).put(url)).send({
+        items: [
+          { description: ' POS licence ', quantity: 3, unitAmountMinor: 20000, kind: 'recurring' },
+          { description: 'Training', quantity: 1, unitAmountMinor: 15000, kind: 'one_time' },
+        ],
+        reason: 'Signed contract',
+      })
+      expect(res.status).toBe(200)
+      const body = res.body as { items: Array<{ id: string; description: string; billedAt: string | null }>; source: string; recurringTotalMinor: string; nextInvoiceOneTimeMinor: string }
+      expect(body).toMatchObject({ source: 'contract', recurringTotalMinor: '60000', nextInvoiceOneTimeMinor: '15000' })
+      expect(body.items.map((i) => i.description)).toEqual(['POS licence', 'Training', 'Install'])
+      expect(body.items[2]).toMatchObject({ id: billed.id })
+      expect(body.items[2].billedAt).not.toBeNull()
+      expect(await prisma.billingLineItem.count({ where: { tenantId } })).toBe(3)
+
+      const audit = await prisma.auditEvent.findMany({ where: { tenantId, action: 'billing.contract_updated' } })
+      expect(audit).toHaveLength(1)
+      expect(audit[0]).toMatchObject({ reason: 'Signed contract', actorId: operatorId })
+
+      const sub = await authed(request(httpServer).get(`/ops/v1/tenants/${tenantId}/subscription`))
+      expect((sub.body as { cardBilling: { amountMinor: string } }).cardBilling.amountMinor).toBe('60000')
+
+      const cleared = await authed(request(httpServer).put(url)).send({ items: [], reason: 'Back to plan' })
+      expect(cleared.status).toBe(200)
+      expect(cleared.body).toMatchObject({ source: 'plan', recurringTotalMinor: '99900' })
+      expect(await prisma.billingLineItem.count({ where: { tenantId } })).toBe(1)
+    })
+
+    it('PUT contract rejects bad input with 400 and writes nothing', async () => {
+      const url = `/ops/v1/tenants/${tenantId}/subscription/contract`
+      const line = { description: 'POS licence', quantity: 1, unitAmountMinor: 100, kind: 'recurring' }
+      for (const body of [
+        { items: [line] },
+        { items: [{ ...line, description: '  ' }], reason: 'x' },
+        { items: [{ ...line, quantity: 0 }], reason: 'x' },
+        { items: [{ ...line, unitAmountMinor: -5 }], reason: 'x' },
+        { items: [{ ...line, unitAmountMinor: '100' }], reason: 'x' },
+        { items: [{ ...line, kind: 'weekly' }], reason: 'x' },
+        { items: Array.from({ length: 31 }, () => line), reason: 'x' },
+        { items: 'nope', reason: 'x' },
+      ]) {
+        const res = await authed(request(httpServer).put(url)).send(body)
+        expect(res.status, JSON.stringify(body).slice(0, 120)).toBe(400)
+      }
+      expect(await prisma.billingLineItem.count({ where: { tenantId } })).toBe(0)
+      expect(await prisma.auditEvent.count({ where: { tenantId, action: 'billing.contract_updated' } })).toBe(0)
+    })
+
+    it('billing-link: 409 no_recurring_items for a contract with only one-time lines', async () => {
+      process.env.STRIPE_SECRET_KEY = 'sk_test_never_called'
+      await prisma.billingLineItem.create({ data: { tenantId, description: 'Setup', quantity: 1, unitAmountMinor: 100n, kind: 'one_time', sortOrder: 0 } })
+      const res = await authed(request(httpServer).post(`/ops/v1/tenants/${tenantId}/subscription/billing-link`)).send({})
+      expect(res.status).toBe(409)
+      expect(errorCodeOf(res)).toBe('no_recurring_items')
     })
 
     it('PATCH payments refuses wallets without Card (#284)', async () => {
