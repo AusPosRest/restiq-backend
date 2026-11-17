@@ -212,8 +212,9 @@ See `wiki/features/tenant-admin.md`'s CAP-108 section for the
 ## #282 - Stripe Connect and card billing
 
 - `src/ops/payments/` - `GET`/`PATCH /ops/v1/tenants/:tenantId/payments`, `POST .../payments/onboarding-link`.
-  The connected account is created with Stripe Accounts v2 (dashboard `none`, Stripe collects fees and
-  carries losses - the only settings this platform is allowed). Its status is read live from Stripe on
+  The connected account is created with Stripe Accounts v2, Standard-style since #312: dashboard `full`
+  (the restaurant has its own Stripe login), Stripe collects fees and carries losses. Accounts made before
+  #312 keep dashboard `none`. Its status is read live from Stripe on
   every view (`accountStatus`), never stored. Wallet list and platform fee live in `tenant_payment_accounts`.
 - `SubscriptionsService.billingLink` - Stripe Checkout (mode=subscription) on the platform account; the
   amount is inline from PlanPrice at link time, so a price edit applies to the next link only.
