@@ -154,7 +154,8 @@ export class PaymentsService {
           display_name: tenant.name,
           contact_email: tenant.contactEmail,
           identity: { country: tenant.country.toLowerCase() },
-          dashboard: 'none',
+          // #312: Standard-style - the restaurant gets its own full Stripe dashboard; Stripe still collects fees and covers losses.
+          dashboard: 'full',
           defaults: { currency, responsibilities: { fees_collector: 'stripe', losses_collector: 'stripe' } },
           configuration: { merchant: { capabilities: { card_payments: { requested: true } } } },
           metadata: { tenantId },
