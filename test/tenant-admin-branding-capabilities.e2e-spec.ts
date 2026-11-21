@@ -162,13 +162,14 @@ describe('/admin/v1/outlets, /admin/v1/branding (e2e)', () => {
 
   // restiq-backend#213: the console header's tenant name and TEST badge.
   describe('GET /admin/v1/tenant', () => {
+    // #314: `service` is null for an owner; it is filled only for an operator in service mode.
     it('returns the owner tenant name, country and Test mode', async () => {
       const { tenantId, token } = await createOwner(prisma, 'Mode Cafe')
       const live = await authed(request(httpServer).get('/admin/v1/tenant'), token)
       expect(live.status).toBe(200)
-      expect(live.body).toEqual({ name: 'Mode Cafe', country: 'IN', testMode: false })
+      expect(live.body).toEqual({ name: 'Mode Cafe', country: 'IN', testMode: false, service: null })
       await prisma.tenant.update({ where: { id: tenantId }, data: { liveSince: null } })
-      expect((await authed(request(httpServer).get('/admin/v1/tenant'), token)).body).toEqual({ name: 'Mode Cafe', country: 'IN', testMode: true })
+      expect((await authed(request(httpServer).get('/admin/v1/tenant'), token)).body).toEqual({ name: 'Mode Cafe', country: 'IN', testMode: true, service: null })
       expect((await request(httpServer).get('/admin/v1/tenant')).status).toBe(401)
     })
   })
