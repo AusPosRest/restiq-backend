@@ -269,7 +269,7 @@ Contract: `stripe-readers-contract.md` (web #429). Stacked on #282 (connected ac
 - **Code** (`src/platform/admin-jwt.ts`): admin secret, audience `admin-handoff`, 60 s; `sub` = operator,
   `tenantId`, `email`, `sv` (operator sessionVersion when the ops token had one). Never a session.
 - **Redeem** `POST /admin/v1/auth/service-session` (`@Public()`, `{ code }`) at the restaurant's own address
-  -> `{ token, tenant: { id, name }, operatorEmail, expiresInSeconds: 3600 }`. 401 `handoff_invalid`
+  -> `{ token, expiresInSeconds: 3600 }`. 401 `handoff_invalid`
   (bad/expired/wrong audience), 403 `tenant_mismatch` (another restaurant's address), 403
   `tenant_inactive`, 401 `session_revoked` (operator gone or logged out since).
 - **Token**: admin audience, 1 h, `sub`/`email` = operator, `svc: true`, `osv`. `verifyAdminToken` fills

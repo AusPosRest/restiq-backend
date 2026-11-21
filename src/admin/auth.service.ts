@@ -23,8 +23,6 @@ export type OwnerSessionResult = AcceptInviteResult
 
 export interface ServiceSessionResult {
   token: string
-  tenant: { id: string; name: string }
-  operatorEmail: string
   expiresInSeconds: number
 }
 
@@ -105,12 +103,7 @@ export class AdminAuthService {
     if (!operator || (handoff.operatorSessionVersion !== undefined && operator.sessionVersion !== handoff.operatorSessionVersion)) {
       throw new UnauthorizedException({ code: 'session_revoked', message: 'This session has ended - sign in again' })
     }
-    const plane = this.registry.planeFor(this.registry.homeRegion())
-    const tenant = await plane.$transaction(async (tx) => {
-      await tx.$executeRaw`SELECT set_config('app.tenant_id', ${handoff.tenantId}, true)`
-      return tx.tenant.findUniqueOrThrow({ where: { id: handoff.tenantId }, select: { id: true, name: true } })
-    })
-    return { token: signServiceToken(handoff), tenant, operatorEmail: handoff.operatorEmail, expiresInSeconds: SERVICE_SESSION_TTL_SECONDS }
+    return { token: signServiceToken(handoff), expiresInSeconds: SERVICE_SESSION_TTL_SECONDS }
   }
 
   async login(email: string, password: string, ip: string): Promise<OwnerSessionResult> {

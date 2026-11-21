@@ -26,8 +26,6 @@ interface Minted {
 }
 interface Redeemed {
   token: string
-  tenant: { id: string; name: string }
-  operatorEmail: string
   expiresInSeconds: number
 }
 
@@ -152,7 +150,7 @@ describe('service mode (e2e, #314)', () => {
     const code = ((await mint(tenantA).expect(200)).body as Minted).code
     const res = await redeem(code, slugA).expect(200)
     const body = res.body as Redeemed
-    expect(body).toEqual({ token: expect.any(String) as string, tenant: { id: tenantA, name: 'Service A' }, operatorEmail: OPERATOR_EMAIL, expiresInSeconds: 3600 })
+    expect(body).toEqual({ token: expect.any(String) as string, expiresInSeconds: 3600 })
 
     const tenant = await admin('get', '/admin/v1/tenant', body.token, slugA).expect(200)
     const service = (tenant.body as { service: { operatorEmail: string; expiresAt: string } }).service
