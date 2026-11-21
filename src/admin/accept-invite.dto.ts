@@ -14,3 +14,9 @@ export class AcceptInviteDto {
   @IsString() @MinLength(10) @MaxLength(200)
   password!: string
 }
+
+// #314: the ops handoff code the web server posts from the tenant's own address.
+export class ServiceSessionDto {
+  @IsString() @IsNotEmpty() @MaxLength(2048)
+  code!: string
+}

@@ -5,7 +5,7 @@
 import { BadRequestException, ConflictException, Injectable, Logger, NotFoundException } from '@nestjs/common'
 import { createHash, randomBytes } from 'node:crypto'
 import type { Prisma, PrismaClient } from '../../generated/prisma/client'
-import { isTestMode, MailService, OpsPrincipal, PrismaService, RegionRegistryService } from '../../platform'
+import { ControlPlaneAuditService, isTestMode, MailService, OpsPrincipal, PrismaService, RegionRegistryService, SERVICE_HANDOFF_TTL_SECONDS, signServiceHandoff } from '../../platform'
 import {
   UpdateBrandingDto,
   UpdateTenantDto,
@@ -146,6 +146,7 @@ export class TenantDirectoryService {
     private readonly prisma: PrismaService,
     private readonly registry: RegionRegistryService,
     private readonly mail: MailService,
+    private readonly audit: ControlPlaneAuditService,
   ) {}
 
   // --- Reads: fan out across region planes via the registry (AD-1). v1 has a
@@ -437,6 +438,25 @@ export class TenantDirectoryService {
       return tx.tenant.update({ where: { id }, data: { status: 'inactive' }, select: { id: true, status: true } })
     })
     return { tenant }
+  }
+
+  /**
+   * #314 service mode: a 60 s code the ops console posts to the tenant's own address, where the web server
+   * swaps it for a 1 h admin-realm session. Audited on both planes: the operator's trail and the tenant's.
+   */
+  async startServiceSession(operator: OpsPrincipal, id: string, reason: string): Promise<{ code: string; slug: string | null; expiresInSeconds: number }> {
+    const tenant = await this.mutate(operator, id, 'tenant.service_session_started', reason, async (tx) => {
+      const current = await tx.tenant.findUniqueOrThrow({ where: { id }, select: { status: true, slug: true } })
+      if (current.status === 'inactive') {
+        throw new ConflictException({ code: 'tenant_inactive', message: 'This tenant is inactive' })
+      }
+      return current
+    })
+    // Deliberate exception to AD-8's "never both": this is also the operator taking on a new session, so their
+    // own trail records which tenant they opened. Written after the tenant row; a failure here fails the request.
+    await this.audit.record({ actorId: operator.id, actorEmail: operator.email, action: 'tenant.service_session_started', reason: `${id}: ${reason}`, occurredAt: new Date() })
+    const code = signServiceHandoff({ operatorId: operator.id, operatorEmail: operator.email, tenantId: id, ...(operator.sessionVersion === undefined ? {} : { operatorSessionVersion: operator.sessionVersion }) })
+    return { code, slug: tenant.slug, expiresInSeconds: SERVICE_HANDOFF_TTL_SECONDS }
   }
 
   async reactivate(operator: OpsPrincipal, id: string, reason: string): Promise<{ tenant: { id: string; status: string } }> {

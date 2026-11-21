@@ -1,11 +1,12 @@
 // CAP-1: an invited owner accepts their invite, sets a password, and lands
 // with an admin-realm (aud:"admin") session in one call - no extra login step.
 // Issue #118 adds the returning-owner counterpart: password login.
-import { BadRequestException, ConflictException, Injectable, Logger, UnauthorizedException } from '@nestjs/common'
+import { BadRequestException, ConflictException, ForbiddenException, Injectable, Logger, UnauthorizedException } from '@nestjs/common'
+import type { Request } from 'express'
 import * as argon2 from 'argon2'
 import { createHash, randomBytes } from 'node:crypto'
 import type { Prisma } from '../generated/prisma/client'
-import { AdminPrincipal, AttemptLimiter, AttemptRule, MailService, RegionRegistryService, signAdminToken, webLink } from '../platform'
+import { AdminPrincipal, AttemptLimiter, AttemptRule, isTenantBlocked, MailService, PrismaService, RegionRegistryService, SERVICE_SESSION_TTL_SECONDS, signAdminToken, signServiceToken, TenantAddressService, verifyServiceHandoff, webLink } from '../platform'
 
 export interface InviteDetails {
   restaurantName: string
@@ -19,6 +20,11 @@ export interface AcceptInviteResult {
 }
 
 export type OwnerSessionResult = AcceptInviteResult
+
+export interface ServiceSessionResult {
+  token: string
+  expiresInSeconds: number
+}
 
 async function setInviteAcceptContext(tx: Prisma.TransactionClient): Promise<void> {
   await tx.$executeRaw`SELECT set_config('app.invite_accept_context', 'invite', true)`
@@ -81,7 +87,24 @@ export class AdminAuthService {
     private readonly registry: RegionRegistryService,
     private readonly limiter: AttemptLimiter,
     private readonly mail: MailService,
+    private readonly prisma: PrismaService,
+    private readonly address: TenantAddressService,
   ) {}
+
+  /** #314: swaps an ops handoff code for a service-mode admin session, only at that tenant's own address. */
+  async serviceSession(code: string, request: Pick<Request, 'headers'>): Promise<ServiceSessionResult> {
+    const handoff = verifyServiceHandoff(code)
+    if (!handoff) throw new UnauthorizedException({ code: 'handoff_invalid', message: 'This service link is not valid or has expired' })
+    await this.address.assertTokenMatchesAddress(request, handoff.tenantId)
+    if (await isTenantBlocked(this.registry, handoff.tenantId)) {
+      throw new ForbiddenException({ code: 'tenant_inactive', message: 'This tenant is no longer active' })
+    }
+    const operator = await this.prisma.client.operatorUser.findUnique({ where: { id: handoff.operatorId }, select: { sessionVersion: true } })
+    if (!operator || (handoff.operatorSessionVersion !== undefined && operator.sessionVersion !== handoff.operatorSessionVersion)) {
+      throw new UnauthorizedException({ code: 'session_revoked', message: 'This session has ended - sign in again' })
+    }
+    return { token: signServiceToken(handoff), expiresInSeconds: SERVICE_SESSION_TTL_SECONDS }
+  }
 
   async login(email: string, password: string, ip: string): Promise<OwnerSessionResult> {
     const normalized = email.trim().toLowerCase()

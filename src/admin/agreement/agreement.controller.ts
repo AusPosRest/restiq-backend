@@ -1,7 +1,7 @@
 import { Body, Controller, Get, Header, HttpCode, Param, ParseUUIDPipe, Post, StreamableFile } from '@nestjs/common'
 import { AgreementsService, pdfResponse, SignAgreementDto } from '../../ops'
 import type { AgreementSignatureView, OwnerAgreementView } from '../../ops'
-import { AdminPrincipal, CurrentOwner } from '../../platform'
+import { AdminPrincipal, CurrentOwner, OwnerOnly } from '../../platform'
 
 // Owner side of issue #132: read the current agreement, sign it. Calls the
 // ops module's AgreementsService directly (AD-12: one implementation, two
@@ -23,6 +23,8 @@ export class AdminAgreementController {
     return pdfResponse(await this.agreements.file(versionId))
   }
 
+  // #314: owner only - the signature records the signer as the owner (signer_owner_id).
+  @OwnerOnly()
   @Post(':versionId/sign')
   @HttpCode(201)
   sign(

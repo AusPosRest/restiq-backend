@@ -259,3 +259,27 @@ Contract: `stripe-readers-contract.md` (web #429). Stacked on #282 (connected ac
 - Known ceiling: the POS has no per-bill "active intent" read, so a reloaded till can't resume a waiting
   reader payment; it sees 409 `intent_active` until the intent ends or is cancelled.
 
+
+## #314 - Service mode (operator opens a restaurant's owner console)
+
+- **Mint** `POST /ops/v1/tenants/:id/service-session` (`{ reason }`, 200) ->
+  `{ code, slug, expiresInSeconds: 60 }` (`TenantDirectoryService.startServiceSession`). 404 `not_found` for an
+  unknown/deleted tenant, 409 `tenant_inactive` for an inactive one. Audited on the tenant
+  (`tenant.service_session_started`, actor = operator, with the reason) and in the control plane.
+- **Code** (`src/platform/admin-jwt.ts`): admin secret, audience `admin-handoff`, 60 s; `sub` = operator,
+  `tenantId`, `email`, `sv` (operator sessionVersion when the ops token had one). Never a session.
+- **Redeem** `POST /admin/v1/auth/service-session` (`@Public()`, `{ code }`) at the restaurant's own address
+  -> `{ token, expiresInSeconds: 3600 }`. 401 `handoff_invalid`
+  (bad/expired/wrong audience), 403 `tenant_mismatch` (another restaurant's address), 403
+  `tenant_inactive`, 401 `session_revoked` (operator gone or logged out since).
+- **Token**: admin audience, 1 h, `sub`/`email` = operator, `svc: true`, `osv`. `verifyAdminToken` fills
+  `service`, `operatorSessionVersion`, `expiresAt` only for `svc`; never the owner `sessionVersion`.
+  `AdminAuthGuard` checks the operator row instead of the owner row (ops logout ends it); tenant-blocked and
+  address checks apply as for owners. Audit rows written in the session carry the operator's id and email.
+- **`@OwnerOnly()`** (guard metadata) -> 403 `service_mode_forbidden`: agreement sign (records
+  `signer_owner_id`), reader orders (charges the owner's card), owner logout (updates the owner row).
+  The only FK to `owner_users` is `owner_password_resets.owner_id`, written only by the public
+  forgot-password flow.
+- `GET /admin/v1/tenant` adds `service: { operatorEmail, expiresAt } | null`.
+- Known ceiling: the code is a signed 60 s token, not a stored one-time row, so it can be replayed inside
+  those 60 s and there is no list of past service sessions beyond the audit rows.

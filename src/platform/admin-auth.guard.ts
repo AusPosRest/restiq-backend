@@ -2,14 +2,20 @@
 // admin secret - the third disjoint realm, same pattern as the ops guard
 // (AD-3). Applied globally so every future /admin controller is covered
 // without opting in; non-/admin routes pass through untouched.
-import { CanActivate, ExecutionContext, ForbiddenException, Injectable, UnauthorizedException, createParamDecorator } from '@nestjs/common'
+import { CanActivate, ExecutionContext, ForbiddenException, Injectable, SetMetadata, UnauthorizedException, createParamDecorator } from '@nestjs/common'
 import { Reflector } from '@nestjs/core'
 import type { Request } from 'express'
 import { AdminPrincipal, verifyAdminToken } from './admin-jwt'
 import { IS_PUBLIC } from './ops-auth.guard'
+import { PrismaService } from './prisma.service'
 import { RegionRegistryService } from './region-registry.service'
 import { TenantAddressService } from './tenant-address.service'
 import { isTenantBlocked } from './tenant-lifecycle'
+
+// #314: routes only the owner may call (they sign, pay or act on the owner's own account). An operator
+// in service mode gets 403 service_mode_forbidden.
+export const OWNER_ONLY = 'ownerOnly'
+export const OwnerOnly = () => SetMetadata(OWNER_ONLY, true)
 
 type AdminRequest = Request & { owner?: AdminPrincipal }
 
@@ -29,6 +35,7 @@ export class AdminAuthGuard implements CanActivate {
     private readonly reflector: Reflector,
     private readonly registry: RegionRegistryService,
     private readonly address: TenantAddressService,
+    private readonly prisma: PrismaService,
   ) {}
 
   async canActivate(context: ExecutionContext): Promise<boolean> {
@@ -48,6 +55,16 @@ export class AdminAuthGuard implements CanActivate {
       throw new ForbiddenException({ code: 'tenant_inactive', message: 'This tenant is no longer active' })
     }
     await this.address.assertTokenMatchesAddress(request, principal.tenantId)
+    if (principal.service) {
+      // #314: a service session lives only as long as the operator's own: gone, or logged out -> ended.
+      const operator = await this.prisma.client.operatorUser.findUnique({ where: { id: principal.id }, select: { sessionVersion: true } })
+      if (!operator || (principal.operatorSessionVersion !== undefined && operator.sessionVersion !== principal.operatorSessionVersion)) {
+        throw new UnauthorizedException({ code: 'session_revoked', message: 'This session has ended - sign in again' })
+      }
+      if (this.reflector.getAllAndOverride<boolean>(OWNER_ONLY, [context.getHandler(), context.getClass()])) {
+        throw new ForbiddenException({ code: 'service_mode_forbidden', message: 'Only the owner can do this' })
+      }
+    }
     // A token that carries a session version must still match the owner's: a password reset ends every older session.
     if (principal.sessionVersion !== undefined) {
       const plane = this.registry.planeFor(this.registry.homeRegion())

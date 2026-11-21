@@ -116,6 +116,17 @@ export class OpsTenantsController {
     return this.directory.deactivate(operator, id, dto.reason)
   }
 
+  // #314 service mode: a short handoff code to open this tenant's owner console for support.
+  @Post(':id/service-session')
+  @HttpCode(200)
+  startServiceSession(
+    @CurrentOperator() operator: OpsPrincipal,
+    @Param('id', ParseUUIDPipe) id: string,
+    @Body() dto: ReasonDto,
+  ): Promise<{ code: string; slug: string | null; expiresInSeconds: number }> {
+    return this.directory.startServiceSession(operator, id, dto.reason)
+  }
+
   @Post(':id/reactivate')
   @HttpCode(200)
   reactivate(
