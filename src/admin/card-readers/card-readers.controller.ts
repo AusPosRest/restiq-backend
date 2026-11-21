@@ -1,5 +1,5 @@
 import { Body, Controller, Get, Post } from '@nestjs/common'
-import { AdminPrincipal, CurrentOwner } from '../../platform'
+import { AdminPrincipal, CurrentOwner, OwnerOnly } from '../../platform'
 import { CardReaderView, CreateReaderOrderDto, ReaderOrderView, ReaderOrdersService, ReaderPriceView } from '../../ops'
 
 // #286: the owner's Card readers page - their readers, what they can order, and their orders.
@@ -13,6 +13,8 @@ export class AdminCardReadersController {
     return this.orders.ownerOverview(owner)
   }
 
+  // #314: owner only - it charges the owner's card on file.
+  @OwnerOnly()
   @Post('reader-orders')
   create(@CurrentOwner() owner: AdminPrincipal, @Body() dto: CreateReaderOrderDto): Promise<{ order: ReaderOrderView }> {
     return this.orders.create(owner, dto)

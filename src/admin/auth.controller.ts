@@ -1,7 +1,8 @@
-import { Body, Controller, HttpCode, Post } from '@nestjs/common'
-import { AdminPrincipal, ClientIp, CurrentOwner, Public } from '../platform'
-import { AcceptInviteDto, InviteDetailsDto } from './accept-invite.dto'
-import { AcceptInviteResult, AdminAuthService, InviteDetails, OwnerSessionResult } from './auth.service'
+import { Body, Controller, HttpCode, Post, Req } from '@nestjs/common'
+import type { Request } from 'express'
+import { AdminPrincipal, ClientIp, CurrentOwner, OwnerOnly, Public } from '../platform'
+import { AcceptInviteDto, InviteDetailsDto, ServiceSessionDto } from './accept-invite.dto'
+import { AcceptInviteResult, AdminAuthService, InviteDetails, OwnerSessionResult, ServiceSessionResult } from './auth.service'
 import { LoginDto } from './login.dto'
 import { ForgotPasswordDto, ResetPasswordDto } from './password-reset.dto'
 
@@ -46,7 +47,17 @@ export class AdminAuthController {
     return this.auth.resetPassword(dto.token, dto.password)
   }
 
+  // #314 service mode: the web server swaps an ops handoff code for a 1 h session, at the tenant's own address.
+  @Public()
+  @Post('service-session')
+  @HttpCode(200)
+  serviceSession(@Body() dto: ServiceSessionDto, @Req() request: Request): Promise<ServiceSessionResult> {
+    return this.auth.serviceSession(dto.code, request)
+  }
+
   // restiq-backend#209: ends every session this owner holds (all browsers), same as operator logout (#203).
+  // #314: owner only - it moves the owner's sessionVersion on, which an operator has none of.
+  @OwnerOnly()
   @Post('logout')
   @HttpCode(204)
   logout(@CurrentOwner() owner: AdminPrincipal): Promise<void> {

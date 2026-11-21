@@ -7,11 +7,14 @@ import { setTenantContext } from './menu/tenant-context'
 export class AdminTenantController {
   constructor(private readonly registry: RegionRegistryService) {}
 
+  // #314: `service` tells the console it is an operator in service mode (null for the owner).
   @Get()
-  get(@CurrentOwner() owner: AdminPrincipal): Promise<TenantSummary> {
-    return this.registry.planeFor(this.registry.homeRegion()).$transaction(async (tx) => {
+  async get(@CurrentOwner() owner: AdminPrincipal): Promise<TenantSummary & { service: { operatorEmail: string; expiresAt: string } | null }> {
+    const summary = await this.registry.planeFor(this.registry.homeRegion()).$transaction(async (tx) => {
       await setTenantContext(tx, owner.tenantId)
       return readTenantSummary(tx, owner.tenantId)
     })
+    const service = owner.service && owner.expiresAt !== undefined ? { operatorEmail: owner.email, expiresAt: new Date(owner.expiresAt * 1000).toISOString() } : null
+    return { ...summary, service }
   }
 }
