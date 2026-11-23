@@ -25,6 +25,7 @@ interface MenuItemBody {
   photoUrl: string | null
   nameHindi: string | null
   vegMarker: string | null
+  description: string | null
   available: boolean
   priceMinor: number | null
   currency: string | null
@@ -217,6 +218,7 @@ describe('/guest/v1/menu (e2e)', () => {
     expect(butterChicken.photoUrl).toBeNull()
     expect(butterChicken.nameHindi).toBeNull()
     expect(butterChicken.vegMarker).toBeNull()
+    expect(butterChicken.description).toBeNull()
     expect(butterChicken.allergens).toEqual([{ id: allergen.id, name: 'Dairy' }])
     expect(butterChicken.modifierGroups).toEqual([
       { id: group.id, name: 'Spice Level', minSelections: 1, maxSelections: 1, modifiers: [{ id: modifier.id, name: 'Extra Hot', priceMinor: 0 }] },
@@ -368,6 +370,7 @@ describe('/guest/v1/menu (e2e)', () => {
         photoUrl: 'https://cdn.example.com/paneer.jpg',
         nameHindi: 'पनीर टिक्का',
         vegMarker: 'veg',
+        description: 'Charred cottage cheese, mint chutney.',
       },
     })
     await prisma.itemPrice.create({ data: { tenantId, itemId: item.id, priceMinor: 28000n, currency: 'INR', channel: 'qr' } })
@@ -380,6 +383,7 @@ describe('/guest/v1/menu (e2e)', () => {
     expect(guestItem?.photoUrl).toBe('https://cdn.example.com/paneer.jpg')
     expect(guestItem?.nameHindi).toBe('पनीर टिक्का')
     expect(guestItem?.vegMarker).toBe('veg')
+    expect(guestItem?.description).toBe('Charred cottage cheese, mint chutney.')
 
     const itemRes = await request(httpServer).get(`/guest/v1/menu/items/${item.id}`).set('Authorization', `Bearer ${token}`)
     expect(itemRes.status).toBe(200)
@@ -387,6 +391,7 @@ describe('/guest/v1/menu (e2e)', () => {
     expect(singleItem.photoUrl).toBe('https://cdn.example.com/paneer.jpg')
     expect(singleItem.nameHindi).toBe('पनीर टिक्का')
     expect(singleItem.vegMarker).toBe('veg')
+    expect(singleItem.description).toBe('Charred cottage cheese, mint chutney.')
   })
 
   it('nulls photoUrl on the menu and item detail when the outlet turns menu_photos off (#148)', async () => {

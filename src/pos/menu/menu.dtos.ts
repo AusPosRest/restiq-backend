@@ -3,6 +3,7 @@
 // contract was never wrong, just never backed by a real endpoint (this file
 // closes that gap; restiq-web needs no shape change here).
 import type { ComboMenuView } from '../../admin'
+import type { VegMarker } from '../../generated/prisma/client'
 
 export interface MenuVariantView {
   id: string
@@ -31,6 +32,7 @@ export interface MenuItemView {
   shortName: string
   /** Null when the item has none, or the outlet turned `menu_photos` off. */
   photoUrl: string | null
+  vegMarker: VegMarker | null
   available: boolean
   /** Base price when the item has no variants; null when priced per-variant (see variants[].priceMinor instead). */
   priceMinor: number | null

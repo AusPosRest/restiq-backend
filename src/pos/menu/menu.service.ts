@@ -69,6 +69,7 @@ export class MenuService {
           name: item.name,
           shortName: item.shortName,
           photoUrl: showPhotos ? item.photoUrl : null,
+          vegMarker: item.vegMarker,
           available: availabilityOverride.get(item.id) ?? item.available,
           priceMinor,
           variants,

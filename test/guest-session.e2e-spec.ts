@@ -207,6 +207,29 @@ describe('/guest/v1 table sessions (e2e)', () => {
     expect(ok.status).toBe(201)
   })
 
+  it('restiq-backend#318: phone is optional on start - absent stores "" on the session and null on the guest; sent is stored as given', async () => {
+    const tenantId = await createTenant(prisma)
+    const outletId = await createOutlet(prisma, tenantId)
+    const withPhone = await createTable(prisma, tenantId, outletId, 'P1')
+    const withoutPhone = await createTable(prisma, tenantId, outletId, 'P2')
+    await enableQrOrdering(prisma, tenantId, outletId)
+
+    const bad = await request(httpServer).post('/guest/v1/sessions').send({ outletId, tableId: withoutPhone, name: 'Asha', phone: '12' })
+    expect(bad.status).toBe(400)
+
+    const noPhone = await request(httpServer).post('/guest/v1/sessions').send({ outletId, tableId: withoutPhone, name: 'Asha' })
+    expect(noPhone.status).toBe(201)
+    const noPhoneSession = await prisma.tableSession.findUniqueOrThrow({ where: { id: (noPhone.body as StartResult).session.sessionId }, include: { guests: true } })
+    expect(noPhoneSession.startedByGuestPhone).toBe('')
+    expect(noPhoneSession.guests.map((g) => g.phone)).toEqual([null])
+
+    const phone = await request(httpServer).post('/guest/v1/sessions').send({ outletId, tableId: withPhone, name: 'Rohan', phone: '+91 90000 22222' })
+    expect(phone.status).toBe(201)
+    const phoneSession = await prisma.tableSession.findUniqueOrThrow({ where: { id: (phone.body as StartResult).session.sessionId }, include: { guests: true } })
+    expect(phoneSession.startedByGuestPhone).toBe('+91 90000 22222')
+    expect(phoneSession.guests.map((g) => g.phone)).toEqual(['+91 90000 22222'])
+  })
+
   it('CU-22/PE-24: the welcome screen can name the restaurant and table; a foreign table, bad id or inactive tenant is a 404', async () => {
     const tenantId = await createTenant(prisma)
     const outletId = await createOutlet(prisma, tenantId)

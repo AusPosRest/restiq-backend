@@ -1,6 +1,6 @@
 // qr-self-order/CAP-2 (stories.yaml story 2, issue #78): the guest-readable projection
 // shape. Mirrors the real catalogue (admin/menu) including guest-facing fields:
-// photoUrl, nameHindi, and vegMarker.
+// photoUrl, nameHindi, vegMarker and description (#318).
 import type { ComboMenuView } from '../../admin'
 import type { VegMarker } from '../../generated/prisma/client'
 
@@ -41,6 +41,7 @@ export interface MenuItemView {
   photoUrl: string | null
   nameHindi: string | null
   vegMarker: VegMarker | null
+  description: string | null
   // Tenant-wide 86 toggle combined with this outlet's override row, if any
   // (CAP-2 success criterion: an 86'd item is included, marked unavailable).
   available: boolean

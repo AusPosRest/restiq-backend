@@ -147,6 +147,9 @@ built here, story by story.
     always nests its full `variants`, `modifierGroups` (with their
     `modifiers`), and `allergens` - one shape for list and detail, no
     separate "summary" projection.
+    - #318: optional `description` on create/update (trimmed, max 300,
+      blank or null clears it to null), returned on every item view and
+      on the guest menu. Not on the POS menu, menu import or ops templates.
     - Variants: `POST /items/:id/variants`, `DELETE /items/:id/variants/:variantId`.
     - Modifier-group / allergen attachment is replace-the-set, not
       add/remove: `PUT /items/:id/modifier-groups { modifierGroupIds: [] }`,

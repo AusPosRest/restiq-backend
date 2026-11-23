@@ -1,5 +1,5 @@
 // qr-self-order/CAP-1 (AD-17, AD-5, issue #68): the guest realm's table
-// session lifecycle - start (first guest, name+phone), join (later guests,
+// session lifecycle - start (first guest, name + optional phone), join (later guests,
 // 4-digit PIN), the authenticated session view, and the staff-side close pos
 // calls into (see close-session below, exported through the guest barrel).
 import { ConflictException, ForbiddenException, GoneException, Injectable, NotFoundException } from '@nestjs/common'
@@ -192,12 +192,13 @@ export class GuestSessionsService {
             tableId: dto.tableId,
             sessionPin: pin,
             startedByGuestName: dto.name,
-            startedByGuestPhone: dto.phone,
+            // Non-null column: '' when the guest gave no phone, as the kiosk start does.
+            startedByGuestPhone: dto.phone ?? '',
             expiresAt: new Date(Date.now() + SESSION_IDLE_TTL_MS),
           },
         })
         const guest = await tx.guest.create({
-          data: { tenantId: outlet.tenantId, sessionId: session.id, name: dto.name, phone: dto.phone },
+          data: { tenantId: outlet.tenantId, sessionId: session.id, name: dto.name, phone: dto.phone ?? null },
         })
 
         const principal: GuestPrincipal = {

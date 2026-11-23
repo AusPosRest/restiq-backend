@@ -1,4 +1,4 @@
-import { Type } from 'class-transformer'
+import { Transform, Type } from 'class-transformer'
 import { ArrayUnique, IsArray, IsBoolean, IsDateString, IsEnum, IsInt, IsOptional, IsString, IsUUID, Length, Matches, MaxLength, Min, MinLength, ValidateIf, ValidateNested } from 'class-validator'
 import type { PriceChannel, VegMarker } from '../../generated/prisma/client'
 import { NotBlank } from '../../platform'
@@ -16,6 +16,9 @@ const VEG_MARKERS = ['veg', 'non_veg'] as const
 const PHOTO_URL = /^(https:\/\/\S{1,2040}|data:image\/(jpeg|png|webp);base64,[A-Za-z0-9+/]+={0,2})$/
 const PHOTO_URL_MAX = 280_000
 const PHOTO_URL_MESSAGE = 'photoUrl must be an https URL or a data:image (jpeg, png or webp) photo under 200 KB'
+
+// restiq-backend#318: trimmed; blank or null clears it (IsOptional skips null).
+const blankToNull = ({ value }: { value: unknown }): unknown => (typeof value === 'string' ? value.trim() || null : value)
 
 export class CreateVariantDto {
   @IsString() @NotBlank() @MaxLength(60)
@@ -57,6 +60,9 @@ export class CreateItemDto {
   @IsOptional() @IsEnum(VEG_MARKERS)
   vegMarker?: VegMarker
 
+  @IsOptional() @Transform(blankToNull) @IsString() @MaxLength(300)
+  description?: string | null
+
   @IsOptional() @IsArray() @ValidateNested({ each: true }) @Type(() => CreateVariantDto)
   variants?: CreateVariantDto[]
 
@@ -91,6 +97,9 @@ export class UpdateItemDto {
 
   @IsOptional() @IsEnum(VEG_MARKERS)
   vegMarker?: VegMarker
+
+  @IsOptional() @Transform(blankToNull) @IsString() @MaxLength(300)
+  description?: string | null
 }
 
 // A separate PATCH than UpdateItemDto (mirrors SetAvailabilityDto's own
@@ -178,6 +187,7 @@ export interface ItemView {
   photoUrl: string | null
   nameHindi: string | null
   vegMarker: VegMarker | null
+  description: string | null
   available: boolean
   stationId: string | null
   /** Current dine-in base price; null when unpriced. Ignored by the till and QR once the item has variants. */

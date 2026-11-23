@@ -4,7 +4,7 @@
 
 - **CAP-1** QR entry and table session - a guest scans the table QR and
   reaches the outlet's menu with no app or account; the first guest starts
-  the session (name+phone), later guests join with its 4-digit PIN. A
+  the session (name, optional phone - #318), later guests join with its 4-digit PIN. A
   session binds to exactly one table; a wrong PIN cannot join; an outlet
   with `qr_ordering` disabled is refused server-side.
 - **CAP-2** Menu browse and item detail - a guest reads a projection of the
@@ -114,6 +114,8 @@
       id: string; name: string; sortOrder: number
       items: {
         id: string; categoryId: string; name: string; shortName: string
+        photoUrl: string | null; nameHindi: string | null; vegMarker: 'veg' | 'non_veg' | null
+        description: string | null  // #318: owner-written, max 300 chars
         available: boolean          // tenant `available` AND/OR outlet override, override wins if present
         priceMinor: number | null   // null when the item has variants (price lives on each variant instead) or is genuinely unpriced
         currency: string | null
@@ -276,7 +278,9 @@
 ## Endpoint contracts
 
 - `GET /guest/v1/outlets/:outletId/availability` -> `{ available: boolean, reason?: 'not_found' | 'qr_ordering_disabled' }`.
-- `POST /guest/v1/sessions` `{ outletId, tableId, name, phone }` -> 201
+- `POST /guest/v1/sessions` `{ outletId, tableId, name, phone? }` -> 201
+  (#318: `phone` optional, 400 when sent and malformed; absent stores
+  `startedByGuestPhone: ''` and the guest's `phone: null`)
   `{ token, pin, session: TableSessionView }`; 409 `session_already_open` if
   the table already has an open session; 403 `qr_ordering_disabled`; 404
   `not_found` for an unknown outlet/table pair.
