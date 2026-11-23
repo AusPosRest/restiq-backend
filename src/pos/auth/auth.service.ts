@@ -18,7 +18,7 @@ function toStaffSummary(staff: StaffUser): StaffSummary {
 }
 
 function toOutletSummary(outlet: Outlet): OutletSummary {
-  return { id: outlet.id, name: outlet.name }
+  return { id: outlet.id, name: outlet.name, type: outlet.type }
 }
 
 // restiq-backend#171: PINs are 4 digits (10,000 guesses), so wrong-PIN

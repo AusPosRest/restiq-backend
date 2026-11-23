@@ -22,13 +22,13 @@ interface AuthenticatedBody {
   status: 'authenticated'
   token: string
   staff: { id: string; name: string }
-  outlet: { id: string; name: string }
+  outlet: { id: string; name: string; type: string }
 }
 interface SelectOutletBody {
   status: 'select_outlet'
   pendingToken: string
   staff: { id: string; name: string }
-  outlets: { id: string; name: string }[]
+  outlets: { id: string; name: string; type: string }[]
 }
 
 // Full table list (not just this file's own tables): the e2e suite shares
@@ -174,7 +174,8 @@ describe('/pos/v1/auth and /pos/v1/clock (e2e)', () => {
       expect(body.status).toBe('authenticated')
       expect(body.token.split('.')).toHaveLength(3)
       expect(body.staff).toEqual({ id: staffId, name: 'Priya Nair' })
-      expect(body.outlet).toEqual({ id: outletId, name: 'Only Outlet' })
+      // #320: the outlet's type rides along, so the till can open on the right screen.
+      expect(body.outlet).toEqual({ id: outletId, name: 'Only Outlet', type: 'dine_in' })
 
       const events = await prisma.clockEvent.findMany({ where: { staffId } })
       expect(events).toHaveLength(1)
@@ -229,6 +230,7 @@ describe('/pos/v1/auth and /pos/v1/clock (e2e)', () => {
       const outletA = await createOutlet(prisma, tenantId, 'Indiranagar')
       const outletB = await createOutlet(prisma, tenantId, 'Koramangala')
       const staffId = await createStaffWithPin(prisma, tenantId, 'Rahul Iyer', '5678')
+      await prisma.outlet.update({ where: { id: outletB }, data: { type: 'food_court' } })
 
       const loginRes = await request(httpServer).post('/pos/v1/auth/login').send({ tenantId, pin: '5678' })
       expect(loginRes.status).toBe(200)
@@ -236,6 +238,7 @@ describe('/pos/v1/auth and /pos/v1/clock (e2e)', () => {
       expect(loginBody.status).toBe('select_outlet')
       expect(loginBody.staff).toEqual({ id: staffId, name: 'Rahul Iyer' })
       expect(loginBody.outlets.map((o) => o.id).sort()).toEqual([outletA, outletB].sort())
+      expect(Object.fromEntries(loginBody.outlets.map((o) => [o.id, o.type]))).toEqual({ [outletA]: 'dine_in', [outletB]: 'food_court' })
 
       // No clock-in yet - the session isn't real until an outlet is picked.
       expect(await prisma.clockEvent.count({ where: { staffId } })).toBe(0)
@@ -246,7 +249,7 @@ describe('/pos/v1/auth and /pos/v1/clock (e2e)', () => {
       expect(selectRes.status).toBe(200)
       const selectBody = selectRes.body as AuthenticatedBody
       expect(selectBody.status).toBe('authenticated')
-      expect(selectBody.outlet).toEqual({ id: outletA, name: 'Indiranagar' })
+      expect(selectBody.outlet).toEqual({ id: outletA, name: 'Indiranagar', type: 'dine_in' })
       expect(selectBody.token.split('.')).toHaveLength(3)
 
       const events = await prisma.clockEvent.findMany({ where: { staffId } })
@@ -284,7 +287,7 @@ describe('/pos/v1/auth and /pos/v1/clock (e2e)', () => {
       expect(res.status).toBe(200)
       const body = res.body as AuthenticatedBody
       expect(body.status).toBe('authenticated')
-      expect(body.outlet).toEqual({ id: outletB, name: 'Koramangala' })
+      expect(body.outlet).toEqual({ id: outletB, name: 'Koramangala', type: 'dine_in' })
     })
 
     it('offers only the assigned outlets and refuses any other', async () => {
