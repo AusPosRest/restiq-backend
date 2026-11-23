@@ -492,7 +492,8 @@ describe('/ops/v1/tenants directory (e2e)', () => {
     })
 
     it('counts devices heard from within the hour and unresolved dead letters (issue #189)', async () => {
-      const tenant = await prisma.tenant.findFirstOrThrow({ where: { deletedAt: null } })
+      // Named, not "the first tenant": Charlie has no outlet, and an unordered findFirst returned it on some CI runs.
+      const tenant = { id: ids.alpha }
       const outlet = await prisma.outlet.findFirstOrThrow({ where: { tenantId: tenant.id } })
       const device = (lastContactAt: Date | null) =>
         prisma.device.create({ data: { tenantId: tenant.id, outletId: outlet.id, label: 'Till', type: 'pos', hardwareKeyFingerprint: `fp-${Math.random()}`, enrolledAt: new Date(), lastContactAt } })

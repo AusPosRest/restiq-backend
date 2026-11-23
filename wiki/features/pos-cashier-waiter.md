@@ -1713,6 +1713,13 @@ a real Postgres test DB)
   `byMethod[]` is `{ method, count, amountMinor }` sorted by amount.
 - **Built in:** `bills.service.ts#listPaymentsToday`, `bills.dtos.ts`
   `PaymentHistoryView`. `bill-core.ts#currencyForCountry` is now exported.
+- **Refunds owed (issue #316):** the same response carries `refundsDue[]` - payment intents at the outlet
+  with `failureReason = late_capture_refund_due` (a card captured after the bill was settled another way, or
+  after the intent was cancelled or failed) flagged in the last 7 days, newest first:
+  `{ id, billId, billNumber, orderId, tableLabel, tokenNumber, method, amountMinor, flaggedAt }`.
+  A rolling window, not the outlet's day, so a capture at closing time still shows next morning.
+  `flaggedAt` is `succeededAt`, or `updatedAt` when the capture landed on a cancelled or failed intent.
+  They are not tenders: the totals and `payments[]` do not include them.
 - **Tests:** `pos-bills.e2e-spec.ts` ▸ "GET /pos/v1/outlets/:outletId/payments".
 - **Not built (by design):** refunds/credit notes in the list (separate
   ledger), pagination, a date picker (today only, per the ask).
