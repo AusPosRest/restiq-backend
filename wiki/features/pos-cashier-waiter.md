@@ -33,6 +33,9 @@ story by story.
 - `POST /pos/v1/auth/select-outlet` `{ pendingToken, outletId }` - verifies
   the pending token, checks the outlet belongs to that tenant, and
   finalises the same way (`src/pos/auth/auth.service.ts`).
+- Both replies describe an outlet as `{ id, name, type }` (#320): `type` is the
+  outlet's `OutletType`, which the web till uses to open on Counter (`qsr`,
+  `food_court`) or Tables (restiq-web#388).
 - Lockout: 5 wrong attempts for the exact `(tenantId, pin)` pair locks that
   pair for 30 seconds (`src/pos/auth/lockout.ts`, in-memory `Map` -
   documented single-instance-only tradeoff, acceptable for this prototype,

@@ -1,5 +1,5 @@
 import { IsNotEmpty, IsOptional, IsString, IsUUID, Matches, MaxLength } from 'class-validator'
-import type { ClockEventType } from '../../generated/prisma/client'
+import type { ClockEventType, OutletType } from '../../generated/prisma/client'
 
 // 4-digit PIN per SPEC CAP-1 and staff.service.ts's PIN_LENGTH convention.
 const PIN_PATTERN = /^\d{4}$/
@@ -38,6 +38,8 @@ export interface StaffSummary {
 export interface OutletSummary {
   id: string
   name: string
+  // #320: the till opens on Counter or Tables by this (restiq-web#388).
+  type: OutletType
 }
 
 export type PosLoginResult =
