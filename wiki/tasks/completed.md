@@ -1,5 +1,6 @@
 # Completed
 
+- **2026-11-23** - Kiosk heartbeat (issue #322, web #389): `GuestSessionsService.kioskHeartbeat` + `POST /guest/v1/kiosk/heartbeat` (public, 204 / 404 `not_found`), sharing the new `kioskOutlet()` lookup with `startKioskSession`. E2e in `test/guest-kiosk.e2e-spec.ts`.
 - **2026-11-23** - Outlet type in the POS sign-in reply (issue #320, web #388): `OutletSummary` in `src/pos/auth/auth.dtos.ts` gains `type`, so `login` and `select-outlet` answer `{ id, name, type }` per outlet. E2e in `test/pos-auth-clock.e2e-spec.ts`.
 - **2026-11-23** - Optional guest phone, dish description, POS veg marker (issue #318, web #385): `StartSessionDto.phone` optional (`''` on the session, `null` on the guest when absent); `MenuItem.description` + migration `20261123100000_menu_item_description`, admin create/update (trim, max 300, blank/null clears) and item view, guest menu `description`; POS menu `vegMarker`. E2e in `guest-session`, `menu-management`, `guest-menu`, `pos-menu`.
 - **2026-11-23** - Refunds owed on the POS payments list (issue #316): `listPaymentsToday` also returns `refundsDue[]`, the outlet's `late_capture_refund_due` payment intents from the last 7 days (rolling), outside the tender totals. Web half: restiq-web#386.

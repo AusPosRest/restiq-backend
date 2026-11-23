@@ -53,6 +53,21 @@ async function resolveOutletAndTable(tx: Tx, outletId: string, tableId: string):
  * (availability check, start, join) so there is exactly one gate, never a
  * client-trusted shortcut.
  */
+function noSuchKiosk(): NotFoundException {
+  return new NotFoundException({ code: 'not_found', message: 'No such outlet or kiosk' })
+}
+
+/** The outlet a kiosk call names, with its tenant context set - or the plain 404 that never hints at what exists. */
+async function kioskOutlet(tx: Tx, outletId: string): Promise<Outlet> {
+  await setGuestEntryContext(tx)
+  const outlet = await tx.outlet.findUnique({ where: { id: outletId } })
+  if (!outlet || outlet.deletedAt) throw noSuchKiosk()
+  await setTenantContext(tx, outlet.tenantId)
+  const tenant = await tx.tenant.findUnique({ where: { id: outlet.tenantId }, select: { status: true, deletedAt: true } })
+  if (!tenant || tenant.status === 'inactive' || tenant.deletedAt) throw noSuchKiosk()
+  return outlet
+}
+
 async function assertQrOrderingEnabled(tx: Tx, outletId: string): Promise<void> {
   const capability = await tx.outletCapability.findUnique({ where: { outletId_key: { outletId, key: CAPABILITY_KEY } } })
   if (!capability?.enabled) {
@@ -236,23 +251,12 @@ export class GuestSessionsService {
   async startKioskSession(dto: StartKioskSessionDto): Promise<KioskSessionStartResult> {
     const plane = this.plane()
     return plane.$transaction(async (tx) => {
-      await setGuestEntryContext(tx)
-      const outlet = await tx.outlet.findUnique({ where: { id: dto.outletId } })
-      if (!outlet || outlet.deletedAt) {
-        throw new NotFoundException({ code: 'not_found', message: 'No such outlet or kiosk' })
-      }
-      await setTenantContext(tx, outlet.tenantId)
-      const tenant = await tx.tenant.findUnique({ where: { id: outlet.tenantId }, select: { status: true, deletedAt: true } })
-      if (!tenant || tenant.status === 'inactive' || tenant.deletedAt) {
-        throw new NotFoundException({ code: 'not_found', message: 'No such outlet or kiosk' })
-      }
+      const outlet = await kioskOutlet(tx, dto.outletId)
       const device = await tx.device.findFirst({
         where: { id: dto.deviceId, tenantId: outlet.tenantId, outletId: dto.outletId, type: 'kiosk', status: 'active' },
         select: { id: true, label: true },
       })
-      if (!device) {
-        throw new NotFoundException({ code: 'not_found', message: 'No such outlet or kiosk' })
-      }
+      if (!device) throw noSuchKiosk()
       const capability = await tx.outletCapability.findUnique({ where: { outletId_key: { outletId: dto.outletId, key: KIOSK_CAPABILITY_KEY } } })
       if (!capability?.enabled) {
         throw new ForbiddenException({ code: 'kiosk_disabled', message: 'Kiosk ordering is not available at this outlet right now - please order at the counter' })
@@ -280,6 +284,22 @@ export class GuestSessionsService {
         name: guest.name,
       }
       return { token: signGuestToken(principal), session: toSessionView(session, null, [guest]) }
+    })
+  }
+
+  /**
+   * #322: a kiosk tab reports it is alive, so the owner's Devices page shows it
+   * online. Same lookup and same plain 404 as the session start above, but not
+   * gated by the `kiosk` capability: a kiosk switched off for ordering is still on.
+   */
+  async kioskHeartbeat(dto: StartKioskSessionDto): Promise<void> {
+    await this.plane().$transaction(async (tx) => {
+      const outlet = await kioskOutlet(tx, dto.outletId)
+      const { count } = await tx.device.updateMany({
+        where: { id: dto.deviceId, tenantId: outlet.tenantId, outletId: dto.outletId, type: 'kiosk', status: 'active' },
+        data: { lastContactAt: new Date() },
+      })
+      if (count === 0) throw noSuchKiosk()
     })
   }
 

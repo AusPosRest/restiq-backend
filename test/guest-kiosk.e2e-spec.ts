@@ -259,4 +259,33 @@ describe('/guest/v1/kiosk kiosk ordering (e2e)', () => {
     expect(off.status).toBe(403)
     expect((off.body as ErrorBody).error.code).toBe('kiosk_disabled')
   })
+
+  // #322: a kiosk has no staff session, so it reports in on its own public endpoint.
+  it('kiosk heartbeat stamps lastContactAt for an active kiosk and refuses anything else as 404', async () => {
+    const tenantId = await createTenant(prisma)
+    const outletId = await createOutlet(prisma, tenantId)
+    const otherOutletId = await createOutlet(prisma, tenantId)
+    // No kiosk capability row on purpose: a kiosk switched off for ordering is still a device that is on.
+    const kiosk = await createDevice(prisma, tenantId, outletId, 'kiosk')
+    const revoked = await createDevice(prisma, tenantId, outletId, 'kiosk', 'revoked')
+    const pos = await createDevice(prisma, tenantId, outletId, 'pos')
+    const elsewhere = await createDevice(prisma, tenantId, otherOutletId, 'kiosk')
+
+    const before = Date.now()
+    const ok = await request(httpServer).post('/guest/v1/kiosk/heartbeat').send({ outletId, deviceId: kiosk })
+    expect(ok.status).toBe(204)
+    const seen = (await prisma.device.findUniqueOrThrow({ where: { id: kiosk } })).lastContactAt
+    expect(seen?.getTime()).toBeGreaterThanOrEqual(before - 1000)
+
+    for (const deviceId of [revoked, pos, elsewhere, uuidv7()]) {
+      const res = await request(httpServer).post('/guest/v1/kiosk/heartbeat').send({ outletId, deviceId })
+      expect(res.status).toBe(404)
+      expect((res.body as ErrorBody).error.code).toBe('not_found')
+    }
+    await request(httpServer).post('/guest/v1/kiosk/heartbeat').send({ outletId: uuidv7(), deviceId: kiosk }).expect(404)
+    await request(httpServer).post('/guest/v1/kiosk/heartbeat').send({ outletId, deviceId: 'nope' }).expect(400)
+    // None of the refused calls touched a device.
+    const untouched = await prisma.device.findMany({ where: { id: { in: [revoked, pos, elsewhere] } }, select: { lastContactAt: true } })
+    expect(untouched.every((device) => device.lastContactAt === null)).toBe(true)
+  })
 })

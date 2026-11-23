@@ -38,6 +38,14 @@ export class GuestSessionsController {
     return this.sessions.startKioskSession(dto)
   }
 
+  // #322: the kiosk tab reports in every 30 s; public like the session start, same 404 for anything that is not an active kiosk here.
+  @Public()
+  @Post('kiosk/heartbeat')
+  @HttpCode(204)
+  async kioskHeartbeat(@Body() dto: StartKioskSessionDto): Promise<void> {
+    await this.sessions.kioskHeartbeat(dto)
+  }
+
   @Get('session')
   getCurrentSession(@CurrentGuest() guest: GuestPrincipal): Promise<TableSessionView> {
     return this.sessions.getCurrentSession(guest)

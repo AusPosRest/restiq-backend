@@ -604,6 +604,11 @@
   inactive tenant are all a plain 404 `not_found`; the `kiosk` outlet
   capability off (or absent) is 403 `kiosk_disabled`. No PIN, name or phone;
   nothing joins a kiosk session. `GET /guest/v1/session` returns `table: null`.
+- **Heartbeat (#322):** `POST /guest/v1/kiosk/heartbeat` `{ outletId, deviceId }`
+  (public, `sessions.service.ts#kioskHeartbeat`) → 204 and `lastContactAt = now`
+  for an active kiosk at that outlet, the same plain 404 `not_found` for anything
+  else. Not gated by the `kiosk` capability. The web kiosk tab calls it every
+  30 s (restiq-web#389), so the owner's Devices page shows the kiosk online.
 - **Placement:** `orders.service.ts#placeOrder` on a table-less session
   reserves a `tokenNumber` from `token_number_counters` (the same upsert as
   POS `createCounterOrder`, in the same transaction) and writes `source:
