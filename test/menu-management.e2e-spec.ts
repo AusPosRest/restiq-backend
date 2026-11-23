@@ -43,6 +43,7 @@ interface ItemBody {
   photoUrl: string | null
   nameHindi: string | null
   vegMarker: string | null
+  description: string | null
   available: boolean
   stationId: string | null
   priceMinor: number | null
@@ -400,6 +401,36 @@ describe('/admin/v1/menu (e2e)', () => {
 
       const fetched = await authed(request(httpServer).get(`/admin/v1/menu/items/${created.id}`), token)
       expect((fetched.body as ItemBody).vegMarker).toBe('veg')
+    })
+
+    it('restiq-backend#318: sets, changes and clears a trimmed description; refuses one over 300 characters', async () => {
+      const { token } = await createOwner(prisma)
+      const category = await createCategory(token)
+
+      const created = await createItem(token, category.id, { description: '  Slow-cooked in a tomato and butter gravy.  ' })
+      expect(created.description).toBe('Slow-cooked in a tomato and butter gravy.')
+
+      const patch = (body: object): request.Test => authed(request(httpServer).patch(`/admin/v1/menu/items/${created.id}`), token).send(body)
+      const changed = await patch({ description: 'Smoky, mild, rich.' })
+      expect(changed.status).toBe(200)
+      expect((changed.body as ItemBody).description).toBe('Smoky, mild, rich.')
+
+      const untouched = await patch({ name: 'Butter Chicken Special' })
+      expect((untouched.body as ItemBody).description).toBe('Smoky, mild, rich.')
+
+      const tooLong = await patch({ description: 'x'.repeat(301) })
+      expect(tooLong.status).toBe(400)
+      expect((tooLong.body as ErrorBody).error.code).toBe('validation_failed')
+      const atLimit = await patch({ description: 'x'.repeat(300) })
+      expect(atLimit.status).toBe(200)
+
+      expect(((await patch({ description: '   ' })).body as ItemBody).description).toBeNull()
+      await patch({ description: 'Back again' })
+      expect(((await patch({ description: null })).body as ItemBody).description).toBeNull()
+      const fetched = await authed(request(httpServer).get(`/admin/v1/menu/items/${created.id}`), token)
+      expect((fetched.body as ItemBody).description).toBeNull()
+
+      expect((await createItem(token, category.id, { name: 'Plain Naan', shortName: 'Naan' })).description).toBeNull()
     })
 
     it('rejects a blank or over-long item/category name (SE-19)', async () => {

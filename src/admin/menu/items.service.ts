@@ -75,6 +75,7 @@ function toView(item: ItemWithRelations, prices: PriceMap): ItemView {
     photoUrl: item.photoUrl,
     nameHindi: item.nameHindi,
     vegMarker: item.vegMarker,
+    description: item.description,
     available: item.available,
     stationId: item.stationId,
     priceMinor: base ? Number(base.priceMinor) : null,
@@ -171,6 +172,7 @@ export class ItemsService {
             photoUrl: dto.photoUrl ?? null,
             nameHindi: dto.nameHindi ?? null,
             vegMarker: dto.vegMarker ?? null,
+            description: dto.description ?? null,
             stationId: dto.stationId ?? null,
           },
         })
@@ -212,6 +214,7 @@ export class ItemsService {
           photoUrl: dto.photoUrl !== undefined ? dto.photoUrl : existing.photoUrl,
           nameHindi: dto.nameHindi !== undefined ? dto.nameHindi : existing.nameHindi,
           vegMarker: dto.vegMarker !== undefined ? dto.vegMarker : existing.vegMarker,
+          description: dto.description !== undefined ? dto.description : existing.description,
         },
       })
       return viewOf(tx, owner.tenantId, itemId)

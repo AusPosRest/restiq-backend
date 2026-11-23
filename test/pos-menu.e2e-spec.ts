@@ -228,7 +228,18 @@ describe('/pos/v1/menu (e2e)', () => {
     expect(body.currency).toBe('INR')
     expect(body.categories).toEqual([expect.objectContaining({ id: categoryId })])
     expect(body.items).toHaveLength(1)
-    expect(body.items[0]).toMatchObject({ id: itemId, categoryId, priceMinor: 19000, variants: [], available: true })
+    expect(body.items[0]).toMatchObject({ id: itemId, categoryId, priceMinor: 19000, variants: [], available: true, vegMarker: null })
+  })
+
+  it('restiq-backend#318: carries the veg marker, as the guest menu does', async () => {
+    const tenantId = await createTenant(prisma)
+    const outletId = await createOutlet(prisma, tenantId)
+    const waiter = await createStaff(prisma, tenantId, outletId, 'Asha')
+    const { itemId } = await createItemWithPrice(prisma, tenantId, 19000)
+    await prisma.menuItem.update({ where: { id: itemId }, data: { vegMarker: 'non_veg' } })
+
+    const res = await authed(request(httpServer).get('/pos/v1/menu'), waiter.token)
+    expect(res.body).toMatchObject({ items: [{ id: itemId, vegMarker: 'non_veg' }] })
   })
 
   it('carries photoUrl by default, and nulls it once the outlet turns menu_photos off (#148)', async () => {

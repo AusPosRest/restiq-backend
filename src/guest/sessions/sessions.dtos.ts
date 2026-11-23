@@ -21,8 +21,10 @@ export class StartSessionDto {
   @IsString() @NotBlank() @MaxLength(80)
   name!: string
 
-  @IsString() @Matches(PHONE_PATTERN, { message: 'phone must be a phone number' })
-  phone!: string
+  // restiq-backend#318: optional - a guest may start without one. When sent it
+  // must still look like a phone number.
+  @IsOptional() @IsString() @Matches(PHONE_PATTERN, { message: 'phone must be a phone number' })
+  phone?: string
 }
 
 export class JoinSessionDto {

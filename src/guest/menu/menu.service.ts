@@ -5,7 +5,7 @@
 // outlet, via the outlet dimension already present on pricing/availability -
 // never a guest-side copy of the catalogue.
 //
-// Guest fields (photoUrl, nameHindi, vegMarker) are exposed directly from
+// Guest fields (photoUrl, nameHindi, vegMarker, description) are exposed directly from
 // MenuItem (issue #78).
 //
 // Pricing reuses admin/menu/pricing's resolveCurrentPrice verbatim through
@@ -89,6 +89,7 @@ async function toItemView(tx: Tx, tenantId: string, outletId: string, item: Item
     photoUrl: photos ? item.photoUrl : null,
     nameHindi: item.nameHindi,
     vegMarker: item.vegMarker,
+    description: item.description,
     available: resolveAvailability(item, outletId),
     priceMinor,
     currency,
