@@ -17,6 +17,7 @@ import { afterAll, beforeAll, beforeEach, describe, expect, it } from 'vitest'
 import { AppModule } from '../src/app.module'
 import { createPrismaClient, PrismaClient } from '../src/db/client'
 import { signAdminToken, signPosToken, uuidv7 } from '../src/platform'
+import { confirmIntent, LATE_CAPTURE_REFUND_DUE } from '../src/pos/payments'
 
 interface ErrorBody {
   error: { code: string; message: string }
@@ -1408,6 +1409,92 @@ describe('/pos/v1 bill and settle (e2e)', () => {
         { method: 'external', count: 1, amountMinor: 10000 },
       ])
       void second
+    })
+
+    // #316: card payments captured after the bill was settled another way are owed back - listed so staff refund them.
+    describe('refundsDue', () => {
+      interface RefundDueBody { id: string; billId: string; billNumber: number | null; orderId: string; tableLabel: string | null; tokenNumber: number | null; method: string; amountMinor: number; flaggedAt: string }
+      const DAY_MS = 24 * 60 * 60 * 1000
+
+      // Expired, so it does not hold the bill open for a cash settle; confirmIntent still captures it (ADR-011).
+      async function pendingIntent(bill: { tenantId: string; outletId: string; billId: string }, rail: 'card_online' | 'card_terminal' | 'upi_qr', amountMinor: number): Promise<string> {
+        const intent = await prisma.paymentIntent.create({
+          data: { tenantId: bill.tenantId, outletId: bill.outletId, billId: bill.billId, rail, provider: 'simulated', amountMinor: BigInt(amountMinor), currency: 'INR', status: 'expired', clientKey: uuidv7(), clientPayload: { simulated: true }, expiresAt: new Date(Date.now() - 1000) },
+        })
+        return intent.id
+      }
+
+      /** A bill paid in cash, then a card capture lands on it - the real confirmIntent late-capture path. */
+      async function lateCapture(tenantId: string, outletId: string, amountMinor: number): Promise<{ intentId: string; billId: string; orderId: string; ownerToken: string }> {
+        const { orderId, ownerToken } = await setUpSentOrder(tenantId, outletId, 10000)
+        const billId = ((await authed(request(httpServer).post(`/pos/v1/orders/${orderId}/bill`), ownerToken).send()).body as BillBody).id
+        const intentId = await pendingIntent({ tenantId, outletId, billId }, 'card_online', amountMinor)
+        await authed(request(httpServer).post(`/pos/v1/bills/${billId}/finalize`), ownerToken).send({ tenders: [{ method: 'cash', amountMinor: 21000 }] }).expect(200)
+        const row = await prisma.$transaction((tx) => confirmIntent(tx, { tenantId, intentId }))
+        expect(row.failureReason).toBe(LATE_CAPTURE_REFUND_DUE)
+        return { intentId, billId, orderId, ownerToken }
+      }
+
+      it('lists late captures at this outlet from the last 7 days, newest first, outside the tender totals', async () => {
+        const tenantId = await createTenant(prisma)
+        const outletId = await createOutlet(prisma, tenantId)
+        const otherOutletId = await createOutlet(prisma, tenantId, 'Koramangala')
+        const otherTenant = await createTenant(prisma, 'Other')
+        const otherTenantOutlet = await createOutlet(prisma, otherTenant)
+
+        const late = await lateCapture(tenantId, outletId, 21000)
+        // Stripe succeeded after staff cancelled the attempt: flagged on a cancelled intent, no succeededAt.
+        const cancelledBill = await finalizedBill(tenantId, outletId, [{ method: 'cash', amountMinor: 21000 }])
+        const cancelledId = await pendingIntent({ tenantId, outletId, billId: cancelledBill.billId }, 'card_terminal', 5000)
+        await prisma.paymentIntent.update({ where: { id: cancelledId }, data: { status: 'cancelled', failureReason: LATE_CAPTURE_REFUND_DUE } })
+        // Yesterday's flag still shows; one 8 days old does not.
+        const yesterday = await lateCapture(tenantId, outletId, 3000)
+        await prisma.paymentIntent.update({ where: { id: yesterday.intentId }, data: { succeededAt: new Date(Date.now() - DAY_MS) } })
+        const old = await lateCapture(tenantId, outletId, 4000)
+        await prisma.paymentIntent.update({ where: { id: old.intentId }, data: { succeededAt: new Date(Date.now() - 8 * DAY_MS) } })
+        // Not refunds: an ordinary card payment, and refund-due captures at another outlet / tenant.
+        const { orderId: paidOrderId, ownerToken: paidToken } = await setUpSentOrder(tenantId, outletId, 10000)
+        const paidBillId = ((await authed(request(httpServer).post(`/pos/v1/orders/${paidOrderId}/bill`), paidToken).send()).body as BillBody).id
+        const paidIntentId = await pendingIntent({ tenantId, outletId, billId: paidBillId }, 'card_online', 21000)
+        await prisma.$transaction((tx) => confirmIntent(tx, { tenantId, intentId: paidIntentId }))
+        await authed(request(httpServer).post(`/pos/v1/bills/${paidBillId}/finalize`), paidToken).send({ tenders: [] }).expect(200)
+        await lateCapture(tenantId, otherOutletId, 21000)
+        await lateCapture(otherTenant, otherTenantOutlet, 21000)
+
+        const body = (await authed(request(httpServer).get(`/pos/v1/outlets/${outletId}/payments`), late.ownerToken).expect(200)).body as PaymentsBody & { refundsDue: RefundDueBody[] }
+        expect(body.refundsDue.map((r) => r.id)).toEqual([cancelledId, late.intentId, yesterday.intentId])
+        const lateBill = await prisma.bill.findUniqueOrThrow({ where: { id: late.billId } })
+        const lateOrder = await prisma.order.findUniqueOrThrow({ where: { id: late.orderId } })
+        const { flaggedAt, ...lateEntry } = body.refundsDue[1]
+        expect(Number.isNaN(Date.parse(flaggedAt))).toBe(false)
+        expect(lateEntry).toEqual({
+          id: late.intentId,
+          billId: late.billId,
+          billNumber: lateBill.billNumber,
+          orderId: late.orderId,
+          tableLabel: 'T1',
+          tokenNumber: lateOrder.tokenNumber,
+          method: 'card_online',
+          amountMinor: 21000,
+        })
+        expect(body.refundsDue[0]).toMatchObject({ billId: cancelledBill.billId, method: 'card_terminal', amountMinor: 5000 })
+        // Tenders only: the late captures added nothing - four cash bills here plus the one ordinary card payment.
+        expect(body.count).toBe(5)
+        expect(body.totalMinor).toBe(4 * 21000 + 21000)
+        expect(body.payments.map((p) => p.method).sort()).toEqual(['card_online', 'cash', 'cash', 'cash', 'cash'])
+        expect(body.byMethod).toEqual([
+          { method: 'cash', count: 4, amountMinor: 84000 },
+          { method: 'card_online', count: 1, amountMinor: 21000 },
+        ])
+      })
+
+      it('is an empty list when nothing is owed', async () => {
+        const tenantId = await createTenant(prisma)
+        const outletId = await createOutlet(prisma, tenantId)
+        const staff = await createStaff(prisma, tenantId, outletId, 'Asha')
+        const body = (await authed(request(httpServer).get(`/pos/v1/outlets/${outletId}/payments`), staff.token).expect(200)).body as { refundsDue: unknown[] }
+        expect(body.refundsDue).toEqual([])
+      })
     })
 
     it('404s for an outlet outside the tenant', async () => {

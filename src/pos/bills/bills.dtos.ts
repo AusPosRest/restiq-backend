@@ -3,7 +3,7 @@
 // every other pos DTO (AD-5).
 import { Type } from 'class-transformer'
 import { ArrayMinSize, IsArray, IsBoolean, IsIn, IsInt, IsOptional, IsString, IsUUID, MaxLength, Min, MinLength, ValidateIf, ValidateNested } from 'class-validator'
-import type { BillStatus, GstSplitRounding, TenderMethod } from '../../generated/prisma/client'
+import type { BillStatus, GstSplitRounding, PaymentRail, TenderMethod } from '../../generated/prisma/client'
 
 // Only the cashier-asserted methods are postable here. The electronic ones
 // (card_terminal, ...) are written by src/pos/payments' confirmIntent when
@@ -314,6 +314,23 @@ export interface PaymentMethodTotal {
   amountMinor: number
 }
 
+// #316: a card payment captured after its bill was settled another way - no
+// tender was written, the customer is owed the money back.
+export interface RefundDueEntry {
+  /** The payment intent id. */
+  id: string
+  billId: string
+  billNumber: number | null
+  orderId: string
+  tableLabel: string | null
+  tokenNumber: number | null
+  /** The intent's rail - the same names tenders use. */
+  method: PaymentRail
+  amountMinor: number
+  /** succeededAt, or updatedAt when the capture landed on a cancelled/failed intent. */
+  flaggedAt: string
+}
+
 export interface PaymentHistoryView {
   outletId: string
   /** The outlet's local calendar day, YYYY-MM-DD. */
@@ -324,4 +341,6 @@ export interface PaymentHistoryView {
   count: number
   byMethod: PaymentMethodTotal[]
   payments: PaymentHistoryEntry[]
+  /** Not tenders, so not in the totals above. */
+  refundsDue: RefundDueEntry[]
 }

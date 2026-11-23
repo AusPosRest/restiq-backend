@@ -42,7 +42,8 @@ import { linkedPeripheral, queueFor } from '../device-routing'
 import { localDateKey } from '../clock/clock.util'
 import { assertOwner, loadOrder } from '../orders/orders.service'
 import { buildInvoiceView, commitFinalize, createOrGetBillRecord, createTenderRecord, currencyForCountry, loadBill, loadTenantTaxProfile, lockBill, refreshOpenBillTotals, toBillView } from './bill-core'
-import { BillView, CreditNoteLineView, CreditNoteView, FinalizeBillDto, InvoiceView, PaymentHistoryEntry, PaymentHistoryView, PaymentMethodTotal, PrintJobView, RefundBillDto } from './bills.dtos'
+import { BillView, CreditNoteLineView, CreditNoteView, FinalizeBillDto, InvoiceView, PaymentHistoryEntry, PaymentHistoryView, PaymentMethodTotal, PrintJobView, RefundBillDto, RefundDueEntry } from './bills.dtos'
+import { LATE_CAPTURE_REFUND_DUE } from '../payments'
 import type { Prisma } from '../../generated/prisma/client'
 
 // SPEC.md's Assumptions section defers the actual discount-above-threshold
@@ -50,6 +51,22 @@ import type { Prisma } from '../../generated/prisma/client'
 // memlog names "any discount over 20%" as that default. TODO(tenant
 // settings story): make this a real per-tenant configurable value.
 const DISCOUNT_THRESHOLD_PERCENT = 20n
+
+// #316: how long a refund-due card capture stays on the till's Payments screen.
+const REFUNDS_DUE_WINDOW_MS = 7 * 24 * 60 * 60 * 1000
+
+// The bill details a Payments-screen row shows - shared by tenders and refund-due captures (#316).
+const PAYMENT_BILL_SELECT = {
+  id: true,
+  billNumber: true,
+  orderId: true,
+  finalizedByStaff: { select: { id: true, name: true } },
+  order: { select: { tokenNumber: true, table: { select: { label: true } } } },
+} satisfies Prisma.BillSelect
+
+function paymentBillRef(bill: Prisma.BillGetPayload<{ select: typeof PAYMENT_BILL_SELECT }>) {
+  return { billId: bill.id, billNumber: bill.billNumber, orderId: bill.orderId, tableLabel: bill.order.table?.label ?? null, tokenNumber: bill.order.tokenNumber }
+}
 
 const CREDIT_NOTE_INCLUDE = { lines: { orderBy: { id: 'asc' as const } } } satisfies Prisma.CreditNoteInclude
 type CreditNoteWithLines = Prisma.CreditNoteGetPayload<{ include: typeof CREDIT_NOTE_INCLUDE }>
@@ -161,28 +178,14 @@ export class BillsService {
       const rows = await tx.tender.findMany({
         where: { tenantId: staff.tenantId, createdAt: { gte: since }, bill: { outletId, status: 'finalized' } },
         orderBy: { createdAt: 'desc' },
-        include: {
-          bill: {
-            select: {
-              id: true,
-              billNumber: true,
-              orderId: true,
-              finalizedByStaff: { select: { id: true, name: true } },
-              order: { select: { tokenNumber: true, table: { select: { label: true } } } },
-            },
-          },
-        },
+        include: { bill: { select: PAYMENT_BILL_SELECT } },
       })
 
       const payments: PaymentHistoryEntry[] = rows
         .filter((row) => localDateKey(row.createdAt, outlet.timezone) === todayKey)
         .map((row) => ({
           id: row.id,
-          billId: row.bill.id,
-          billNumber: row.bill.billNumber,
-          orderId: row.bill.orderId,
-          tableLabel: row.bill.order.table?.label ?? null,
-          tokenNumber: row.bill.order.tokenNumber,
+          ...paymentBillRef(row.bill),
           method: row.method,
           amountMinor: Number(row.amountMinor),
           reference: row.reference,
@@ -199,6 +202,30 @@ export class BillsService {
       }
       const byMethod = [...totals.values()].sort((a, b) => b.amountMinor - a.amountMinor)
 
+      // #316: captures owed back to the customer. A rolling window, not the
+      // outlet's day, so a capture at closing time still shows next morning.
+      // A capture on a cancelled/failed intent has no succeededAt - updatedAt
+      // is when it was flagged.
+      const refundSince = new Date(now.getTime() - REFUNDS_DUE_WINDOW_MS)
+      const intents = await tx.paymentIntent.findMany({
+        where: {
+          tenantId: staff.tenantId,
+          failureReason: LATE_CAPTURE_REFUND_DUE,
+          bill: { outletId },
+          OR: [{ succeededAt: { gte: refundSince } }, { succeededAt: null, updatedAt: { gte: refundSince } }],
+        },
+        include: { bill: { select: PAYMENT_BILL_SELECT } },
+      })
+      const refundsDue: RefundDueEntry[] = intents
+        .map((intent) => ({
+          id: intent.id,
+          ...paymentBillRef(intent.bill),
+          method: intent.rail,
+          amountMinor: Number(intent.amountMinor),
+          flaggedAt: (intent.succeededAt ?? intent.updatedAt).toISOString(),
+        }))
+        .sort((a, b) => b.flaggedAt.localeCompare(a.flaggedAt))
+
       const { country } = await loadTenantTaxProfile(tx, staff.tenantId)
       return {
         outletId,
@@ -209,6 +236,7 @@ export class BillsService {
         count: payments.length,
         byMethod,
         payments,
+        refundsDue,
       }
     })
   }
