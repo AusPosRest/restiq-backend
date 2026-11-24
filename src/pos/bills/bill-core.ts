@@ -111,7 +111,7 @@ function toStoredTaxBreakdown(tax: TaxResult): StoredTaxBreakdown {
   }
 }
 
-function readStoredTaxBreakdown(taxBreakdown: Prisma.JsonValue | null): StoredTaxBreakdown {
+export function readStoredTaxBreakdown(taxBreakdown: Prisma.JsonValue | null): StoredTaxBreakdown {
   const stored = taxBreakdown as Partial<StoredTaxBreakdown> | null
   return { lines: stored?.lines ?? [], notes: stored?.notes ?? [], gstSplitRounding: stored?.gstSplitRounding ?? null }
 }

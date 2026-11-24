@@ -195,16 +195,14 @@ export class ShiftsService {
     }
   }
 
-  async getCurrentShift(staff: PosPrincipal, outletId: string): Promise<ShiftView> {
+  /** The outlet's open shift, or null: no open shift is a normal state, not an error (#259, AP-se-14). */
+  async getCurrentShift(staff: PosPrincipal, outletId: string): Promise<ShiftView | null> {
     const plane = this.plane()
     return plane.$transaction(async (tx) => {
       await setTenantContext(tx, staff.tenantId)
       await loadOutlet(tx, staff.tenantId, outletId)
       const shift = await tx.shift.findFirst({ where: { outletId, closedAt: null }, include: SHIFT_INCLUDE })
-      if (!shift) {
-        throw new NotFoundException({ code: 'not_found', message: 'No open shift for this outlet' })
-      }
-      return toShiftView(shift)
+      return shift ? toShiftView(shift) : null
     })
   }
 

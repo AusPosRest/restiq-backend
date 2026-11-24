@@ -33,6 +33,7 @@ interface BillBody {
   taxMinor: number
   discountMinor: number | null
   totalMinor: number
+  pricesIncludeTax: boolean
   status: 'open' | 'finalized'
   tenders: TenderBody[]
 }
@@ -118,6 +119,7 @@ async function wipe(prisma: PrismaClient): Promise<void> {
   await prisma.tableSession.deleteMany()
   await prisma.diningTable.deleteMany()
   await prisma.floor.deleteMany()
+  await prisma.tokenNumberCounter.deleteMany()
   await prisma.outlet.deleteMany()
   await prisma.brand.deleteMany()
   await prisma.ownerInvite.deleteMany()
@@ -131,7 +133,7 @@ async function wipe(prisma: PrismaClient): Promise<void> {
   await prisma.onboardingDraft.deleteMany()
 }
 
-async function createTenant(prisma: PrismaClient, name = 'Spice Route Hospitality'): Promise<string> {
+async function createTenant(prisma: PrismaClient, name = 'Spice Route Hospitality', country: 'IN' | 'AU' = 'IN'): Promise<string> {
   const tenantId = uuidv7()
   await prisma.tenantRegistryEntry.create({ data: { tenantId, region: 'in-mumbai', lifecycle: 'active' } })
   await prisma.tenant.create({
@@ -142,7 +144,7 @@ async function createTenant(prisma: PrismaClient, name = 'Spice Route Hospitalit
       contactName: 'Test Contact',
       contactEmail: 'contact@test.example',
       contactPhone: '+91 90000 00000',
-      country: 'IN',
+      country,
       status: 'active',
       plan: 'standard',
       billingPeriod: 'monthly',
@@ -232,22 +234,24 @@ describe('/pos/v1 refunds and adjustments (e2e)', () => {
     tenantId: string,
     outletId: string,
     priceMinor: number,
-    opts: { quantity?: number; discountMinor?: number; secondItemPriceMinor?: number; tenders?: (totalMinor: number) => { method: string; amountMinor: number }[] } = {},
+    opts: { quantity?: number; discountMinor?: number; secondItemPriceMinor?: number; counter?: boolean; tenders?: (totalMinor: number) => { method: string; amountMinor: number }[] } = {},
   ): Promise<{ billId: string; orderId: string; orderLineId: string; cashierToken: string; managerPin: string; bill: BillBody }> {
-    const tableId = await createTable(prisma, tenantId, outletId)
     const owner = await createStaff(prisma, tenantId, outletId, 'Asha', { isManager: true }) // #209: refunding needs the Refunds permission
     const managerPin = '1234'
     await createStaff(prisma, tenantId, outletId, 'Meera Manager', { isManager: true, pin: managerPin })
     const itemId = await createItemWithPrice(prisma, tenantId, priceMinor)
 
-    const opened = await authed(request(httpServer).post(`/pos/v1/outlets/${outletId}/tables/${tableId}/order`), owner.token).send()
+    // A pay-first counter order is sent to the kitchen by finalize itself.
+    const opened = opts.counter
+      ? await authed(request(httpServer).post(`/pos/v1/outlets/${outletId}/counter-orders`), owner.token).send()
+      : await authed(request(httpServer).post(`/pos/v1/outlets/${outletId}/tables/${await createTable(prisma, tenantId, outletId)}/order`), owner.token).send()
     const orderId = (opened.body as { id: string }).id
     await authed(request(httpServer).post(`/pos/v1/orders/${orderId}/lines`), owner.token).send({ itemId, quantity: opts.quantity ?? 2 })
     if (opts.secondItemPriceMinor) {
       const secondItemId = await createItemWithPrice(prisma, tenantId, opts.secondItemPriceMinor)
       await authed(request(httpServer).post(`/pos/v1/orders/${orderId}/lines`), owner.token).send({ itemId: secondItemId, quantity: 1 })
     }
-    await authed(request(httpServer).patch(`/pos/v1/orders/${orderId}/status`), owner.token).send({ status: 'sent' })
+    if (!opts.counter) await authed(request(httpServer).patch(`/pos/v1/orders/${orderId}/status`), owner.token).send({ status: 'sent' })
 
     const orderRes = await authed(request(httpServer).get(`/pos/v1/orders/${orderId}`), owner.token)
     const orderLineId = (orderRes.body as OrderBody).lines[0].id
@@ -255,9 +259,10 @@ describe('/pos/v1 refunds and adjustments (e2e)', () => {
     const created = await authed(request(httpServer).post(`/pos/v1/orders/${orderId}/bill`), owner.token).send()
     const billId = (created.body as BillBody).id
     // IN, no tax registration: 5% GST rounded once on the discounted value
-    // (SE-2, #244) - mirrored here so the tender matches exactly.
+    // (SE-2, #244) - mirrored here so the tender matches exactly. AU GST is
+    // inside the price, so the net is what is paid.
     const netMinor = (created.body as BillBody).subtotalMinor - (opts.discountMinor ?? 0)
-    const totalMinor = netMinor + Math.round((netMinor * 5) / 100)
+    const totalMinor = (created.body as BillBody).pricesIncludeTax ? netMinor : netMinor + Math.round((netMinor * 5) / 100)
 
     const finalized = await authed(request(httpServer).post(`/pos/v1/bills/${billId}/finalize`), owner.token).send({
       ...(opts.discountMinor && { discountMinor: opts.discountMinor, discountReason: 'Regular customer' }),
@@ -622,6 +627,140 @@ describe('/pos/v1 refunds and adjustments (e2e)', () => {
       expect(res.status).toBe(404)
 
       expect(await prisma.creditNote.count({ where: { originalBillId: billId } })).toBe(0)
+    })
+  })
+
+  // restiq-backend#259 (AP-se-8): a dish refunded in full is struck through on the kitchen screens.
+  describe('kitchen after a refund (AP-se-8)', () => {
+    interface QueueTicketBody {
+      id: string
+      orderId: string
+      status: 'queued' | 'bumped'
+      lines: { orderLineId: string; voided: boolean }[]
+    }
+    const queue = async (outletId: string, token: string) =>
+      (await authed(request(httpServer).get(`/kitchen/v1/outlets/${outletId}/stations/unrouted/queue`), token).expect(200)).body as QueueTicketBody[]
+    const expoOrderIds = async (outletId: string, token: string) =>
+      ((await authed(request(httpServer).get(`/kitchen/v1/outlets/${outletId}/expo`), token).expect(200)).body as { orderId: string }[]).map((o) => o.orderId)
+    const refund = async (billId: string, token: string, managerPin: string, lines?: { orderLineId: string; quantity: number }[]) =>
+      authed(request(httpServer).post(`/pos/v1/bills/${billId}/refund`), token).send({ managerPin, reason: 'Guest left', ...(lines && { lines }) }).expect(201)
+
+    it('a full refund of a paid counter order voids its queued ticket lines and drops it from expo', async () => {
+      const tenantId = await createTenant(prisma)
+      const outletId = await createOutlet(prisma, tenantId)
+      const { billId, orderId, cashierToken, managerPin } = await setUpFinalizedBill(tenantId, outletId, 10000, { counter: true })
+      expect(await expoOrderIds(outletId, cashierToken)).toEqual([orderId])
+
+      await refund(billId, cashierToken, managerPin)
+
+      // Still on the station queue (the cook bumps it away), every line struck through.
+      const tickets = await queue(outletId, cashierToken)
+      expect(tickets.map((t) => t.orderId)).toEqual([orderId])
+      expect(tickets[0].lines.length).toBeGreaterThan(0)
+      expect(tickets[0].lines.every((l) => l.voided)).toBe(true)
+      expect(await expoOrderIds(outletId, cashierToken)).toEqual([])
+    })
+
+    it('a refund of 1 of 2 units leaves the line cooking; refunding the other unit voids it', async () => {
+      const tenantId = await createTenant(prisma)
+      const outletId = await createOutlet(prisma, tenantId)
+      const { billId, orderId, orderLineId, cashierToken, managerPin } = await setUpFinalizedBill(tenantId, outletId, 10000, { counter: true })
+
+      await refund(billId, cashierToken, managerPin, [{ orderLineId, quantity: 1 }])
+      expect((await queue(outletId, cashierToken))[0].lines).toEqual([expect.objectContaining({ orderLineId, voided: false })])
+      expect(await expoOrderIds(outletId, cashierToken)).toEqual([orderId])
+
+      await refund(billId, cashierToken, managerPin, [{ orderLineId, quantity: 1 }])
+      expect((await queue(outletId, cashierToken))[0].lines).toEqual([expect.objectContaining({ orderLineId, voided: true })])
+      expect(await expoOrderIds(outletId, cashierToken)).toEqual([])
+    })
+
+    it('a refund after the ticket was bumped leaves the finished ticket alone', async () => {
+      const tenantId = await createTenant(prisma)
+      const outletId = await createOutlet(prisma, tenantId)
+      const { billId, orderId, cashierToken, managerPin } = await setUpFinalizedBill(tenantId, outletId, 10000, { counter: true })
+      const [ticket] = await queue(outletId, cashierToken)
+      await authed(request(httpServer).post(`/kitchen/v1/tickets/${ticket.id}/bump`), cashierToken).send().expect(200)
+
+      await refund(billId, cashierToken, managerPin)
+
+      const lines = await prisma.ticketLine.findMany({ where: { ticket: { orderId } } })
+      expect(lines.length).toBeGreaterThan(0)
+      expect(lines.every((l) => !l.voided)).toBe(true)
+    })
+  })
+
+  // restiq-backend#259 (AP-se-22): GST on an AU (tax-inclusive) refund is 1/11 of the money going back.
+  describe('AU GST refunds (AP-se-22)', () => {
+    async function auBill(opts: Parameters<typeof setUpFinalizedBill>[3]) {
+      const tenantId = await createTenant(prisma, 'Sydney Harbour Bistro', 'AU')
+      const outletId = await createOutlet(prisma, tenantId)
+      const set = await setUpFinalizedBill(tenantId, outletId, opts?.quantity === 3 ? 335 : 495, opts)
+      return { tenantId, ...set }
+    }
+    const lineOf = async (orderId: string, unitPriceMinor: bigint) => (await prisma.orderLine.findFirstOrThrow({ where: { orderId, unitPriceMinor } })).id
+    const refundNote = async (billId: string, token: string, managerPin: string, lines?: { orderLineId: string; quantity: number }[]) =>
+      (await authed(request(httpServer).post(`/pos/v1/bills/${billId}/refund`), token).send({ managerPin, reason: 'Refund', ...(lines && { lines }) }).expect(201)).body as CreditNoteBody
+
+    it('refunding A$4.95 of an A$9.95 bill takes 45c GST (1/11), not 44c, and the rest takes the remainder', async () => {
+      const { billId, orderId, cashierToken, managerPin, bill } = await auBill({ quantity: 1, secondItemPriceMinor: 500 })
+      expect(bill).toMatchObject({ subtotalMinor: 995, taxMinor: 90, totalMinor: 995 })
+
+      const first = await refundNote(billId, cashierToken, managerPin, [{ orderLineId: await lineOf(orderId, 495n), quantity: 1 }])
+      expect(first).toMatchObject({ subtotalMinor: 495, taxMinor: 45, totalMinor: 495 })
+      const rest = await refundNote(billId, cashierToken, managerPin)
+      expect(rest).toMatchObject({ subtotalMinor: 500, taxMinor: 45, totalMinor: 500 })
+    })
+
+    it('a whole-bill refund in one note returns exactly the bill tax', async () => {
+      const { billId, cashierToken, managerPin } = await auBill({ quantity: 1, secondItemPriceMinor: 500 })
+      expect(await refundNote(billId, cashierToken, managerPin)).toMatchObject({ subtotalMinor: 995, taxMinor: 90, totalMinor: 995 })
+    })
+
+    it('unit-by-unit refunds never go negative or past the bill tax, and add up to it exactly', async () => {
+      // 3 x 335 = 1005, GST 91.
+      const { billId, orderLineId, cashierToken, managerPin, bill } = await auBill({ quantity: 3 })
+      expect(bill).toMatchObject({ totalMinor: 1005, taxMinor: 91 })
+      const notes: CreditNoteBody[] = []
+      for (let i = 0; i < 3; i++) {
+        notes.push(await refundNote(billId, cashierToken, managerPin, [{ orderLineId, quantity: 1 }]))
+        expect(notes[i].taxMinor).toBeGreaterThanOrEqual(0)
+        expect(notes.reduce((sum, n) => sum + n.taxMinor, 0)).toBeLessThanOrEqual(91)
+      }
+      expect(notes.map((n) => n.taxMinor)).toEqual([30, 31, 30])
+      expect(notes.reduce((sum, n) => sum + n.totalMinor, 0)).toBe(1005)
+    })
+
+    it('a discounted bill refunds exactly what was paid and exactly the bill tax', async () => {
+      // 995 less 100 discount = 895 paid, GST 81.
+      const { billId, orderId, cashierToken, managerPin, bill } = await auBill({ quantity: 1, secondItemPriceMinor: 500, discountMinor: 100 })
+      expect(bill).toMatchObject({ totalMinor: 895, taxMinor: 81 })
+
+      const first = await refundNote(billId, cashierToken, managerPin, [{ orderLineId: await lineOf(orderId, 495n), quantity: 1 }])
+      const rest = await refundNote(billId, cashierToken, managerPin)
+      expect([first.taxMinor, rest.taxMinor]).toEqual([40, 41]) // 445 back -> 40.45, rounded half up to 40
+      expect(first.totalMinor + rest.totalMinor).toBe(895)
+    })
+
+    it('uses the rate the bill was taxed at, not a rate the tenant changed to later', async () => {
+      const { tenantId, billId, orderId, cashierToken, managerPin } = await auBill({ quantity: 1, secondItemPriceMinor: 500 })
+      await prisma.tenantTaxRegistration.create({
+        data: { tenantId, registrationType: 'abn', registrationNumber: `REG-${uuidv7()}`, legalEntityName: 'Bistro Pty Ltd', taxProfile: 'Australia GST', gstRatePercent: 20 },
+      })
+      const first = await refundNote(billId, cashierToken, managerPin, [{ orderLineId: await lineOf(orderId, 495n), quantity: 1 }])
+      const rest = await refundNote(billId, cashierToken, managerPin)
+      expect([first.taxMinor, rest.taxMinor]).toEqual([45, 45])
+    })
+
+    it.each([
+      ['IN composition', 'IN' as const, { taxProfile: 'India GST', registrationType: 'gstin' as const, compositionScheme: true }],
+      ['AU not registered for GST', 'AU' as const, { taxProfile: 'Australia GST', registrationType: 'abn' as const, gstRegistered: false }],
+    ])('%s: refunds carry no tax', async (_label, country, registration) => {
+      const tenantId = await createTenant(prisma, 'No Tax Cafe', country)
+      await prisma.tenantTaxRegistration.create({ data: { tenantId, registrationNumber: `REG-${uuidv7()}`, legalEntityName: 'No Tax Cafe', ...registration } })
+      const outletId = await createOutlet(prisma, tenantId)
+      const { billId, cashierToken, managerPin } = await setUpFinalizedBill(tenantId, outletId, 10000, { quantity: 1, tenders: () => [{ method: 'cash', amountMinor: 10000 }] })
+      expect(await refundNote(billId, cashierToken, managerPin)).toMatchObject({ subtotalMinor: 10000, taxMinor: 0, totalMinor: 10000 })
     })
   })
 })

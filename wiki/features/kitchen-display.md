@@ -47,7 +47,11 @@ tickets, and a later transaction failure rolls back any kitchen writes.
   original fire, `1+` is the Nth batch appended afterwards - the UI renders
   batch `>0` as a separated ADD-ON section. `voided` marks a struck-through
   fired line without deleting the row; **no current caller sets it** - see
-  Key decisions.
+  Key decisions. (Since then two callers do: voiding an order line
+  (`order-lines.service.ts`), and since #259 a refund - every order line
+  refunded in full is voided on tickets still `queued`, so the cook sees VOID.
+  Expo keeps a closed order only while a queued ticket still has a non-voided
+  line.)
 - `TicketEvent` (`ticket_events`): `id, tenantId, ticketId, type
   (bumped|recalled|refired|add_on_fired), occurredAt`. Append-only - this is
   what "recall history" (CAP-4) actually reads from; `Ticket.recallCount`/

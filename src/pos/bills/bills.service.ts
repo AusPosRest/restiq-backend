@@ -41,7 +41,8 @@ import { setTenantContext } from '../tenant-context'
 import { linkedPeripheral, queueFor } from '../device-routing'
 import { localDateKey } from '../clock/clock.util'
 import { assertOwner, loadOrder } from '../orders/orders.service'
-import { buildInvoiceView, commitFinalize, createOrGetBillRecord, createTenderRecord, currencyForCountry, loadBill, loadTenantTaxProfile, lockBill, refreshOpenBillTotals, toBillView } from './bill-core'
+import { buildInvoiceView, commitFinalize, createOrGetBillRecord, createTenderRecord, currencyForCountry, loadBill, loadTenantTaxProfile, lockBill, readStoredTaxBreakdown, refreshOpenBillTotals, toBillView } from './bill-core'
+import { computeTax } from './tax'
 import { BillView, CreditNoteLineView, CreditNoteView, FinalizeBillDto, InvoiceView, PaymentHistoryEntry, PaymentHistoryView, PaymentMethodTotal, PrintJobView, RefundBillDto, RefundDueEntry } from './bills.dtos'
 import { LATE_CAPTURE_REFUND_DUE } from '../payments'
 import type { Prisma } from '../../generated/prisma/client'
@@ -505,20 +506,32 @@ export class BillsService {
 
       // SE-1: refund what was actually paid. The lines above are priced
       // gross (before the bill discount); the credit note's subtotal is that
-      // gross pro-rated by the bill's discount, and its tax pro-rated by the
-      // bill's own stored tax (already on the discounted value - SE-2), so
-      // composition's 0% and AU's inclusive GST need no special case here.
+      // gross pro-rated by the bill's discount. Its tax on a tax-exclusive
+      // (IN) bill is pro-rated by the bill's own stored tax (already on the
+      // discounted value - SE-2), so composition's 0% needs no special case.
       // Both are allocated cumulatively - everything refunded so far,
       // including this note, minus what earlier notes already took, each
       // rounded down - so partial refunds never add up to more than was
       // paid, and refunding the whole bill returns exactly what was paid.
+      // #259 (AP-se-22): on a tax-inclusive (AU) bill the cumulative tax is
+      // instead GST's 1/11 rule (computeTax) on the cumulative money going
+      // back, at the rate the bill was taxed at (its stored breakdown, not the
+      // tenant's rate today), capped at the bill's tax; refunding the last
+      // unit takes exactly the bill's tax, so the notes always add up to it.
       const billNetMinor = bill.subtotalMinor - (bill.discountMinor ?? 0n)
       const prorate = (cumGross: bigint, of: bigint) => (bill.subtotalMinor === 0n ? 0n : (cumGross * of) / bill.subtotalMinor)
       const prior = await tx.creditNote.aggregate({ where: { originalBillId: billId }, _sum: { subtotalMinor: true, taxMinor: true } })
       const cumGrossMinor = priorGrossMinor + grossMinor
       const maxZero = (n: bigint) => (n > 0n ? n : 0n)
       const subtotalMinor = maxZero(prorate(cumGrossMinor, billNetMinor) - (prior._sum.subtotalMinor ?? 0n))
-      const taxMinor = maxZero(prorate(cumGrossMinor, bill.taxMinor) - (prior._sum.taxMinor ?? 0n))
+      let cumTaxMinor = prorate(cumGrossMinor, bill.taxMinor)
+      if (bill.pricesIncludeTax) {
+        const cumNetMinor = (prior._sum.subtotalMinor ?? 0n) + subtotalMinor
+        const gstRatePercent = readStoredTaxBreakdown(bill.taxBreakdown).lines[0]?.ratePercent
+        const gstMinor = computeTax({ country: 'AU', taxProfile: '', compositionScheme: false, gstRegistered: true, gstRatePercent, subtotalMinor: cumNetMinor }).taxMinor
+        cumTaxMinor = cumGrossMinor === bill.subtotalMinor || gstMinor > bill.taxMinor ? bill.taxMinor : gstMinor
+      }
+      const taxMinor = maxZero(cumTaxMinor - (prior._sum.taxMinor ?? 0n))
 
       // restiq-backend#221: each line's amount is its share of that net
       // subtotal (gross-weighted, rounded down), the last line taking the
@@ -562,6 +575,15 @@ export class BillsService {
         },
         include: CREDIT_NOTE_INCLUDE,
       })
+
+      // #259 (AP-se-8): a dish now refunded in full (every unit, across all
+      // credit notes - combo items come along with their parent) is struck
+      // through as VOID on a ticket the kitchen is still cooking, exactly as
+      // voidLine() does; a bumped ticket is finished food and is left alone.
+      const fullyRefunded = targets.map((t) => t.orderLineId).filter((id) => refundedSoFar.get(id) === orderLineById.get(id)?.quantity)
+      if (fullyRefunded.length > 0) {
+        await tx.ticketLine.updateMany({ where: { orderLineId: { in: fullyRefunded }, ticket: { status: 'queued' } }, data: { voided: true } })
+      }
 
       const view = toCreditNoteView(created, bill.pricesIncludeTax)
       // #284/#286: a card refund on a bill paid through Stripe (on the guest's phone, or on a card reader)

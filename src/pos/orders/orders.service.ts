@@ -7,7 +7,8 @@
 import { BadRequestException, ConflictException, ForbiddenException, Injectable, NotFoundException } from '@nestjs/common'
 import type { Order, Prisma } from '../../generated/prisma/client'
 import { KitchenTicketsService } from '../../kitchen'
-import { detachStaleTableOrder, liveSince, PosPrincipal, RegionRegistryService, reserveTokenNumber, uuidv7 } from '../../platform'
+import { pinStatus } from '../../admin'
+import { detachStaleTableOrder, liveSince, PosPrincipal, RegionRegistryService, reserveTokenNumber, roleHasPermission, uuidv7 } from '../../platform'
 import type { Replay } from '../sync/replay'
 import { OrderLineView, OrderView, TableMapEntry, TransferOrderDto, UpdateOrderStatusDto } from './orders.dtos'
 
@@ -411,6 +412,12 @@ export class OrdersService {
    * Explicit handoff, callable by anyone (not CAP-8-gated - this is a normal
    * shift-change/handoff, not one of the six manager-authorised actions).
    * The old owner cannot mutate the order once this completes.
+   *
+   * #259 (AP-se-12): the new owner must be able to work the order - a role
+   * that takes orders, this outlet, and (unless they are the caller, who is
+   * signed in) an active PIN. An order handed to an Accountant could not be
+   * edited or discarded by anyone until someone took it over again. A replayed
+   * (offline hub) handover is kept as it was made.
    */
   async transfer(staff: PosPrincipal, orderId: string, dto: TransferOrderDto, replay?: Pick<Replay, 'at'>): Promise<OrderView> {
     const plane = this.plane()
@@ -421,9 +428,19 @@ export class OrdersService {
         throw new ConflictException({ code: 'conflict', message: 'This order is closed and has no owner to transfer' })
       }
 
-      const newOwner = await tx.staffUser.findUnique({ where: { id: dto.newOwnerStaffId } })
+      const newOwner = await tx.staffUser.findUnique({ where: { id: dto.newOwnerStaffId }, include: { role: { select: { name: true } } } })
       if (!newOwner || newOwner.tenantId !== staff.tenantId) {
         throw new BadRequestException({ code: 'validation_failed', message: 'No such staff member for this tenant' })
+      }
+      if (!replay) {
+        const why = !roleHasPermission(newOwner.role.name, 'take_orders')
+          ? `${newOwner.name} (${newOwner.role.name}) can't take orders`
+          : newOwner.outletIds.length > 0 && !newOwner.outletIds.includes(order.outletId)
+            ? `${newOwner.name} isn't set up to work at this outlet`
+            : newOwner.id !== staff.id && pinStatus(newOwner) !== 'active'
+              ? `${newOwner.name} has no active PIN`
+              : null
+        if (why) throw new BadRequestException({ code: 'owner_not_eligible', message: `${why} - choose someone else` })
       }
 
       const updated = await tx.order.update({ where: { id: orderId }, data: { ownerId: dto.newOwnerStaffId } })

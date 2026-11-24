@@ -378,6 +378,39 @@ describe('/pos/v1 table map and order ownership (e2e)', () => {
       expect(auditRow).not.toBeNull()
     })
 
+    // #259 (AP-se-12): an order can only be handed to someone who can work it.
+    it('refuses a handover to someone who cannot work the order: wrong role, another outlet, or no active PIN', async () => {
+      const tenantId = await createTenant(prisma)
+      const outletId = await createOutlet(prisma, tenantId)
+      const otherOutletId = await createOutlet(prisma, tenantId)
+      const tableId = await createTable(prisma, tenantId, outletId)
+      const owner = await createStaff(prisma, tenantId, 'Asha')
+      const order = (await authed(request(httpServer).post(`/pos/v1/outlets/${outletId}/tables/${tableId}/order`), owner.token).send()).body as OrderBody
+      const role = async (name: string) => (await prisma.role.upsert({ where: { tenantId_name: { tenantId, name } }, update: {}, create: { tenantId, name, isSystem: true, isManager: false } })).id
+      const person = async (name: string, roleName: string, extra: { pinHash?: string; pinRevokedAt?: Date; outletIds?: string[] } = {}) =>
+        (await prisma.staffUser.create({ data: { tenantId, roleId: await role(roleName), name, pinHash: 'set', ...extra } })).id
+      const handTo = (newOwnerStaffId: string) => authed(request(httpServer).post(`/pos/v1/orders/${order.id}/transfer`), owner.token).send({ newOwnerStaffId })
+
+      const refused: Array<[string, RegExp]> = [
+        [await person('Meera', 'Accountant'), /Meera \(Accountant\) can't take orders/],
+        [await person('Kiran', 'Kitchen'), /Kiran \(Kitchen\) can't take orders/],
+        [await person('Ravi', 'Waiter', { outletIds: [otherOutletId] }), /Ravi isn't set up to work at this outlet/],
+        [await person('Sunil', 'Waiter', { pinRevokedAt: new Date() }), /Sunil has no active PIN/],
+        [(await prisma.staffUser.create({ data: { tenantId, roleId: await role('Waiter'), name: 'Neha' } })).id, /Neha has no active PIN/],
+      ]
+      for (const [staffId, message] of refused) {
+        const res = await handTo(staffId)
+        expect(res.status).toBe(400)
+        expect((res.body as ErrorBody).error.code).toBe('owner_not_eligible')
+        expect((res.body as ErrorBody).error.message).toMatch(message)
+      }
+      expect((await prisma.order.findUniqueOrThrow({ where: { id: order.id } })).ownerId).toBe(owner.id)
+
+      // A waiter with an active PIN who works here (assigned to this outlet, or to every outlet) is fine.
+      const here = await handTo(await person('Vikram', 'Waiter', { outletIds: [outletId] }))
+      expect(here.status).toBe(201)
+    })
+
     it('rejects transferring to a staff member from another tenant', async () => {
       const tenantId = await createTenant(prisma)
       const otherTenantId = await createTenant(prisma, 'Curry Leaf Kitchens')
