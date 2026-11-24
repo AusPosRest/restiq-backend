@@ -175,7 +175,8 @@ export class PaymentIntentsService {
         if (outletTerminals === 0) {
           throw new ConflictException({
             code: 'no_terminal',
-            message: 'No card terminal is set up for this till. Take the card on your own machine and record it as External, or choose Cash or UPI.',
+            // #324: UPI is named only where it exists.
+            message: `No card terminal is set up for this till. Take the card on your own machine and record it as External, or choose ${currency === 'INR' ? 'Cash or UPI' : 'Cash'}.`,
           })
         }
       }

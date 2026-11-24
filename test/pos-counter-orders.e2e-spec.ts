@@ -317,7 +317,9 @@ describe('/pos/v1 QSR counter and token mode (e2e)', () => {
       expect((finalized.body as BillBody).subtotalMinor).toBe(30000)
     })
 
-    it('prices a counter order at the item\'s takeaway price, a table order at its dine-in price (restiq-backend#208, SE-8)', async () => {
+    // #324 (Q11, one price for every channel): the tile and the line use the same price, even for a dish
+    // that still has a takeaway price of its own. Supersedes #208's takeaway-first rule for counter orders.
+    it('charges a counter line the price the menu tile shows, ignoring a separate takeaway price', async () => {
       const tenantId = await createTenant(prisma)
       const outletId = await createOutlet(prisma, tenantId)
       const staff = await createStaff(prisma, tenantId, outletId)
@@ -325,9 +327,14 @@ describe('/pos/v1 QSR counter and token mode (e2e)', () => {
       await prisma.itemPrice.create({ data: { tenantId, itemId, priceMinor: 18000n, currency: 'INR', channel: 'takeaway' } })
       const order = (await authed(request(httpServer).post(`/pos/v1/outlets/${outletId}/counter-orders`), staff.token).send()).body as OrderBody
 
+      const menu = await authed(request(httpServer).get('/pos/v1/menu'), staff.token)
+      expect(menu.status).toBe(200)
+      const tile = (menu.body as { items: Array<{ id: string; priceMinor: number | null }> }).items.find((item) => item.id === itemId)
+      expect(tile?.priceMinor).toBe(20000)
+
       const res = await authed(request(httpServer).post(`/pos/v1/orders/${order.id}/lines`), staff.token).send({ itemId, quantity: 1 })
       expect(res.status).toBe(201)
-      expect((res.body as OrderBody).lines[0]?.unitPriceMinor).toBe(18000)
+      expect((res.body as OrderBody).lines[0]?.unitPriceMinor).toBe(tile?.priceMinor)
     })
 
     it('rings up and settles a counter order in one continuous sequence: create -> add lines -> bill -> finalize', async () => {

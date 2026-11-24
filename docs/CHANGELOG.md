@@ -30,6 +30,8 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 - **Dev environment** (#280): Fly app `restiq-backend-dev` (`fly.dev.toml`, region iad, own Neon database and secrets, Stripe sandbox keys only) behind https://dev.niftypos.com.au. `pnpm stripe:check` verifies the Stripe keys in `.env` (refuses live keys; creates and cancels a test PaymentIntent).
 
 ### Changed
+- **One price for every channel on the till** (#324, web #391, decision Q11): a counter (table-less) order line is priced on the same channel as the `GET /pos/v1/menu` tile (`dine_in`, falling back to the channel-less price), so the price shown is the price charged. This supersedes #208's takeaway-first rule: a dish that still has its own `takeaway` price no longer rings up at it on the counter. The owner console already sets one price for every channel (#272).
+- **`no_terminal` message names UPI only in India** (#324): `POST /pos/v1/bills/:id/intents` 409 `no_terminal` ends "...or choose Cash or UPI." for an Indian tenant and "...or choose Cash." for any other.
 - **pnpm pinned to 10.34.4** (#276): `packageManager` in package.json, so the Docker image's corepack stops pulling the newest pnpm, which ignored the build-script allow-list and failed the Fly build.
 - **Production can boot before Mailjet and an alert webhook exist** (#274): `MAIL_PROVIDER=simulator` is accepted (reset and invite mail goes to the ops dev inbox), and `ALERT_WEBHOOK_URL=off` means log-only alerts. `log` mail and an unset webhook still refuse to boot.
 - **Two trusted proxy hops** (#272): `fly.toml` sets `TRUST_PROXY_HOPS=2`, because `api.dailypos.shop` now goes through Cloudflare and then Fly. `req.ip` stays the real client instead of a shared Cloudflare address.
