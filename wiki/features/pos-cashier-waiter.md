@@ -704,6 +704,10 @@ against a real Postgres test DB)
   this story's scope per its "reuse story 4's endpoints unchanged" brief.
   Documented here as a known, deliberate gap for a future pricing story,
   not fixed silently.
+  **Since #324 (decision Q11, one price for every channel):** #208 had made
+  counter lines try `takeaway` first; that is gone again. Every POS order line
+  is priced on `ORDER_PRICE_CHANNEL = 'dine_in'`, the channel the menu tile
+  shows, so tile price = price charged.
 
 ### Test coverage (`test/pos-counter-orders.e2e-spec.ts`, 6 tests, e2e
 against a real Postgres test DB)

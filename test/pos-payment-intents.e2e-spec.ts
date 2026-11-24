@@ -315,6 +315,14 @@ describe('/pos/v1 payment intents - simulated card terminal (e2e)', () => {
       expect(none.status).toBe(409)
       expect((none.body as ErrorBody).error.code).toBe('no_terminal')
       expect((none.body as ErrorBody).error.message).toContain('No card terminal is set up')
+      // #324: UPI is named only where it exists (India).
+      expect((none.body as ErrorBody).error.message).toMatch(/or choose Cash or UPI\.$/)
+      await prisma.tenant.update({ where: { id: tenantId }, data: { country: 'AU' } })
+      const australia = await sendToTerminal(billId, token, 100)
+      expect(australia.status).toBe(409)
+      expect((australia.body as ErrorBody).error.message).toMatch(/or choose Cash\.$/)
+      expect((australia.body as ErrorBody).error.message).not.toContain('UPI')
+      await prisma.tenant.update({ where: { id: tenantId }, data: { country: 'IN' } })
 
       // A terminal linked to a different till does not serve this one either.
       const otherPos = await prisma.device.create({

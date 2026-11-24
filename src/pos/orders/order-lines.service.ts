@@ -26,14 +26,11 @@ import { lockBill } from '../bills'
 import { ACTIVE_INTENT_STATUSES } from '../payments/intent-core'
 import { assertOwner, buildOrderView, loadOrder, Tx } from './orders.service'
 
-// A table order is dine-in; a counter (token) order has no table and is
-// priced on the takeaway channel first (restiq-backend#208, SE-8) - Order
-// has no channel column, so the table is what tells them apart. Each channel
-// falls back to the item's channel-less price; a counter order whose item is
-// priced for dine-in only still rings up at that dine-in price.
-function orderPriceChannels(order: Order): PriceChannel[] {
-  return order.tableId === null ? ['takeaway', 'dine_in'] : ['dine_in']
-}
+// One price for every channel (#324, product decision Q11): a table order and a
+// counter (token) order are both priced on the channel the POS menu tile shows
+// (menu.service.ts's MENU_PRICE_CHANNEL), so the price on the tile is the price
+// charged. Supersedes #208's takeaway-first rule for counter orders.
+const ORDER_PRICE_CHANNEL: PriceChannel = 'dine_in'
 
 type ItemForOrderLine = Prisma.MenuItemGetPayload<{
   include: {
@@ -223,10 +220,9 @@ export class OrderLinesService {
       assertModifierSelectionValid(item, modifierIds)
 
       // A replayed line keeps the price the hub charged (see the doc comment above); ??= then skips the lookup.
-      let price: { priceMinor: bigint } | null = replay ? { priceMinor: replay.unitPriceMinor } : null
-      for (const channel of orderPriceChannels(order)) {
-        price ??= await resolveCurrentPrice(tx, { tenantId: staff.tenantId, itemId: dto.itemId, variantId: dto.variantId ?? null, channel, outletId: order.outletId })
-      }
+      const price: { priceMinor: bigint } | null = replay
+        ? { priceMinor: replay.unitPriceMinor }
+        : await resolveCurrentPrice(tx, { tenantId: staff.tenantId, itemId: dto.itemId, variantId: dto.variantId ?? null, channel: ORDER_PRICE_CHANNEL, outletId: order.outletId })
       if (!price) {
         throw new BadRequestException({ code: 'no_price', message: 'No current price is configured for this item' })
       }
