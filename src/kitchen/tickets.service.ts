@@ -310,7 +310,9 @@ export class KitchenTicketsService {
           tickets: { some: { firedAt: { gte: since } } },
           OR: [
             { status: 'sent' },
-            { tickets: { some: { status: 'queued' } } },
+            // #259 (AP-se-8): a queued ticket whose every line is voided (e.g.
+            // the dish was refunded) has nothing left to cook or serve.
+            { tickets: { some: { status: 'queued', lines: { some: { voided: false } } } } },
             {
               bill: { status: 'finalized', creditNotes: { none: {} } },
               // `every` alone is true for an order with no tickets - require at least one.

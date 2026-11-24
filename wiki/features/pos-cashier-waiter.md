@@ -194,6 +194,12 @@ guesses never tripped it.
     `audit_events` row (`order.ownership_transferred`) with a fixed
     placeholder reason when the caller omits one, since `audit_events.reason`
     is `NOT NULL`. The old owner cannot mutate the order once this completes.
+    Since #259 the new owner must be able to work the order: a role with
+    `take_orders`, set up for the order's outlet, and (unless they are the
+    caller) an active PIN - otherwise 400 `owner_not_eligible` with a plain
+    reason. A replayed offline handover is kept as it was made.
+  - `GET /pos/v1/shifts/current?outletId=` answers 204 with no body when no
+    shift is open (#259; it was 404). An unknown outlet is still refused.
 
 ### Data model
 

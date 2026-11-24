@@ -1,4 +1,5 @@
-import { Body, Controller, Get, HttpCode, Param, Post, Query } from '@nestjs/common'
+import { Body, Controller, Get, HttpCode, Param, Post, Query, Res } from '@nestjs/common'
+import type { Response } from 'express'
 import { AnyStaff, CurrentStaff, PosPrincipal, RequirePermission } from '../../platform'
 import { CloseShiftDto, LogCashMovementDto, OpenShiftDto } from './shifts.dtos'
 import { ShiftsService, ShiftView } from './shifts.service'
@@ -16,10 +17,14 @@ export class PosShiftsController {
 
   // Lets a reloaded/rejoined session find the outlet's open shift without
   // already knowing its id.
+  // #259 (AP-se-14): no open shift answers 204 with no body, not 404 - the till
+  // asks on every screen load, and "none open" is not an error.
   @Get('current')
   @AnyStaff()
-  getCurrent(@CurrentStaff() staff: PosPrincipal, @Query('outletId') outletId: string): Promise<ShiftView> {
-    return this.shifts.getCurrentShift(staff, outletId)
+  async getCurrent(@CurrentStaff() staff: PosPrincipal, @Query('outletId') outletId: string, @Res({ passthrough: true }) res: Response): Promise<ShiftView | undefined> {
+    const shift = await this.shifts.getCurrentShift(staff, outletId)
+    if (!shift) res.status(204)
+    return shift ?? undefined
   }
 
   @Get(':id')

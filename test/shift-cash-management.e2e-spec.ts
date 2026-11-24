@@ -593,13 +593,18 @@ describe('/pos/v1/shifts (e2e)', () => {
   })
 
   describe('GET /pos/v1/shifts/current', () => {
-    it('404s when there is no open shift for the outlet', async () => {
+    // #259 (AP-se-14): "no open shift" is a normal state the till asks about on every screen, not an error.
+    it('answers 204 with no body when there is no open shift for the outlet, and still refuses an unknown outlet', async () => {
       const tenantId = await createTenant(prisma)
       const outletId = await createOutlet(prisma, tenantId)
       const { token } = await createCashier(prisma, tenantId)
 
       const res = await authed(request(httpServer).get(`/pos/v1/shifts/current?outletId=${outletId}`), token)
-      expect(res.status).toBe(404)
+      expect(res.status).toBe(204)
+      expect(res.text).toBe('')
+
+      const unknown = await authed(request(httpServer).get(`/pos/v1/shifts/current?outletId=${uuidv7()}`), token)
+      expect(unknown.status).toBe(400)
     })
   })
 })
